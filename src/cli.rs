@@ -108,6 +108,13 @@ pub fn command() -> Command {
             .subcommand(Command::new("stop").about("Stop one agent without closing its task.")
                 .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
             )
+            .subcommand(
+                Command::new("view")
+                    .about("Open an agent's live terminal in yours; detach to leave it running.")
+                    .long_about("Open an agent's live terminal in yours; detach to leave it running.\n\nYou see what the agent sees and can type to it. Detach with the tmux prefix, then `d`; inside your own tmux, press the prefix twice.\nOmnigent parks idle agents: one with no running terminal must be woken by a message first.")
+                    .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
+                    .arg(Arg::new("read_only").long("read-only").action(ArgAction::SetTrue).help("only watch; keys are not sent to the agent")),
+            )
             .subcommand(Command::new("compact").about("Tell an agent to compact its context by sending it `/compact`.")
                 .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
             )

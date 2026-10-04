@@ -6,9 +6,12 @@
 mod actions;
 mod bridge;
 mod cli;
+mod log;
+mod omnigent;
 mod settings;
 mod taskfile;
 mod tasks;
+mod view;
 
 use std::ffi::CString;
 use std::process::ExitCode;
@@ -151,13 +154,31 @@ fn main() -> ExitCode {
         println!("{parsed}");
         return ExitCode::SUCCESS;
     }
+    let values: Value = serde_json::from_str(&parsed).unwrap_or_default();
+    if (values["group"].as_str(), values["action"].as_str()) == (Some("agent"), Some("view")) {
+        log::record(&parsed, "started");
+        let read_only = values["read_only"].as_bool().unwrap_or(false);
+        eprintln!(
+            "{}",
+            view::open(values["who"].as_str().unwrap_or_default(), read_only)
+        );
+        return ExitCode::FAILURE;
+    }
+    let long_running = values["action"] == "watch";
+    if long_running {
+        log::record(&parsed, "started");
+    }
     pyo3::append_to_inittab!(amh_rs);
     force_utf8();
-    match Python::attach(|py| run_python(py, &parsed)) {
-        Ok(code) => ExitCode::from(code),
+    let code = match Python::attach(|py| run_python(py, &parsed)) {
+        Ok(code) => code,
         Err(error) => {
             eprintln!("amh: the embedded Python failed: {error}");
-            ExitCode::FAILURE
+            1
         }
+    };
+    if !parsed.is_empty() {
+        log::record(&parsed, &format!("exit={code}"));
     }
+    ExitCode::from(code)
 }

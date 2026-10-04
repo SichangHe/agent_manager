@@ -72,3 +72,11 @@ pub fn load() -> Result<BTreeMap<String, String>, String> {
     }
     Ok(values)
 }
+
+/// The work-log root holding task files, `TODO.md`, and stored human mail.
+pub fn work_logs(values: &BTreeMap<String, String>) -> PathBuf {
+    match values.get("work_logs") {
+        Some(root) if !root.is_empty() => PathBuf::from(root),
+        _ => PathBuf::from(env::var_os("HOME").unwrap_or_default()).join("work_logs"),
+    }
+}

@@ -27,10 +27,7 @@ struct Store {
 impl Store {
     fn open() -> PyResult<Self> {
         let values = settings::load().map_err(|message| refuse(format!("amh: {message}")))?;
-        let root = match values.get("work_logs") {
-            Some(root) if !root.is_empty() => PathBuf::from(root),
-            _ => PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join("work_logs"),
-        };
+        let root = settings::work_logs(&values);
         Ok(Self {
             root,
             state_dir: settings::state_dir(),
