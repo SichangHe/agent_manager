@@ -55,7 +55,7 @@ modules
 - agents (`src/omnigent.rs`, Rust): every agent is an Omnigent session, reached as JSON over HTTP on the local server
     - 🧑 "the Rust port would only support Omnigent, not tmux": no tmux launch, paste, or status; an address that is not `omnigent://ID` is reported as not reachable
     - `send`: one message event; a multi-line message is followed by one typed line, because Claude Code treats multi-line input as pasted text and does not act on it alone
-    - `classify`: pure; `running`, `ready` (idle, also when Omnigent has parked the runner), `error` (failed, with the harness error), `missing`
+    - `classify`: pure; `running`, `ready` (idle, also when Omnigent has parked the runner), `stuck` (the tool waits on an unanswered prompt, so the session reads no messages), `error` (failed, with the harness error), `missing`
     - `launch`: needs exactly one `TOOL-native-ui` agent and one online host; every tool runs with no sandbox and no permission prompts; waits up to 90 s for the runner
     - `stop`, `saw_message` (did the session's history take the message), `own_address` (the caller's session variable), `launch_default` (model and effort per tool, `[launch.TOOL]` in `config.toml`)
 - action log (`src/log.rs`, Rust): every `amh` run appends one line to `amh-actions.log` in the state folder: time, caller (Omnigent session, else tmux pane, else user), exit status, and the parsed command line
@@ -80,8 +80,9 @@ modules
             - no email from that task within 15 min -> the agent is reminded; within 30 min -> its manager is told and the human is emailed
             - human notices are sent once per message and outcome, keys in `amh-told-human.txt`
     - nudges: idle agent with open items is reminded at most every 30 min
-    - agent problems (`missing`, `error`): each is reported once, naming the task file, tool, address, manager, and the harness error
-        - to the task's manager; for `error` also by email to the human on the task's thread
+    - agent problems (`missing`, `error`, `stuck`): each is reported once, naming the task file, tool, address, manager, and the harness error
+        - to the task's manager; for `error` and `stuck` also by email to the human on the task's thread
+        - mail for a `missing` or `stuck` agent goes to its manager instead
         - reported keys live in `amh-problem-notices.txt`; a problem that goes away is forgotten, so a recurrence is reported again
         - nothing is reported while Omnigent is unreachable
 - `guest`: guest mailbox; mail from `AMH_GUEST_ADDRESS` with SPF pass is stored under `guest_NAME_manager_mail/`, a dedicated agent (task `guest_NAME.md`, NAME from `AMH_GUEST_NAME`) is started or reused, and it answers with `amh tell guest`

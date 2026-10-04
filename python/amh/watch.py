@@ -115,8 +115,8 @@ def deliver_pending(config: Config, failed_at: dict[str, float]) -> None:
                 break
             try:
                 state, evidence = agents.status(config, target)
-                if state == "missing":
-                    raise agents.AgentError(f"the agent is missing: {evidence}")
+                if state in ("missing", "stuck"):
+                    raise agents.AgentError(f"the agent is {state}: {evidence}")
                 agents.send(config, target, text)
             except (agents.AgentError, OSError) as error:
                 log(f"delivery of a block in {task.name} to {target} failed: {error}")
@@ -201,8 +201,8 @@ def failure_text(config: Config, task: Task, problem: str, error: str) -> str:
     """Say in plain words which task's agent has which problem."""
     # 🧑 “This message sucks. I don’t know the task file. Has been recurring.”
     manager = next((other.name for other in taskfile.active_tasks(config) if other.address == task.fields.get("managerat")), task.fields.get("managerat", "none"))
-    what = "has failed and is not working any more" if problem == "error" else "is gone: nothing runs at its address"
-    return f"The agent working on task file {task.name} {what}.\nTool: {task.fields.get('tool', 'unknown')}, running at {task.address}\nIts manager: {manager}\nOpen items on the task: {len(task.items)}\n" + (f"The error its harness reported:\n{error}\n" if error else "")
+    what = {"error": "has failed and is not working any more", "stuck": "is stuck: its tool waits for someone to answer a prompt, and it reads no messages until then"}.get(problem, "is gone: nothing runs at its address")
+    return f"The agent working on task file {task.name} {what}.\nTool: {task.fields.get('tool', 'unknown')}, running at {task.address}\nIts manager: {manager}\nOpen items on the task: {len(task.items)}\n" + (f"{'The prompt it waits on' if problem == 'stuck' else 'The error its harness reported'}:\n{error}\n" if error else "")
 
 
 def nudge(config: Config, told_at: dict[tuple[str, str], float]) -> None:
@@ -222,7 +222,7 @@ def nudge(config: Config, told_at: dict[tuple[str, str], float]) -> None:
                 except agents.AgentError as error:
                     log(f"reminder to {task.name} failed: {error}")
             continue
-        error = " ".join(evidence.partition("last_task_error=")[2].split("; pane_tail:", 1)[0].split()) if problem == "error" else ""
+        error = " ".join(evidence.partition("last_task_error=" if problem == "error" else "waiting_on=")[2].split("; pane_tail:", 1)[0].split()) if problem in ("error", "stuck") else ""
         key = f"{task.name} {task.address} {problem} {error[:200]}"
         now.add(key)
         if key in before:
@@ -231,7 +231,7 @@ def nudge(config: Config, told_at: dict[tuple[str, str], float]) -> None:
         text = failure_text(config, task, problem, error)
         by_manager.setdefault(task.fields.get("managerat", ""), []).append(text)
         # 🧑 "Harness errors should directly email me too"
-        if problem == "error":
+        if problem in ("error", "stuck"):
             try:
                 _ = mail.send(config, task.tag, "", text + "\nIts manager has been told to handle it.\n", "amh watcher")
             except Exception as failure:

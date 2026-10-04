@@ -116,7 +116,7 @@ fn shown(value: &Value) -> String {
     }
 }
 
-/// Classify a session as `running`, `ready` (idle), `error`, or `missing`, with one line of evidence. Pure.
+/// Classify a session as `running`, `ready` (idle), `stuck` (waiting on an unanswered prompt), `error`, or `missing`, with one line of evidence. Pure.
 pub fn classify(session: &Value) -> (&'static str, String) {
     let state = session["status"].as_str().unwrap_or_default();
     let evidence = format!(
@@ -131,6 +131,24 @@ pub fn classify(session: &Value) -> (&'static str, String) {
             .take(300)
             .collect();
         return ("error", format!("{evidence} last_task_error={error}"));
+    }
+    // A session waiting for someone to answer a prompt reads no messages until it is answered.
+    if let Some(prompt) = session["pending_elicitations"]
+        .as_array()
+        .and_then(|pending| pending.first())
+    {
+        let message = shown(&prompt["params"]["message"]).replace("**", "");
+        let preview: String = shown(&prompt["params"]["content_preview"])
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .chars()
+            .take(200)
+            .collect();
+        return (
+            "stuck",
+            format!("{evidence} waiting_on={message}: {preview}"),
+        );
     }
     // Omnigent takes an idle session's runner offline and brings it back on the next message, so that session is `ready`.
     let parked = state == "idle" && session["host_online"] == true;

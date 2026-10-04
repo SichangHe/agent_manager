@@ -147,7 +147,7 @@ def problems(config: Config) -> list[tuple[Task, str, str]]:
             continue
         state, evidence = agents.status(config, task.address)
         waiting = task.fields["status"] == "long_running" and "blocked_on" in task.fields
-        if state in ("missing", "error") or (state == "ready" and task.items and not waiting):
+        if state in ("missing", "error", "stuck") or (state == "ready" and task.items and not waiting):
             found.append((task, "idle with open items" if state == "ready" else state, evidence))
     return found
 
