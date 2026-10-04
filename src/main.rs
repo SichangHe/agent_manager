@@ -7,6 +7,7 @@ mod actions;
 mod bridge;
 mod cli;
 mod log;
+mod mail;
 mod omnigent;
 mod settings;
 mod taskfile;

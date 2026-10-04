@@ -1,19 +1,16 @@
 """End-to-end checks of `amh` on a temporary copy of the work-log root; prints only failures.
 
-Run: `/usr/bin/python3 test_amh.py`. Nothing real is touched: Omnigent, IMAP, and SMTP are replaced by fakes,
-and settings come from a temporary `env.toml`.
+Run: `/usr/bin/python3 test_amh.py`. Nothing real is touched: Omnigent and the mail network calls are replaced by fakes,
+and settings come from a temporary `env.toml`. Emails are built and parsed by the real Rust code.
 """
 
 from __future__ import annotations
 
 import contextlib
-import imaplib
 import io
 import os
 import random
-import re
 import shutil
-import smtplib
 import subprocess
 import sys
 import tempfile
@@ -124,73 +121,27 @@ def email(sender: str, subject: str, body: str, message_id: str, image: bool = F
 
 
 class FakeBox:
-    """An IMAP mailbox holding raw emails by uid; answers the few commands `amh` uses."""
+    """Stands for the logged-in mailbox handle: raw emails by uid, read by the real parser."""
 
     def __init__(self, raws: dict[str, bytes]) -> None:
-        self.raws, self.seen, self.moved = raws, set[str](), list[str]()
+        self.raws, self.seen = raws, set[str]()
 
-    def select(self, _folder: str = "INBOX", readonly: bool = False) -> tuple[str, list[bytes]]:
-        self.readonly = readonly
-        return "OK", [b""]
+    def unseen_from(self, sender: str) -> list[tuple[str, bytes]]:
+        return [(uid, raw) for uid, raw in self.raws.items() if uid not in self.seen and mail.parse(raw).sender == sender]
 
-    def uid(self, command: str, *args: str | bytes) -> tuple[str, list[object]]:
-        if command == "search":
-            words = [arg for arg in args if isinstance(arg, str)]
-            sender = words[words.index("FROM") + 1].strip('"') if "FROM" in words else ""
-            tags = [found for word in words for found in re.findall(r"\[[^\]]+\]", word)]
-            hits = []
-            for uid, raw in self.raws.items():
-                parsed = message_from_bytes(raw, policy=policy.default)
-                if ("UNSEEN" not in words or uid not in self.seen) and sender in str(parsed["From"]) and all(tag in str(parsed["Subject"]) for tag in tags):
-                    hits.append(uid)
-            return "OK", [" ".join(hits).encode()]
-        uids = (args[0].decode() if isinstance(args[0], bytes) else args[0]).split(",")
-        if command == "fetch":
-            parts: list[object] = []
-            for uid in uids:
-                parts += [(f"1 (UID {uid} BODY[] {{{len(self.raws[uid])}}}".encode(), self.raws[uid]), b")"]
-            return "OK", parts
-        if command == "store":
-            self.seen.update(uids)
-        elif command == "move":
-            self.moved += uids
-        return "OK", [b""]
-
-    def login(self, user: str, password: str) -> None:
-        self.user = (user, password)
-
-    def shutdown(self) -> None:
-        pass
+    def mark_read(self, uid: str) -> None:
+        self.seen.add(uid)
 
 
-smtp_out: list[EmailMessage] = []
-
-
-class FakeSmtp:
-    def __init__(self, *_args: object, **_kwargs: object) -> None:
-        pass
-
-    def __enter__(self) -> FakeSmtp:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        pass
-
-    def login(self, *_args: object) -> None:
-        pass
-
-    def send_message(self, message: EmailMessage) -> None:
-        smtp_out.append(message)
+smtp_out: list[tuple[str, EmailMessage]] = []
 
 
 def forbidden(*_args: object, **_kwargs: object) -> None:
     raise AssertionError("a test reached a real agent or mailbox")
 
 
-agent_inbox = FakeBox({})
-human_inbox = FakeBox({})
-smtplib.SMTP_SSL = FakeSmtp  # type: ignore[misc,assignment]
-imaplib.IMAP4_SSL = lambda host, timeout: {"imap.gmail.com": agent_inbox, "imap.human.test": human_inbox}[host]  # type: ignore[misc,assignment]
+amh_rs.mail_connect = amh_rs.mail_send = amh_rs.mail_unread = amh_rs.mail_deliver = forbidden
+mail.deliver = lambda to, raw: smtp_out.append((to, message_from_bytes(raw, policy=policy.default)))  # type: ignore[assignment,arg-type]
 time.sleep = lambda _s: None
 
 
@@ -227,35 +178,33 @@ def test_pending_blocks() -> None:
     check(taskfile.pending_blocks("text (pending) inline\n") == [], "an inline marker is not a block")
 
 
-def test_transport() -> None:
-    """The real mail senders, on fake IMAP and SMTP; the Omnigent client is Rust and is exercised in production."""
-    agent_inbox.raws = {"5": email(AGENT, "[t_work] Progress", "old", "<a@x>"), "6": email(AGENT, "Re: [t_work] Progress", "old", "<b@x>"), "7": email(AGENT, "[t_worker] Other", "old", "<c@x>")}
-    figure = WORKDIR / "figure.png"
-    _ = figure.write_bytes(PNG)
-    _ = mail.send(CONFIG, "t_work", "", "see the figure", "omnigent://w", [figure])
-    attached = [(part.get_filename(), part.get_content_type(), part.get_content()) for part in smtp_out[-1].iter_attachments()]
-    check(attached == [("figure.png", "image/png", PNG)] and smtp_out[-1].get_body(("plain",)).get_content() == "see the figure\n", "a file is attached to the email", attached)
-    sent_id = mail.send(CONFIG, "t_work", "", "body text", "omnigent://w")
-    message = smtp_out[-1]
-    check(message["Subject"] == "Re: [t_work] Progress" and message["In-Reply-To"] == "<b@x>" and message["Message-ID"] == sent_id, "reply reuses the tag's last subject", message.items())
-    check((message["From"], message["To"], message["X-AMH-From"]) == (AGENT, HUMAN, "omnigent://w") and message.get_content() == "body text\n", "email headers", message.items())
-    _ = mail.send(CONFIG, "t_work", "Re: [t_work] New topic", "b", "w")
-    check(smtp_out[-1]["Subject"] == "[t_work] New topic" and smtp_out[-1]["In-Reply-To"] is None, "new subject starts a thread", smtp_out[-1].items())
-    _ = mail.send(CONFIG, "fresh", "", "b", "w")
-    check(smtp_out[-1]["Subject"] == "[fresh] fresh", "first email of a tag is titled by the tag", smtp_out[-1]["Subject"])
+def test_mail() -> None:
+    """The pure mail parts, which are Rust: thread choice, building, parsing. The network code is exercised in production."""
+    found = [mail.Header("5", "[t_work] Progress", "<a@x>", "", ""), mail.Header("6", "Re: [t_work] Progress", "<b@x>", "<a@x>", ""), mail.Header("7", "[t_worker] Other", "<c@x>", "", "")]
+    check(amh_rs.mail_plan("t_work", "", found) == ("Re: [t_work] Progress", "<b@x>", "<a@x>"), "reply reuses the tag's last subject", amh_rs.mail_plan("t_work", "", found))
+    check(amh_rs.mail_plan("t_work", "Re: [t_work] New topic", found) == ("[t_work] New topic", "", ""), "new subject starts a thread")
+    check(amh_rs.mail_plan("fresh", "", found) == ("[fresh] fresh", "", ""), "first email of a tag is titled by the tag")
     try:
-        _ = mail.send(CONFIG, "t_work", "s" * 60, "b", "w")
+        _ = amh_rs.mail_plan("t_work", "s" * 60, found)
         check(False, "long subject is refused")
-    except SystemExit:
+    except ValueError:
         pass
     long_title = "a subject the human's thread already has, longer than sixty characters"
-    agent_inbox.raws["8"] = email(HUMAN, f"Re: [t_work] {long_title}", "old", "<d@x>")
-    _ = mail.send(CONFIG, "t_work", f"Re: [t_work] {long_title}", "b", "w")
-    check(smtp_out[-1]["Subject"] == f"Re: [t_work] {long_title}" and smtp_out[-1]["In-Reply-To"] == "<d@x>", "a reply may reuse a long existing subject", smtp_out[-1]["Subject"])
-    human_inbox.raws = {"1": email(AGENT, "[t_work] Progress", "x", "<a@x>"), "2": email(AGENT, "[t_work] Progress", "x", "<b@x>"), "3": email(AGENT, "[other] Progress", "x", "<c@x>")}
-    check([h.message_id for h in mail.unread(CONFIG, "t_work", [])] == ["<a@x>", "<b@x>"] and human_inbox.readonly and human_inbox.user == (HUMAN, "secret"), "unread lists the tag's emails read-only, logged in as the human")
-    check([h.message_id for h in mail.unread(CONFIG, "t_work", ["<a@x>"])] == ["<b@x>"] and human_inbox.moved == ["1"], "replaced unread email goes to the trash", human_inbox.moved)
-    check(mail.tag_of("Re: Fwd: [a_b-1] x [y]") == "a_b-1" and mail.tag_of("x [a]") is None and mail.bare("Re: [a] RE: [b] Title [c]") == "Title [c]", "subject parsing")
+    found.append(mail.Header("8", f"Re: [t_work] {long_title}", "<d@x>", "", ""))
+    check(amh_rs.mail_plan("t_work", f"Re: [t_work] {long_title}", found) == (f"Re: [t_work] {long_title}", "<d@x>", ""), "a reply may reuse a long existing subject")
+    message_id, raw = amh_rs.mail_compose(HUMAN, "Re: [t_work] Progrès", "see the figure", "<b@x>", "<a@x>", "omnigent://w", [("figure.png", "image/png", PNG)])
+    message = message_from_bytes(raw, policy=policy.default)
+    attached = [(part.get_filename(), part.get_content_type(), part.get_content()) for part in message.iter_attachments()]
+    check(attached == [("figure.png", "image/png", PNG)] and message.get_body(("plain",)).get_content() == "see the figure\r\n", "a file is attached to the email", attached)  # type: ignore[union-attr]
+    headers = [message[name] for name in ("From", "To", "X-AMH-From", "Message-ID", "In-Reply-To", "References", "Subject")]
+    check(headers == [AGENT, HUMAN, "omnigent://w", message_id, "<b@x>", "<a@x> <b@x>", "Re: [t_work] Progrès"], "email headers", headers)
+    want = mail.Mail(AGENT, "", message_id, "<b@x>", "<a@x> <b@x>", "Re: [t_work] Progrès", "see the figure\r\n", [("figure.png", "image/png", PNG)])
+    check(mail.parse(raw) == want, "a built email parses back", mail.parse(raw)[:7])
+    plain = message_from_bytes(amh_rs.mail_compose(HUMAN, "[t_work] New", "body text\n", "", "", "", [])[1], policy=policy.default)
+    check(plain.get_content() == "body text\r\n" and plain["In-Reply-To"] is None and plain["X-AMH-From"] is None, "a new thread has no reply headers", plain.items())
+    odd = "From: =?utf-8?b?5a6i?= <G@Example.org>\r\nAuthentication-Results: mx; spf=pass\r\n smtp.mailfrom=g@example.org\r\nAuthentication-Results: forged\r\nSubject: =?utf-8?q?caf=C3=A9?=\r\n  twice\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>=E9</p>\r\n"
+    check(mail.parse(odd.encode()) == mail.Mail("G@Example.org", "mx; spf=pass smtp.mailfrom=g@example.org", "", "", "", "café twice", "<p>é</p>\r\n", []), "headers are decoded, the first of a repeated header counts, HTML stays as written", mail.parse(odd.encode()))
+    check(mail.tag_of("Re: Fwd: [a_b-1] x [y]") == "a_b-1" and mail.tag_of("x [a]") is None and mail.tag_of(" [a]") is None and mail.bare("Re: [a] RE: [b] Title [c] ") == "Title [c]", "subject parsing")
 
 
 sent_mail: list[tuple[str, str, str, str]] = []
@@ -589,11 +538,11 @@ def test_guest() -> None:
     answer.write_text("It is 4.\n", encoding="utf-8")
     _ = picture.write_bytes(b"jpegdata")
     code, out_text = amh("tell", "guest", "--mail", "guest-31.txt", "--file", str(answer), "--image", str(picture))
-    message = smtp_out[-1]
+    sent_to, message = smtp_out[-1]
     check(code == 0 and out_text == f"Email sent to the guest.\nMessage-ID: {message['Message-ID']}\n", "tell guest prints the Message-ID", out_text)
-    check((message["From"], message["To"], message["Subject"], message["In-Reply-To"], message["References"]) == (AGENT, GUEST, "Re: Question", "<g1@qq>", "<g1@qq>"), "guest reply headers", message.items())
+    check((sent_to, message["From"], message["To"], message["Subject"], message["In-Reply-To"], message["References"]) == (GUEST, AGENT, GUEST, "Re: Question", "<g1@qq>", "<g1@qq>"), "guest reply headers", message.items())
     attached = list(message.iter_attachments())
-    check(message.get_body(("plain",)).get_content() == "It is 4.\n" and [(part.get_content_type(), part.get_filename()) for part in attached] == [("image/jpeg", "pic.JPEG")], "guest reply body and image")  # type: ignore[union-attr]
+    check(message.get_body(("plain",)).get_content() == "It is 4.\r\n" and [(part.get_content_type(), part.get_filename()) for part in attached] == [("image/jpeg", "pic.JPEG")], "guest reply body and image")  # type: ignore[union-attr]
     n = len(smtp_out)
     check("not a png" in str(amh("tell", "guest", "--mail", "guest-31.txt", "--file", str(answer), "--image", str(answer))[0]) and len(smtp_out) == n, "a non-image attachment is refused")
     _ = answer.write_text(" \n", encoding="utf-8")
@@ -654,7 +603,7 @@ def test_rotate() -> None:
 
 
 def main() -> int:
-    tests = [test_round_trip, test_pending_blocks, test_transport, install_fakes, test_task_start, test_todo, test_task_actions, test_tell, test_agent_views, test_routing, test_intake_and_delivery, test_nudge, test_guest, test_close, test_rotate]
+    tests = [test_round_trip, test_pending_blocks, test_mail, install_fakes, test_task_start, test_todo, test_task_actions, test_tell, test_agent_views, test_routing, test_intake_and_delivery, test_nudge, test_guest, test_close, test_rotate]
     try:
         for test in tests:
             try:

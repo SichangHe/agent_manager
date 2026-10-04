@@ -5,11 +5,10 @@ Settings in `env.toml` under `[guest]`: `address` (the feature is off without it
 
 from __future__ import annotations
 
-import imaplib
 import re
-from email.message import EmailMessage
-from email.utils import parseaddr
 from pathlib import Path
+
+import amh_rs
 
 from amh import agents, mail, taskfile, work
 from amh.config import Config
@@ -44,7 +43,7 @@ def stored_headers(text: str) -> dict[str, str]:
     return dict(line.split(": ", 1) for line in text.split("\n\n", 1)[0].splitlines() if ": " in line)
 
 
-def take_in(config: Config, box: imaplib.IMAP4_SSL) -> None:
+def take_in(config: Config, box: amh_rs.Mailbox) -> None:
     """Store each new guest email with its images, make sure the guest agent exists, and queue the email for it."""
     address = config.get("guest.address")
     if not address:
@@ -52,8 +51,7 @@ def take_in(config: Config, box: imaplib.IMAP4_SSL) -> None:
     for uid, parsed in mail.unseen_from(box, address):
         stored = config.root / mail_dir(config) / f"{config.get('guest.stored_prefix', 'guest')}-{uid}.txt"
         # The sender must be exactly the guest and Gmail must have verified the sending domain, so nobody else can pose as the guest.
-        checks = " ".join(str(parsed.get("Authentication-Results", "")).split())
-        verified = parseaddr(str(parsed["From"]))[1].lower() == address.lower() and f"smtp.mailfrom={address}" in checks and "spf=pass" in checks
+        verified = parsed.sender.lower() == address.lower() and f"smtp.mailfrom={address}" in parsed.authentication and "spf=pass" in parsed.authentication
         if verified and not stored.exists():
             store(config, address, parsed, stored)
         elif not verified:
@@ -61,20 +59,19 @@ def take_in(config: Config, box: imaplib.IMAP4_SSL) -> None:
         mail.mark_read(box, uid)
 
 
-def store(config: Config, address: str, parsed: EmailMessage, stored: Path) -> None:
+def store(config: Config, address: str, parsed: mail.Mail, stored: Path) -> None:
     """Save one guest email as `stored` with its images beside it, then add it to the guest agent's open work."""
     stored.parent.mkdir(mode=0o700, exist_ok=True)
     saved = []
-    for index, image in enumerate([p for p in parsed.walk() if p.get_content_type() in IMAGE_TYPES][:N_IMAGES_MAX]):
-        data = image.get_payload(decode=True) or b""
+    for index, (_name, kind, data) in enumerate([image for image in parsed.images if image[1] in IMAGE_TYPES][:N_IMAGES_MAX]):
         if len(data) <= IMAGE_BYTES_MAX:
-            path = stored.with_name(f"{stored.stem}-{index}{IMAGE_TYPES[image.get_content_type()]}")
+            path = stored.with_name(f"{stored.stem}-{index}{IMAGE_TYPES[kind]}")
             _ = path.write_bytes(data)
             saved.append(path.name)
-    head = "".join(f"{name}: {' '.join(str(parsed.get(name, '')).split())}\n" for name in ("Message-ID", "In-Reply-To", "References", "Subject"))
+    head = f"Message-ID: {parsed.message_id}\nIn-Reply-To: {parsed.in_reply_to}\nReferences: {parsed.references}\nSubject: {parsed.subject}\n"
     listing = "\n\nGuest images:\n" + "".join(f"- {mail_dir(config)}/{name}\n" for name in saved) if saved else ""
     ensure_agent(config, address)
-    stored.write_text(f"{head}\n{mail.text_of(parsed)}{listing}", encoding="utf-8")
+    stored.write_text(f"{head}\n{parsed.body}{listing}", encoding="utf-8")
     stored.chmod(0o600)
     with taskfile.locked(config):
         task = taskfile.load(config, task_name(config))
@@ -105,10 +102,12 @@ def reply(config: Config, mail_name: str, body: str, images: list[Path]) -> str:
         raise SystemExit("amh: the answer is empty")
     headers = stored_headers((config.root / mail_dir(config) / Path(mail_name).name).read_text(encoding="utf-8"))
     subject = "Re: " + re.sub(r"^(\s*(re|回复)\s*[:：]\s*)+", "", headers.get("Subject", ""), flags=re.IGNORECASE)
-    message = mail.compose(config, config.get("guest.address"), subject, body, headers.get("Message-ID", ""), headers.get("References", ""))
+    attachments = []
     for image in images:
         kind = IMAGE_KINDS.get(image.suffix.lower())
         if kind is None:
             raise SystemExit(f"amh: {image} is not a png, jpeg, gif, or webp image")
-        message.add_attachment(image.read_bytes(), maintype="image", subtype=kind.split("/")[1], filename=image.name)
-    return mail.deliver(config, message)
+        attachments.append((image.name, kind, image.read_bytes()))
+    message_id, raw = mail.compose(config.get("guest.address"), subject, body, headers.get("Message-ID", ""), headers.get("References", ""), attachments)
+    mail.deliver(config.get("guest.address"), raw)
+    return message_id

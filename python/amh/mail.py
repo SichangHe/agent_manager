@@ -1,4 +1,4 @@
-"""Email between agents and the human.
+"""Email between agents and the human; the work is done by the Rust side (`src/mail.rs`).
 
 Agents send from the agent Gmail account to the human's address. The human's replies arrive in the agent account's inbox.
 Whether the human has read an agent's email is only visible in the human's own mailbox, which is read through the himalaya config.
@@ -6,28 +6,19 @@ Whether the human has read an agent's email is only visible in the human's own m
 
 from __future__ import annotations
 
-import imaplib
-import re
-import mimetypes
-import smtplib
-import time
-import subprocess
-from dataclasses import dataclass
-from email import message_from_bytes, policy
-from email.message import EmailMessage
-from email.utils import make_msgid
 from collections.abc import Sequence
 from pathlib import Path
+from typing import NamedTuple
+
+import amh_rs
 
 from amh.config import Config
 
-ALL_MAIL = '"[Gmail]/All Mail"'
-TRASH = '"[Gmail]/Trash"'
-HEADERS = "(BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES DATE)])"
+WATCHER: str = amh_rs.MAIL_WATCHER
+SENT_LOG: str = amh_rs.MAIL_SENT_LOG
 
 
-@dataclass(frozen=True)
-class Header:
+class Header(NamedTuple):
     uid: str
     subject: str
     message_id: str
@@ -35,145 +26,69 @@ class Header:
     date: str
 
 
-def connect(config: Config, human: bool = False) -> imaplib.IMAP4_SSL:
-    """Log in to the agent account, which sends agent mail and receives the human's replies.
+class Mail(NamedTuple):
+    """A received email; every header is on one line."""
 
-    `human` logs in to the human's mailbox instead, where agent mail is unread until the human opens it.
-    """
-    host, user, password = "imap.gmail.com", config.get("mail.agent_address"), config.get("mail.agent_password")
-    if human:
-        path = Path(config.get("mail.human_mailbox_config", str(Path.home() / ".config/himalaya/config.toml")))
-        host, user, command = (re.search(rf'^{key} = "(.*)"$', path.read_text(encoding="utf-8"), re.MULTILINE)[1] for key in ("host", "login", "cmd"))
-        password = subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
-    box = imaplib.IMAP4_SSL(host, timeout=60)
-    _ = box.login(user, password)
-    return box
+    sender: str
+    authentication: str
+    message_id: str
+    in_reply_to: str
+    references: str
+    subject: str
+    body: str
+    images: list[tuple[str, str, bytes]]
 
 
-def search(box: imaplib.IMAP4_SSL, folder: str, readonly: bool, *criteria: str) -> list[Header]:
-    """Return the headers of matching mail in `folder`, oldest first."""
-    _ = box.select(folder, readonly=readonly)
-    uids = box.uid("search", *criteria)[1][0].split()
-    if not uids:
-        return []
-    found = []
-    for part in box.uid("fetch", b",".join(uids), HEADERS)[1]:
-        if not isinstance(part, tuple):
-            continue
-        parsed = message_from_bytes(part[1], policy=policy.default)
-        uid = re.search(rb"UID (\d+)", part[0])
-        found.append(Header(uid[1].decode() if uid else "", str(parsed["Subject"] or ""), str(parsed["Message-ID"] or "").strip(), " ".join(str(parsed["References"] or "").split()), str(parsed["Date"] or "")))
-    return found
-
-
-def raw(query: str) -> tuple[str, str]:
-    """Build a Gmail search criterion."""
-    return "X-GM-RAW", '"' + query.replace("\\", "\\\\").replace('"', '\\"') + '"'
+def connect(_config: Config) -> amh_rs.Mailbox:
+    """Log in to the agent account, which sends agent mail and receives the human's replies; `OSError` when it fails."""
+    return amh_rs.mail_connect()
 
 
 def bare(subject: str) -> str:
     """Strip reply prefixes and `[tag]`s from the front of a subject."""
-    return re.sub(r"^(\s*(re|fwd?):\s*|\s*\[[^\]]*\]\s*)+", "", subject, flags=re.IGNORECASE).strip()
+    return amh_rs.mail_bare(subject)
 
 
 def tag_of(subject: str) -> str | None:
     """Return the first `[tag]` at the front of a subject, ignoring reply prefixes."""
-    match = re.match(r"^(?:\s*(?:re|fwd?):\s*)*\[([A-Za-z0-9_-]+)\]", subject, re.IGNORECASE)
-    return match[1] if match else None
+    return amh_rs.mail_tag_of(subject)
 
 
-def compose(config: Config, to: str, subject: str, body: str, reply_to: str, references: str) -> EmailMessage:
-    """Build an email from the agent account, as a reply to Message-ID `reply_to` when that is given."""
-    message = EmailMessage()
-    message["From"] = config.get("mail.agent_address")
-    message["To"] = to
-    message["Subject"] = subject
-    message["Message-ID"] = make_msgid(domain="gmail.com")
-    if reply_to:
-        message["In-Reply-To"] = reply_to
-        message["References"] = f"{references} {reply_to}".strip()
-    message.set_content(body)
-    return message
+def compose(to: str, subject: str, body: str, reply_to: str, references: str, attachments: Sequence[tuple[str, str, bytes]] = ()) -> tuple[str, bytes]:
+    """Build an email from the agent account, as a reply to Message-ID `reply_to` when that is given; return its Message-ID and its bytes.
+
+    Each attachment is a file name, a MIME type, and the content.
+    """
+    return amh_rs.mail_compose(to, subject, body, reply_to, references, "", list(attachments))
 
 
-def deliver(config: Config, message: EmailMessage) -> str:
-    """Send an email through the agent account and return its Message-ID."""
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as smtp:
-        _ = smtp.login(config.get("mail.agent_address"), config.get("mail.agent_password"))
-        _ = smtp.send_message(message)
-    return str(message["Message-ID"])
+def deliver(to: str, raw: bytes) -> None:
+    """Send a built email through the agent account; `OSError` when it fails."""
+    amh_rs.mail_deliver(to, raw)
 
 
-def attach(message: EmailMessage, paths: Sequence[Path]) -> None:
-    """Attach files to an email, such as a figure the human asked to see."""
-    if sum(path.stat().st_size for path in paths) > ATTACHED_BYTES_MAX:
-        raise SystemExit(f"amh: the attachments exceed {ATTACHED_BYTES_MAX >> 20} MB in total; send a path instead")
-    for path in paths:
-        kind = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        message.add_attachment(path.read_bytes(), maintype=kind.split("/")[0], subtype=kind.split("/")[1], filename=path.name)
-
-
-ATTACHED_BYTES_MAX = 20 << 20
-WATCHER = "amh watcher"
-SENT_LOG = "amh-sent.txt"
-
-
-def send(config: Config, tag: str, subject: str, body: str, sender: str, attachments: Sequence[Path] = ()) -> str:
+def send(_config: Config, tag: str, subject: str, body: str, sender: str, attachments: Sequence[Path] = ()) -> str:
     """Email the human on the tag's thread and return the new Message-ID.
 
-    An empty `subject` reuses the subject of the newest email carrying the tag.
+    An empty `subject` reuses the subject of the newest email carrying the tag. Files are attached by path, such as a figure the human asked to see.
     """
-    # 🧑 "Let email_me.py prefer the task file name in the subject tag. I find it easier"
-    # 🧑 "pending item created/deleted messages should reuse subject of the agent’s previous email"
-    title = bare(subject)
-    box = connect(config)
-    try:
-        thread = [h for h in search(box, ALL_MAIL, True, *raw(f'subject:"[{tag}]"')) if tag_of(h.subject) == tag and (not title or bare(h.subject) == title)]
-    finally:
-        box.shutdown()
-    # The length limit is for new subjects only: a reply must be able to reuse the subject of the thread it answers, whatever its length.
-    if len(title) >= 60 and not thread:
-        raise SystemExit("amh: a new subject must be under 60 characters")
-    last = thread[-1] if thread else Header("", "", "", "", "")
-    message = compose(config, config.get("mail.human_address"), f"{'Re: ' if thread else ''}[{tag}] {title or (bare(last.subject) if thread else tag)}", body, last.message_id, last.references)
-    message["X-AMH-From"] = sender
-    attach(message, attachments)
-    sent = deliver(config, message)
-    if sender != WATCHER:
-        with (config.state_dir / SENT_LOG).open("a", encoding="utf-8") as record:
-            _ = record.write(f"{time.time():.0f} {tag}\n")
-    return sent
+    return amh_rs.mail_send(tag, subject, body, sender, list(attachments))
 
 
-def unread(config: Config, tag: str, trash_ids: list[str]) -> list[Header]:
+def unread(_config: Config, tag: str, trash_ids: list[str]) -> list[Header]:
     """List the tag's emails the human has not opened; first move those named in `trash_ids` to the trash."""
-    # 🧑 “Trash the emails that I no longer need to read that are not read yet.”
-    box = connect(config, human=True)
-    try:
-        found = search(box, "INBOX", not trash_ids, "UNSEEN", "FROM", f'"{config.get("mail.agent_address")}"', "SUBJECT", f'"[{tag}]"')
-        doomed = [h for h in found if h.message_id in trash_ids]
-        if doomed:
-            _ = box.uid("move", ",".join(h.uid for h in doomed), TRASH)
-        return [h for h in found if h not in doomed]
-    finally:
-        box.shutdown()
+    return [Header(*row) for row in amh_rs.mail_unread(tag, trash_ids)]
 
 
-def unseen_from(box: imaplib.IMAP4_SSL, sender: str) -> list[tuple[str, EmailMessage]]:
+def parse(raw: bytes) -> Mail:
+    """Read a raw email: the headers the callers need, the readable body (its plain part, else its HTML part), and its images."""
+    return Mail(*amh_rs.mail_parse(raw))
+
+
+def unseen_from(box: amh_rs.Mailbox, sender: str) -> list[tuple[str, Mail]]:
     """Return each unread inbox email from `sender` with its uid, without marking it read."""
-    _ = box.select("INBOX")
-    uids = box.uid("search", "UNSEEN", "FROM", f'"{sender}"')[1][0].split()
-    return [(uid.decode(), message_from_bytes(box.uid("fetch", uid, "(BODY.PEEK[])")[1][0][1], policy=policy.default)) for uid in uids]
+    return [(uid, parse(raw)) for uid, raw in box.unseen_from(sender)]
 
 
-def text_of(parsed: EmailMessage) -> str:
-    """Return the readable body of an email: its plain part, else its HTML part."""
-    part = parsed.get_body(preferencelist=("plain", "html"))
-    try:
-        return part.get_content() if part else ""
-    except (LookupError, ValueError):
-        return (part.get_payload(decode=True) or b"").decode(errors="replace")
-
-
-def mark_read(box: imaplib.IMAP4_SSL, uid: str) -> None:
-    _ = box.uid("store", uid, "+FLAGS", "(\\Seen)")
+def mark_read(box: amh_rs.Mailbox, uid: str) -> None:
+    box.mark_read(uid)

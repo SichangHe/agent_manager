@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import imaplib
 import random
 import sys
 import time
 from pathlib import Path
+
+import amh_rs
 
 from amh import agents, config as configuration, guest, mail, taskfile, work
 from amh.config import Config
@@ -56,12 +57,12 @@ def route(config: Config, subject: str, body: str) -> Task:
     return by_address[config.main_manager]
 
 
-def take_in_mail(config: Config, box: imaplib.IMAP4_SSL) -> None:
+def take_in_mail(config: Config, box: amh_rs.Mailbox) -> None:
     """Store each new human email and append a `(pending)` block naming it to the right task file."""
     for uid, parsed in mail.unseen_from(box, config.get("mail.human_address")):
         name = f"{config.get('mail.stored_prefix', 'mail')}-{uid}.txt"
         stored = config.mail_dir / name
-        subject, body = " ".join(str(parsed["Subject"] or "").split()), mail.text_of(parsed)
+        subject, body = parsed.subject, parsed.body
         if not stored.exists():
             try:
                 with taskfile.locked(config):
@@ -262,7 +263,7 @@ def run() -> int:
             if box is not None:
                 take_in_mail(config, box)
                 guest.take_in(config, box)
-        except (imaplib.IMAP4.error, OSError) as error:
+        except OSError as error:
             log(f"mail connection failed, reconnecting in {RECONNECT_S} s: {error!r}")
             box = None
             retry_login_at = time.monotonic() + RECONNECT_S

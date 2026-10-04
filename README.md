@@ -8,13 +8,13 @@ one program for agents and managers; usage lives in `amh --help`, not here
     - `src/cli.rs`: the command tree with every help text
     - `src/main.rs`: turns the parsed action into one JSON object and calls `amh.cli.run`; maps the result and `SystemExit` to the exit status
     - `src/bridge.rs`: the built-in Python module `amh_rs`, through which the remaining Python calls the parts already ported
-    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`; talking to agents; the agent view; the action log
+    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`; talking to agents; the agent view; the action log; mail
     - `amh_rs.run_action` runs a ported action and returns `None` for the others, which `amh.cli.run` then runs in Python
 - Python (`python/amh/`): everything else, until each part is ported
     - compiled into the binary and imported from memory, so no source path is needed at run time
     - embedded interpreter: the system Python (`.cargo/config.toml`), UTF-8 forced, standard library only
 - port order: one part at a time, each left in production for a while before the next
-    - planned: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher
+    - planned: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher (next)
     - the human's earlier design choices to follow while porting: `docs/design-choices.md`
     - the human's architecture vision (state model apart from input/output, simulation, task lifecycle and dependencies, events, messaging, boundaries): `docs/vision.md`
     - rule taken from it for every ported part: pure functions over plain data in one module, input/output in a thin caller (`src/taskfile.rs` is the pattern)
@@ -23,7 +23,7 @@ one program for agents and managers; usage lives in `amh --help`, not here
 - `use-amh`: stub that old command names link to
 - test: `cargo build --release && python3 test_amh.py`; prints only failures
     - re-runs itself inside the built binary (`AMH_RUN_SCRIPT`), so the Rust parts are exercised; command lines are parsed by the binary (`AMH_PARSE_ONLY=1`)
-    - runs on a temporary copy of the root's `*.md` with fakes for the agent calls, IMAP, SMTP; refuses to run on the live root
+    - runs on a temporary copy of the root's `*.md` with fakes for the agent calls and the mail network calls; emails are built and parsed by the real Rust code; refuses to run on the live root
 
 records, all under the work-log root (`work_logs` in `env.toml`)
 - task file `NAME.md`
@@ -61,9 +61,17 @@ modules
 - action log (`src/log.rs`, Rust): every `amh` run appends one line to `amh-actions.log` in the state folder: time, caller (Omnigent session, else tmux pane, else user), exit status, and the parsed command line
 - `taskfile` (Python): the `Task` record, loading and saving, the one lock file that serializes every writer, finding the caller's task
 - `agents` (Python): thin wrappers over the Rust agent functions
-- `mail`: send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
+- mail (`src/mail.rs`, Rust; `python/amh/mail.py` holds thin wrappers): send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
+    - pure: `bare`, `tag_of`, `plan` (subject and thread of an outgoing email from the emails found with the tag), `compose` (the bytes to send), `parse` (a raw email -> sender, headers, body, images), `header_of`
+    - input and output: `Mailbox` (one logged-in IMAP connection: `search`, `unseen_from`, `mark_read`), `deliver` (SMTP), `send`, `unread`
+    - the watcher holds one `Mailbox` across polls and logs in again only after a failure; every network failure reaches the Python as `OSError`
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
+    - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
+    - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`
+    - an HTML-only body is kept as written, not converted to text
+    - unlike the earlier Python: a found email's date is as written, not rewritten to one format; sent mail carries a `Date` header and the Message-ID `<NANOSECONDS.PID@gmail.com>`
+    - checked read-only against the earlier Python on the live mailboxes: same search results, subjects, unread listing, and parse of real emails
 - `work`: what each action does; `problems`, `check`, `tree`, `rotate`
     - `rotate` of the main manager rewrites its address in `env.toml`
 - `watch`: loop every 5 s

@@ -126,7 +126,7 @@ impl Store {
     }
 }
 
-/// Email the human about their items on a task's list; the mail part is still Python.
+/// Email the human about their items on a task's list, through the Python wrapper of the mail part, which the tests replace.
 fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResult<()> {
     let Some(body) = tasks::human_notice(change, items) else {
         return Ok(());

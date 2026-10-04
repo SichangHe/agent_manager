@@ -4,10 +4,53 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use pyo3::exceptions::{PyOSError, PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyOSError, PyRuntimeError, PySystemExit, PyValueError};
 use pyo3::prelude::*;
 
-use crate::{omnigent, taskfile};
+use crate::{mail, omnigent, taskfile};
+
+/// A found email as the Python takes it: uid, subject, Message-ID, references, date.
+type HeaderRow = (String, String, String, String, String);
+/// A file carried by an email as the Python takes it: name, MIME type, content.
+type FileRow = (String, String, Vec<u8>);
+/// A received email as the Python takes it: sender address, `Authentication-Results`, Message-ID, In-Reply-To, References, subject, body, images.
+type MailRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Vec<FileRow>,
+);
+
+fn header_rows(headers: Vec<mail::Header>) -> Vec<HeaderRow> {
+    let row = |h: mail::Header| (h.uid, h.subject, h.message_id, h.references, h.date);
+    headers.into_iter().map(row).collect()
+}
+
+/// One logged-in connection to the agent account's mailbox, which the watcher keeps across polls; every failure is an `OSError`.
+#[pyclass(unsendable)]
+pub struct Mailbox(mail::Mailbox);
+
+#[pymethods]
+impl Mailbox {
+    /// The headers of matching mail in `folder`, oldest first.
+    fn search(&mut self, folder: &str, readonly: bool, query: &str) -> PyResult<Vec<HeaderRow>> {
+        let found = self.0.search(folder, readonly, query);
+        found.map(header_rows).map_err(PyOSError::new_err)
+    }
+
+    /// Each unread inbox email from `sender` as its uid and raw bytes, without marking it read.
+    fn unseen_from(&mut self, sender: &str) -> PyResult<Vec<(String, Vec<u8>)>> {
+        self.0.unseen_from(sender).map_err(PyOSError::new_err)
+    }
+
+    fn mark_read(&mut self, uid: &str) -> PyResult<()> {
+        self.0.mark_read(uid).map_err(PyOSError::new_err)
+    }
+}
 
 #[pymodule]
 pub mod amh_rs {
@@ -17,6 +60,12 @@ pub mod amh_rs {
     const MARKER: &str = taskfile::MARKER;
     #[pymodule_export]
     const SECTIONS: [&str; 4] = taskfile::SECTIONS;
+    #[pymodule_export]
+    const MAIL_WATCHER: &str = mail::WATCHER;
+    #[pymodule_export]
+    const MAIL_SENT_LOG: &str = mail::SENT_LOG;
+    #[pymodule_export]
+    use super::Mailbox;
 
     /// Every setting under its dotted key.
     #[pyfunction]
@@ -130,6 +179,128 @@ pub mod amh_rs {
         omnigent::api(&loaded()?, "GET", path, None)
             .map(|answer| answer.to_string())
             .map_err(PyValueError::new_err)
+    }
+
+    /// A subject without its reply prefixes and `[tag]`s at the front.
+    #[pyfunction]
+    fn mail_bare(subject: &str) -> &str {
+        mail::bare(subject)
+    }
+
+    /// The first `[tag]` at the front of a subject, ignoring reply prefixes.
+    #[pyfunction]
+    fn mail_tag_of(subject: &str) -> Option<&str> {
+        mail::tag_of(subject)
+    }
+
+    /// Read a raw email into plain data.
+    #[pyfunction]
+    fn mail_parse(raw: &[u8]) -> MailRow {
+        let mail = mail::parse(raw);
+        let image = |image: mail::Attached| (image.name, image.kind, image.data);
+        (
+            mail.sender,
+            mail.authentication,
+            mail.message_id,
+            mail.in_reply_to,
+            mail.references,
+            mail.subject,
+            mail.body,
+            mail.images.into_iter().map(image).collect(),
+        )
+    }
+
+    /// The subject, the Message-ID to answer, and the references of an email on a tag, given the emails found carrying the tag, oldest first; `ValueError` when a new subject is too long.
+    #[pyfunction]
+    fn mail_plan(
+        tag: &str,
+        subject: &str,
+        found: Vec<HeaderRow>,
+    ) -> PyResult<(String, String, String)> {
+        let header = |(uid, subject, message_id, references, date)| mail::Header {
+            uid,
+            subject,
+            message_id,
+            references,
+            date,
+        };
+        let found: Vec<mail::Header> = found.into_iter().map(header).collect();
+        mail::plan(tag, subject, &found)
+            .map(|plan| (plan.subject, plan.reply_to, plan.references))
+            .map_err(PyValueError::new_err)
+    }
+
+    /// Build an email from the agent account; returns its new Message-ID and its bytes. An empty `reply_to` starts a thread, an empty `sender` adds no `X-AMH-From`.
+    #[pyfunction]
+    fn mail_compose(
+        to: &str,
+        subject: &str,
+        body: &str,
+        reply_to: &str,
+        references: &str,
+        sender: &str,
+        attachments: Vec<FileRow>,
+    ) -> PyResult<(String, Vec<u8>)> {
+        let file = |(name, kind, data)| mail::Attached { name, kind, data };
+        let settings = loaded()?;
+        let draft = mail::Draft {
+            from: settings.get("mail.agent_address").map_or("", |from| from),
+            to,
+            subject,
+            body,
+            reply_to,
+            references,
+            sender,
+            attachments: &attachments.into_iter().map(file).collect::<Vec<_>>(),
+        };
+        let message_id = mail::new_id();
+        let raw = mail::compose(&draft, &message_id).map_err(PyValueError::new_err)?;
+        Ok((message_id, raw))
+    }
+
+    /// Send built email bytes to one address through the agent account; `OSError` when it fails.
+    #[pyfunction]
+    fn mail_deliver(to: &str, raw: &[u8]) -> PyResult<()> {
+        mail::deliver(&loaded()?, to, raw).map_err(PyOSError::new_err)
+    }
+
+    /// Email the human on the tag's thread and return the new Message-ID; `SystemExit` when the request is refused, `OSError` when the network or a file fails.
+    #[pyfunction]
+    fn mail_send(
+        tag: &str,
+        subject: &str,
+        body: &str,
+        sender: &str,
+        attachments: Vec<PathBuf>,
+    ) -> PyResult<String> {
+        let state_dir = crate::settings::state_dir();
+        mail::send(
+            &loaded()?,
+            &state_dir,
+            tag,
+            subject,
+            body,
+            sender,
+            &attachments,
+        )
+        .map_err(|error| match error {
+            mail::SendError::Refused(message) => PySystemExit::new_err(format!("amh: {message}")),
+            mail::SendError::Failed(message) => PyOSError::new_err(message),
+        })
+    }
+
+    /// The tag's emails the human has not opened, after moving those named in `trash_ids` to the trash.
+    #[pyfunction]
+    fn mail_unread(tag: &str, trash_ids: Vec<String>) -> PyResult<Vec<HeaderRow>> {
+        let found = mail::unread(&loaded()?, tag, &trash_ids);
+        found.map(header_rows).map_err(PyOSError::new_err)
+    }
+
+    /// Log in to the agent account's mailbox.
+    #[pyfunction]
+    fn mail_connect() -> PyResult<Mailbox> {
+        let mailbox = mail::Mailbox::agent(&loaded()?);
+        mailbox.map(Mailbox).map_err(PyOSError::new_err)
     }
 }
 
