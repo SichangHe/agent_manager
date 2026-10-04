@@ -16,6 +16,8 @@ one program for agents and managers; usage lives in `amh --help`, not here
 - port order: one part at a time, each left in production for a while before the next
     - planned: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher
     - the human's earlier design choices to follow while porting: `docs/design-choices.md`
+    - the human's architecture vision (state model apart from input/output, simulation, task lifecycle and dependencies, events, messaging, boundaries): `docs/vision.md`
+    - rule taken from it for every ported part: pure functions over plain data in one module, input/output in a thin caller (`src/taskfile.rs` is the pattern)
 - install: `cargo install --path .`
 - watcher: `amh manager watch` in the foreground; `amh-watch.service` is the user systemd unit for it
 - `use-amh`: stub that old command names link to
