@@ -214,3 +214,5 @@ def run(parsed: str) -> int:
         return handler(configuration.load(), SimpleNamespace(**values)) or 0
     except agents.AgentError as error:
         raise SystemExit(f"amh: {error}") from error
+    except RuntimeError as error:
+        raise SystemExit(str(error)) from error

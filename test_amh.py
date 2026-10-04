@@ -1,7 +1,7 @@
 """End-to-end checks of `amh` on a temporary copy of the work-log root; prints only failures.
 
 Run: `/usr/bin/python3 test_amh.py`. Nothing real is touched: Omnigent, tmux, IMAP, and SMTP are replaced by fakes,
-and settings come from a temporary `local.env`.
+and settings come from a temporary `env.toml`.
 """
 
 from __future__ import annotations
@@ -25,10 +25,14 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent
 BINARY = Path(os.environ.get("AMH_BINARY") or REPO / "target/release/amh")
-sys.path.insert(0, str(REPO / "python"))
-# The task files to copy: the live root named in the user's own settings, read here without loading them.
-SETTINGS = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "amh/local.env"
-LIVE_ROOT = Path(os.environ.get("AMH_TEST_SOURCE_ROOT") or re.search(r'^export OMO_WORK_LOGS_ROOT="(.*)"$', SETTINGS.read_text(encoding="utf-8"), re.MULTILINE)[1])
+if "amh_rs" not in sys.builtin_module_names:
+    # Run inside the binary, so the Rust parts are exercised too.
+    os.execve(BINARY, [str(BINARY)], {**os.environ, "AMH_RUN_SCRIPT": __file__})
+
+import amh_rs  # noqa: E402
+
+# The task files to copy come from the live root named in the user's own settings; nothing else of them is used.
+LIVE_ROOT = Path(os.environ.get("AMH_TEST_SOURCE_ROOT") or amh_rs.settings()["work_logs"])
 TEMP = Path(tempfile.mkdtemp(prefix="amh-test-"))
 ROOT, STATE, WORKDIR = TEMP / "root", TEMP / "state", TEMP / "work"
 MAIN, GUEST, HUMAN, AGENT = "omnigent://main", "guest@example.org", "human@example.com", "agent@example.com"
@@ -36,29 +40,35 @@ PNG = b"\x89PNG\r\n\x1a\n" + bytes(40)
 
 for key in [key for key in os.environ if key.startswith(("OMO_", "AMH_", "OMNIGENT_", "TMUX"))]:
     del os.environ[key]
+os.environ |= {"AMH_STATE_DIR": str(STATE), "AMH_CFG_DIR": str(TEMP / "config")}
 for folder in (ROOT / "manager_mail", STATE, WORKDIR):
     folder.mkdir(parents=True)
 for source in LIVE_ROOT.glob("*.md"):
     _ = shutil.copy(source, ROOT / source.name)
 (ROOT / "guest_visitor.md").unlink(missing_ok=True)
-(TEMP / "local.env").write_text(
-    f"""export OMO_WORK_LOGS_ROOT="{ROOT}"
-export OMO_MANAGER_STATE_DIR="{STATE}"
-export OMO_AGENT_GMAIL_ADDRESS="{AGENT}"
-export OMO_AGENT_GMAIL_APP_PASSWORD="none"
-export OMO_HUMAN_EMAIL_ADDRESS="{HUMAN}"
-export OMO_MANAGER_TMUX_TARGET="{MAIN}"
-export OMO_MANAGER_OMNIGENT_URL="http://127.0.0.1:9"
-export OMO_EMAIL_CONFIG_PATH="{TEMP}/himalaya.toml"
-export AMH_MAIL_PREFIX="m"
-export AMH_GUEST_ADDRESS="{GUEST}"
-export AMH_GUEST_NAME="visitor"
-export AMH_GUEST_WORKDIR="{WORKDIR}"
+(STATE / "env.toml").write_text(
+    f"""work_logs = "{ROOT}"
+main_manager = "{MAIN}"
+
+[omnigent]
+url = "http://127.0.0.1:9"
+
+[mail]
+agent_address = "{AGENT}"
+agent_password = "none"
+human_address = "{HUMAN}"
+human_mailbox_config = "{TEMP}/himalaya.toml"
+stored_prefix = "m"
+
+[guest]
+address = "{GUEST}"
+name = "visitor"
+workdir = "{WORKDIR}"
 """,
     encoding="utf-8",
 )
 (TEMP / "himalaya.toml").write_text(f'host = "imap.human.test"\nlogin = "{HUMAN}"\ncmd = "echo secret"\n', encoding="utf-8")
-os.environ["OMO_MANAGER_LOCAL_ENV"] = str(TEMP / "local.env")
+
 from amh import agents, cli, guest, mail, taskfile, watch  # noqa: E402
 from amh import config as configuration  # noqa: E402
 
@@ -698,7 +708,7 @@ def test_rotate() -> None:
     main_task = task("t_main.md")
     check(main_task.address == new and main_task.fields["status"] == "long_running" and main_task.body.endswith(f"(manager replaced: {MAIN} handed over to a fresh agent)\n"), "the task file records the replacement", main_task.fields)
     check(task("t_work.md").fields["managerat"] == new and task("guest_visitor.md").fields["managerat"] == new and task("t_sub.md").fields["managerat"] == "omnigent://s1", "active reports follow the new manager")
-    check(f'export OMO_MANAGER_TMUX_TARGET="{new}"\n' in (TEMP / "local.env").read_text(encoding="utf-8") and stopped[n_stop:] == [MAIN], "the main manager address is updated and the old agent stopped", stopped[n_stop:])
+    check(f'main_manager = "{new}"\n' in (STATE / "env.toml").read_text(encoding="utf-8") and stopped[n_stop:] == [MAIN], "the main manager address is updated and the old agent stopped", stopped[n_stop:])
     check(f"\nt_main.md {new}\n" in text_of("TODO.md"), "the task list names the new address")
 
 

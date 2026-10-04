@@ -4,6 +4,7 @@
 // 🧑 "at the beginning use py03 to call everything and only have the Rust part do command line parsing"
 
 mod cli;
+mod settings;
 
 use std::ffi::CString;
 use std::process::ExitCode;
@@ -11,8 +12,10 @@ use std::process::ExitCode;
 use clap::{ArgAction, ArgMatches, Command};
 use pyo3::exceptions::PySystemExit;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{IntoPyDict, PyDict};
 use serde_json::{Map, Value};
+
+use settings::amh_rs;
 
 /// The Python package, compiled into the binary so that no source path is needed at run time.
 const SOURCES: &[(&str, &str)] = &[
@@ -83,9 +86,16 @@ fn run_python(py: Python<'_>, parsed: &str) -> PyResult<u8> {
     PyModule::from_code(py, &boot, c"amh_boot.py", c"amh_boot")?
         .getattr("install")?
         .call1((sources,))?;
-    let status = py.import("amh.cli")?.getattr("run")?.call1((parsed,));
+    let status = match std::env::var("AMH_RUN_SCRIPT") {
+        // The test script runs inside the binary, so it exercises the Rust parts too.
+        Ok(script) => py.import("runpy")?.getattr("run_path")?.call(
+            (script,),
+            Some(&[("run_name", "__main__")].into_py_dict(py)?),
+        ),
+        Err(_) => py.import("amh.cli")?.getattr("run")?.call1((parsed,)),
+    };
     let code = match status {
-        Ok(status) => status.extract::<u8>()?,
+        Ok(status) => status.extract::<u8>().unwrap_or(0),
         Err(error) if error.is_instance_of::<PySystemExit>(py) => {
             let code = error.value(py).getattr("code")?;
             if code.is_none() {
@@ -127,12 +137,17 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let command = cli::command();
-    let parsed = parsed(&command, &command.clone().get_matches()).to_string();
+    let parsed = if std::env::var_os("AMH_RUN_SCRIPT").is_some() {
+        String::new()
+    } else {
+        parsed(&command, &command.clone().get_matches()).to_string()
+    };
     // Tests take the parsed command line and run the Python with fake agents and mail.
     if std::env::var_os("AMH_PARSE_ONLY").is_some() {
         println!("{parsed}");
         return ExitCode::SUCCESS;
     }
+    pyo3::append_to_inittab!(amh_rs);
     force_utf8();
     match Python::attach(|py| run_python(py, &parsed)) {
         Ok(code) => ExitCode::from(code),

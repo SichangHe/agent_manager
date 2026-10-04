@@ -18,6 +18,13 @@ OMNIGENT_PREFIX = "omnigent://"
 # 🧑 "Default should be opus 5.5 low" ... "gpt-6-luna high for managers and gpt-6.1-sol low for workers" ... "Cursor should use the latest Grok with high by default and not enable fast, Antigravity should use the latest Gemini"
 DEFAULTS = {"claude": ("claude-opus-5-5", "low"), "codex": ("gpt-6.1-sol", "low"), "cursor": ("grok-4.7", "high"), "antigravity": ("gemini-3.8-flash-high", "high")}
 MANAGER_DEFAULTS = DEFAULTS | {"codex": ("gpt-6-luna", "high")}
+
+
+def launch_default(config: Config, tool: str, as_manager: bool) -> tuple[str, str]:
+    """The model and effort a tool starts with: `launch.TOOL` in `config.toml` (`manager_model`/`manager_effort` for managers), else the built-in default."""
+    model, effort = (MANAGER_DEFAULTS if as_manager else DEFAULTS)[tool]
+    model, effort = config.get(f"launch.{tool}.model", model), config.get(f"launch.{tool}.effort", effort)
+    return (config.get(f"launch.{tool}.manager_model", model), config.get(f"launch.{tool}.manager_effort", effort)) if as_manager else (model, effort)
 # 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
 UNRESTRICTED = {
     "claude": ["--dangerously-skip-permissions"],
@@ -45,10 +52,10 @@ def session_path(address: str) -> str:
 
 def api(config: Config, method: str, path: str, body: dict[str, object] | None = None) -> dict[str, object]:
     """Call the Omnigent server and return its JSON answer."""
-    url = config.get("OMO_MANAGER_OMNIGENT_URL", "http://127.0.0.1:6767") + path
+    url = config.get("omnigent.url", "http://127.0.0.1:6767") + path
     data = None if body is None else json.dumps(body).encode()
     request = urllib.request.Request(url, data=data, method=method, headers={"Content-Type": "application/json"})
-    if token := config.get("OMO_MANAGER_OMNIGENT_TOKEN"):
+    if token := config.get("omnigent.token"):
         request.add_header("Authorization", f"Bearer {token}")
     try:
         with urllib.request.urlopen(request, timeout=30) as answer:

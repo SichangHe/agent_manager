@@ -1,6 +1,6 @@
 """The guest mailbox: one outside person emails the agent account, and a dedicated agent answers them directly.
 
-Settings in `local.env`: `AMH_GUEST_ADDRESS` (the feature is off without it), `AMH_GUEST_WORKDIR` (holds the agent's standing rules).
+Settings in `env.toml` under `[guest]`: `address` (the feature is off without it), `name`, `workdir` (holds the agent's standing rules).
 """
 
 from __future__ import annotations
@@ -18,13 +18,13 @@ SOURCE = "(guest mail "
 
 
 def task_name(config: Config) -> str:
-    """The guest agent's task file; `AMH_GUEST_NAME` names the guest."""
-    return f"guest_{config.get('AMH_GUEST_NAME', 'guest')}.md"
+    """The guest agent's task file; `guest.name` names the guest."""
+    return f"guest_{config.get('guest.name', 'guest')}.md"
 
 
 def mail_dir(config: Config) -> str:
     """The folder under the work-log root holding the guest's stored emails."""
-    return f"guest_{config.get('AMH_GUEST_NAME', 'guest')}_manager_mail"
+    return f"guest_{config.get('guest.name', 'guest')}_manager_mail"
 IMAGE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp"}
 IMAGE_KINDS = {suffix: kind for kind, suffix in IMAGE_TYPES.items()} | {".jpeg": "image/jpeg"}
 N_IMAGES_MAX = 4
@@ -46,11 +46,11 @@ def stored_headers(text: str) -> dict[str, str]:
 
 def take_in(config: Config, box: imaplib.IMAP4_SSL) -> None:
     """Store each new guest email with its images, make sure the guest agent exists, and queue the email for it."""
-    address = config.get("AMH_GUEST_ADDRESS")
+    address = config.get("guest.address")
     if not address:
         return
     for uid, parsed in mail.unseen_from(box, address):
-        stored = config.root / mail_dir(config) / f"{config.get('AMH_GUEST_MAIL_PREFIX', 'guest')}-{uid}.txt"
+        stored = config.root / mail_dir(config) / f"{config.get('guest.stored_prefix', 'guest')}-{uid}.txt"
         # The sender must be exactly the guest and Gmail must have verified the sending domain, so nobody else can pose as the guest.
         checks = " ".join(str(parsed.get("Authentication-Results", "")).split())
         verified = parseaddr(str(parsed["From"]))[1].lower() == address.lower() and f"smtp.mailfrom={address}" in checks and "spf=pass" in checks
@@ -89,7 +89,7 @@ def ensure_agent(config: Config, address: str) -> None:
         task = taskfile.load(config, task_name(config))
         if task.fields["status"] != "done" and agents.status(config, task.address)[0] != "missing":
             return
-    _ = work.start_task(config, task_name(config), Path(config.get("AMH_GUEST_WORKDIR")), GOAL.format(address=address), config.main_manager)
+    _ = work.start_task(config, task_name(config), Path(config.get("guest.workdir")), GOAL.format(address=address), config.main_manager)
 
 
 def delivery_text(config: Config, source_line: str) -> str:
@@ -105,7 +105,7 @@ def reply(config: Config, mail_name: str, body: str, images: list[Path]) -> str:
         raise SystemExit("amh: the answer is empty")
     headers = stored_headers((config.root / mail_dir(config) / Path(mail_name).name).read_text(encoding="utf-8"))
     subject = "Re: " + re.sub(r"^(\s*(re|回复)\s*[:：]\s*)+", "", headers.get("Subject", ""), flags=re.IGNORECASE)
-    message = mail.compose(config, config.get("AMH_GUEST_ADDRESS"), subject, body, headers.get("Message-ID", ""), headers.get("References", ""))
+    message = mail.compose(config, config.get("guest.address"), subject, body, headers.get("Message-ID", ""), headers.get("References", ""))
     for image in images:
         kind = IMAGE_KINDS.get(image.suffix.lower())
         if kind is None:

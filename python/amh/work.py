@@ -7,7 +7,7 @@ import subprocess
 from pathlib import Path
 
 from amh import agents, mail, taskfile
-from amh.config import LOCAL_ENV, Config
+from amh.config import Config
 from amh.taskfile import HUMAN_MARK, Task
 
 # 🧑 "make the manager reporting sound more like messaging the manager, to discourage agents to dump info to manager"
@@ -122,7 +122,7 @@ def start_task(
         if old.fields["status"] != "done" and old.address != "retired" and agents.status(config, old.address)[0] != "missing":
             raise SystemExit(f"amh: {name} already has a live agent at {old.address}; message it, or stop it first")
     tool = tool or ("claude" if as_manager else "codex")
-    default_model, default_effort = (agents.MANAGER_DEFAULTS if as_manager else agents.DEFAULTS)[tool]
+    default_model, default_effort = agents.launch_default(config, tool, as_manager)
     request = f'<manager_delegation from="{manager}">\n{goal.strip()}\n</manager_delegation>\n'
     if email:
         # 🧑 "human requests should be sent verbatim"
@@ -275,6 +275,7 @@ def rotate(config: Config, name: str, tool: str | None, model: str | None, effor
                 other.fields["managerat"] = new
                 taskfile.save(config, other)
         if is_main:
-            taskfile.write(LOCAL_ENV, LOCAL_ENV.read_text(encoding="utf-8").replace(old, new))
+            env = config.state_dir / "env.toml"
+            taskfile.write(env, env.read_text(encoding="utf-8").replace(old, new))
     agents.stop(config, old)
     return new

@@ -58,8 +58,8 @@ def route(config: Config, subject: str, body: str) -> Task:
 
 def take_in_mail(config: Config, box: imaplib.IMAP4_SSL) -> None:
     """Store each new human email and append a `(pending)` block naming it to the right task file."""
-    for uid, parsed in mail.unseen_from(box, config.get("OMO_HUMAN_EMAIL_ADDRESS")):
-        name = f"{config.get('AMH_MAIL_PREFIX', 'mail')}-{uid}.txt"
+    for uid, parsed in mail.unseen_from(box, config.get("mail.human_address")):
+        name = f"{config.get('mail.stored_prefix', 'mail')}-{uid}.txt"
         stored = config.mail_dir / name
         subject, body = " ".join(str(parsed["Subject"] or "").split()), mail.text_of(parsed)
         if not stored.exists():

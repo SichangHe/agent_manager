@@ -14,14 +14,14 @@ one program for agents and managers; usage lives in `amh --help`, not here
 - port order: one part at a time, each left in production for a while before the next
     - planned: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher
     - the human's earlier design choices to follow while porting: `docs/design-choices.md`
-- install: `cargo install --path .`; settings in `$XDG_CONFIG_HOME/amh/local.env` (default `~/.config/amh/local.env`)
+- install: `cargo install --path .`
 - watcher: `amh manager watch` in the foreground; `amh-watch.service` is the user systemd unit for it
 - `use-amh`: stub that old command names link to
-- test: `cargo build --release && /usr/bin/python3 test_amh.py`; prints only failures
-    - parses each command line with the built binary (`AMH_PARSE_ONLY=1`), then runs the Python in-process
+- test: `cargo build --release && python3 test_amh.py`; prints only failures
+    - re-runs itself inside the built binary (`AMH_RUN_SCRIPT`), so the Rust parts are exercised; command lines are parsed by the binary (`AMH_PARSE_ONLY=1`)
     - runs on a temporary copy of the root's `*.md` with fakes for Omnigent, tmux, IMAP, SMTP; refuses to run on the live root
 
-records, all under the work-log root (`OMO_WORK_LOGS_ROOT`)
+records, all under the work-log root (`work_logs` in `env.toml`)
 - task file `NAME.md`
     - frontmatter: `status` `runat` `managerat` `is_manager` `tool` `pending_task_items`
         - `runat`: agent address, `omnigent://ID` or tmux `SESSION:WINDOW`, or `retired`
@@ -33,7 +33,15 @@ records, all under the work-log root (`OMO_WORK_LOGS_ROOT`)
 - name of a task file without `.md` = tag in email subjects `[tag]`
 
 modules
-- `config`: reads `local.env` (`export K="V"`, `$VAR` expanded); the environment overrides it; `OMO_MANAGER_LOCAL_ENV` names another file
+- settings (`src/settings.rs`, Rust; the Python reads them through the built-in module `amh_rs`)
+    - 🧑 "Separate config file, which should live in .config or something and get committed, and env, which should be in local state or something and include things like where the work_logs is"
+    - `config.toml` in the config folder (`$AMH_CFG_DIR`, else `$XDG_CONFIG_HOME/amh`, else `~/.config/amh`): same on every machine, committed; optional
+        - `[launch.TOOL]` `model`, `effort`, `manager_model`, `manager_effort`
+    - `env.toml` in the state folder (`$AMH_STATE_DIR`, else `$XDG_STATE_HOME/amh`, else `~/.local/state/amh`): this machine only, never committed; required
+        - `work_logs`, `main_manager`, `[omnigent] url token`, `[mail] agent_address agent_password human_address human_mailbox_config stored_prefix`, `[guest] address name workdir stored_prefix`
+    - both files flatten to dotted keys (`mail.agent_address`); `env.toml` wins
+    - the state folder also holds what the program records: the lock, the watcher log, and the `amh-*.txt` records
+- `config`: the settings as the Python sees them
 - `taskfile`: parse/render task files without a YAML library; one lock file serializes every writer; atomic replace
 - `agents`: send, status, stop, launch for Omnigent (HTTP) and tmux
     - `own_address`: the caller's Omnigent session variable, else its tmux pane
@@ -43,7 +51,7 @@ modules
 - `mail`: send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
 - `work`: what each action does; `problems`, `check`, `tree`, `rotate`
-    - `rotate` of the main manager rewrites its address in `local.env`
+    - `rotate` of the main manager rewrites its address in `env.toml`
 - `watch`: loop every 5 s
     - mail intake: store, route, append `(pending)` + source line, mark read
         - route: `[tag]` task; `for manager` at body edge -> its manager; done task -> its manager; else main manager

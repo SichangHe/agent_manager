@@ -38,9 +38,9 @@ def connect(config: Config, human: bool = False) -> imaplib.IMAP4_SSL:
 
     `human` logs in to the human's mailbox instead, where agent mail is unread until the human opens it.
     """
-    host, user, password = "imap.gmail.com", config.get("OMO_AGENT_GMAIL_ADDRESS"), config.get("OMO_AGENT_GMAIL_APP_PASSWORD")
+    host, user, password = "imap.gmail.com", config.get("mail.agent_address"), config.get("mail.agent_password")
     if human:
-        path = Path(config.get("OMO_EMAIL_CONFIG_PATH", str(Path.home() / ".config/himalaya/config.toml")))
+        path = Path(config.get("mail.human_mailbox_config", str(Path.home() / ".config/himalaya/config.toml")))
         host, user, command = (re.search(rf'^{key} = "(.*)"$', path.read_text(encoding="utf-8"), re.MULTILINE)[1] for key in ("host", "login", "cmd"))
         password = subprocess.run(command, shell=True, capture_output=True, text=True, check=True).stdout.strip()
     box = imaplib.IMAP4_SSL(host, timeout=60)
@@ -83,7 +83,7 @@ def tag_of(subject: str) -> str | None:
 def compose(config: Config, to: str, subject: str, body: str, reply_to: str, references: str) -> EmailMessage:
     """Build an email from the agent account, as a reply to Message-ID `reply_to` when that is given."""
     message = EmailMessage()
-    message["From"] = config.get("OMO_AGENT_GMAIL_ADDRESS")
+    message["From"] = config.get("mail.agent_address")
     message["To"] = to
     message["Subject"] = subject
     message["Message-ID"] = make_msgid(domain="gmail.com")
@@ -97,7 +97,7 @@ def compose(config: Config, to: str, subject: str, body: str, reply_to: str, ref
 def deliver(config: Config, message: EmailMessage) -> str:
     """Send an email through the agent account and return its Message-ID."""
     with smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60) as smtp:
-        _ = smtp.login(config.get("OMO_AGENT_GMAIL_ADDRESS"), config.get("OMO_AGENT_GMAIL_APP_PASSWORD"))
+        _ = smtp.login(config.get("mail.agent_address"), config.get("mail.agent_password"))
         _ = smtp.send_message(message)
     return str(message["Message-ID"])
 
@@ -122,7 +122,7 @@ def send(config: Config, tag: str, subject: str, body: str, sender: str) -> str:
     finally:
         box.shutdown()
     last = thread[-1] if thread else Header("", "", "", "", "")
-    message = compose(config, config.get("OMO_HUMAN_EMAIL_ADDRESS"), f"{'Re: ' if thread else ''}[{tag}] {title or (bare(last.subject) if thread else tag)}", body, last.message_id, last.references)
+    message = compose(config, config.get("mail.human_address"), f"{'Re: ' if thread else ''}[{tag}] {title or (bare(last.subject) if thread else tag)}", body, last.message_id, last.references)
     message["X-AMH-From"] = sender
     sent = deliver(config, message)
     if sender != WATCHER:
@@ -136,7 +136,7 @@ def unread(config: Config, tag: str, trash_ids: list[str]) -> list[Header]:
     # 🧑 “Trash the emails that I no longer need to read that are not read yet.”
     box = connect(config, human=True)
     try:
-        found = search(box, "INBOX", not trash_ids, "UNSEEN", "FROM", f'"{config.get("OMO_AGENT_GMAIL_ADDRESS")}"', "SUBJECT", f'"[{tag}]"')
+        found = search(box, "INBOX", not trash_ids, "UNSEEN", "FROM", f'"{config.get("mail.agent_address")}"', "SUBJECT", f'"[{tag}]"')
         doomed = [h for h in found if h.message_id in trash_ids]
         if doomed:
             _ = box.uid("move", ",".join(h.uid for h in doomed), TRASH)

@@ -8,8 +8,8 @@ WorkingDirectory=%h
 UMask=0077
 Environment=PATH=%h/.nix-profile/bin:%h/.config/bin:/usr/bin:/bin
 ExecStart=%h/.cargo/bin/amh manager watch
-StandardOutput=append:%h/.local/state/omo-manager/amh-watch.log
-StandardError=append:%h/.local/state/omo-manager/amh-watch.log
+StandardOutput=append:%h/.local/state/amh/amh-watch.log
+StandardError=append:%h/.local/state/amh/amh-watch.log
 Restart=always
 RestartSec=5s
 
