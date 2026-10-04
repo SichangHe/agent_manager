@@ -4,7 +4,7 @@ use clap::{Arg, ArgAction, Command};
 
 /// Build the whole command tree.
 pub fn command() -> Command {
-    Command::new("amh").about("Agent manager helper: one command for agents and managers.\n\nStart at `amh --help` and follow the groups down; every level has its own `--help`.").after_help("Agents in tmux instead of Omnigent: `amh help tmux`.").subcommand_required(true).arg_required_else_help(true)
+    Command::new("amh").about("Agent manager helper: one command for agents and managers.\n\nStart at `amh --help` and follow the groups down; every level has its own `--help`.").subcommand_required(true).arg_required_else_help(true)
         .subcommand(Command::new("tell").about("Send a message to your manager, the human, an agent you manage, or the guest.").subcommand_required(true).arg_required_else_help(true)
             .subcommand(Command::new("manager").about("Message your manager, like a chat message.").long_about("Message your manager, like a chat message.\n\nUse it only to ask for help or coordination, or to say you are done or blocked.\nAt most 600 characters. For details, write a file and name its path in the message.")
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
@@ -59,8 +59,6 @@ pub fn command() -> Command {
                 .arg(Arg::new("effort").long("effort").help("reasoning effort; default: the tool's usual effort"))
                 .arg(Arg::new("manager").long("manager").value_name("ADDRESS").help("who the agent reports to; default: you"))
                 .arg(Arg::new("as_manager").long("as-manager").action(ArgAction::SetTrue).help("the new agent is itself a manager"))
-                .arg(Arg::new("tmux").long("tmux").value_name("SESSION").help("run Codex in a new window of this tmux session instead of on Omnigent"))
-                .arg(Arg::new("proxy").long("proxy").value_name("URL").help("with --tmux: make Codex talk to this local proxy, e.g. http://localhost:18181/backend-api/codex, instead of using its saved login"))
                 .arg(Arg::new("email").long("email").value_name("FILE").help("stored human email that caused this task; needs --lines"))
                 .arg(Arg::new("lines").long("lines").value_name("START-END").help("the relevant lines of --email"))
             )

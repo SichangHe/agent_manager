@@ -4,14 +4,13 @@
 
 use std::fs::{self, File};
 use std::path::PathBuf;
-use std::process::Command;
 
 use pyo3::exceptions::PySystemExit;
 use pyo3::prelude::*;
 use serde_json::Value;
 
 use crate::tasks::{self, Task};
-use crate::{settings, taskfile};
+use crate::{omnigent, settings, taskfile};
 
 /// An expected refusal: the message is printed and the command fails.
 fn refuse(message: impl Into<String>) -> PyErr {
@@ -102,7 +101,7 @@ impl Store {
         {
             return self.load(name);
         }
-        let address = own_address()?;
+        let address = omnigent::own_address().map_err(refuse)?;
         let mut matches: Vec<Task> = self
             .active()?
             .into_iter()
@@ -125,33 +124,6 @@ impl Store {
             None => Ok(()),
         }
     }
-}
-
-/// Where the calling agent runs: its Omnigent session, else its tmux window.
-fn own_address() -> PyResult<String> {
-    let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    if let Some(session) = set("OMNIGENT_RUNNER_PRIMARY_SESSION_ID") {
-        return Ok(format!("omnigent://{session}"));
-    }
-    if let Some(pane) = set("TMUX_PANE") {
-        // An Omnigent session's own `TMUX` points at a private server; the agents live on the user's default one.
-        let shown = Command::new("tmux")
-            .env_remove("TMUX")
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                &pane,
-                "#{session_name}:#{window_index}",
-            ])
-            .output();
-        if let Some(shown) = shown.ok().filter(|shown| shown.status.success()) {
-            return Ok(String::from_utf8_lossy(&shown.stdout).trim().to_owned());
-        }
-    }
-    Err(refuse(
-        "amh: cannot tell which agent is calling; pass --task-file NAME.md",
-    ))
 }
 
 /// Email the human about their items on a task's list; the mail part is still Python.

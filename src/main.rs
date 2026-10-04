@@ -51,9 +51,6 @@ def install(sources):
 
     sys.meta_path.insert(0, Embedded())
 "#;
-// 🧑 "Move those to the relevant and optional help pages for working with tmux in the CLI that does not show normally but do show when given specific command/flag when agents want to use tmux"
-const TMUX_HELP: &str = include_str!("../python/amh/tmux.md");
-
 /// Turn the chosen action and its values into the JSON object the Python entry point takes.
 fn parsed(command: &Command, matches: &ArgMatches) -> Value {
     let (group, group_matches) = matches.subcommand().expect("clap requires a group");
@@ -138,11 +135,6 @@ fn force_utf8() {
 }
 
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().collect();
-    if args.get(1..) == Some(&["help".to_owned(), "tmux".to_owned()]) {
-        print!("{TMUX_HELP}");
-        return ExitCode::SUCCESS;
-    }
     let command = cli::command();
     let parsed = if std::env::var_os("AMH_RUN_SCRIPT").is_some() {
         String::new()

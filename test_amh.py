@@ -1,6 +1,6 @@
 """End-to-end checks of `amh` on a temporary copy of the work-log root; prints only failures.
 
-Run: `/usr/bin/python3 test_amh.py`. Nothing real is touched: Omnigent, tmux, IMAP, and SMTP are replaced by fakes,
+Run: `/usr/bin/python3 test_amh.py`. Nothing real is touched: Omnigent, IMAP, and SMTP are replaced by fakes,
 and settings come from a temporary `env.toml`.
 """
 
@@ -228,75 +228,7 @@ def test_pending_blocks() -> None:
 
 
 def test_transport() -> None:
-    """The real senders, on fake Omnigent, tmux, IMAP, and SMTP."""
-    calls: list[tuple[str, str, object]] = []
-    answer: dict[str, object] = {"queued": True}
-    agents.api = lambda _config, method, path, body=None: calls.append((method, path, body)) or answer  # type: ignore[assignment]
-    answer.update(status="idle", runner_online=False, host_online=True)
-    check(agents.status(CONFIG, "omnigent://abc")[0] == "ready", "an idle session whose runner is parked is reachable", agents.status(CONFIG, "omnigent://abc"))
-    answer.update(host_online=False)
-    check(agents.status(CONFIG, "omnigent://abc")[0] == "missing", "a session on an offline host is missing")
-    calls.clear()
-    agents.send(CONFIG, "omnigent://abc", "one line")
-    check(len(calls) == 1 and calls[0][:2] == ("POST", "/v1/sessions/abc/events"), "single-line Omnigent message", calls)
-    check(calls[0][2] == {"type": "message", "data": {"role": "user", "content": [{"type": "input_text", "text": "one line"}]}}, "message event", calls[0])
-    calls.clear()
-    agents.send(CONFIG, "omnigent://abc", "two\nlines")
-    check(len(calls) == 2 and agents.FOLLOW_UP in str(calls[1][2]), "multi-line message gets a typed follow-up", calls)
-    answer["queued"] = False
-    try:
-        agents.send(CONFIG, "omnigent://abc", "x")
-        check(False, "unqueued message is an error")
-    except agents.AgentError:
-        pass
-    calls.clear()
-    agents.stop(CONFIG, "omnigent://abc")
-    check(calls == [("POST", "/v1/sessions/abc/events", {"type": "stop_session", "data": {}})], "Omnigent stop", calls)
-    sessions = {
-        "run": ({"status": "running", "runner_online": True}, "running"),
-        "idle": ({"status": "idle", "runner_online": True}, "ready"),
-        "off": ({"status": "idle", "runner_online": False}, "missing"),
-        "bad": ({"status": "failed", "runner_online": True, "last_task_error": "boom"}, "error"),
-    }
-    for name, (session, want) in sessions.items():
-        agents.api = lambda *_args, session=session: session  # type: ignore[assignment]
-        state, evidence = agents.status(CONFIG, f"omnigent://{name}")
-        check(state == want and "session_status=" in evidence, f"Omnigent status {name}", (state, evidence))
-        check(name != "bad" or "last_task_error=boom" in evidence, "error evidence", evidence)
-
-    tmux_calls: list[tuple[str, ...]] = []
-    shell = ["node"]
-
-    class Done:
-        returncode, stderr = 0, ""
-
-        def __init__(self, stdout: str) -> None:
-            self.stdout = stdout
-
-    def fake_tmux(*args: str, text_in: str | None = None) -> Done:
-        tmux_calls.append((*args, text_in or ""))
-        return Done(shell[0] if args[0] == "display-message" else "working\nesc to interrupt\n")
-
-    agents.tmux = fake_tmux  # type: ignore[assignment]
-    agents.send(CONFIG, "pb:3", "hello\nthere")
-    names = [call[0] for call in tmux_calls]
-    check(names[-3:] == ["load-buffer", "paste-buffer", "send-keys"], "tmux paste then Enter", names)
-    load = next(call for call in tmux_calls if call[0] == "load-buffer")
-    check(load[1:3] == ("-b", f"amh-{os.getpid()}") and load[-1] == "hello\nthere", "per-process tmux buffer", load)
-    check(agents.status(CONFIG, "pb:3")[0] == "running", "tmux status running")
-    shell[0] = "zsh"
-    tmux_calls.clear()
-    try:
-        agents.send(CONFIG, "pb:3", "hello")
-        check(False, "pasting into a shell is refused")
-    except agents.AgentError:
-        check("paste-buffer" not in [call[0] for call in tmux_calls], "nothing is pasted into a shell")
-    try:
-        agents.stop(CONFIG, "hpb:1")
-        check(False, "human-owned tmux window is not stopped")
-    except agents.AgentError:
-        pass
-
+    """The real mail senders, on fake IMAP and SMTP; the Omnigent client is Rust and is exercised in production."""
     agent_inbox.raws = {"5": email(AGENT, "[t_work] Progress", "old", "<a@x>"), "6": email(AGENT, "Re: [t_work] Progress", "old", "<b@x>"), "7": email(AGENT, "[t_worker] Other", "old", "<c@x>")}
     sent_id = mail.send(CONFIG, "t_work", "", "body text", "omnigent://w")
     message = smtp_out[-1]
@@ -343,7 +275,7 @@ def fake_send(_config: object, address: str, text: str) -> None:
 
 def fake_launch(_config: object, *args: object) -> str:
     launched.append(args)
-    return f"{args[5]}:{len(launched)}" if args[5] else f"omnigent://s{len(launched)}"
+    return f"omnigent://s{len(launched)}"
 
 
 def fake_stop(_config: object, address: str) -> None:
@@ -360,8 +292,7 @@ def install_fakes() -> None:
     agents.launch = fake_launch  # type: ignore[assignment]
     agents.stop = fake_stop  # type: ignore[assignment]
     agents.saw_message = lambda *_args: True  # type: ignore[assignment]
-    agents.api = forbidden  # type: ignore[assignment]
-    agents.tmux = forbidden  # type: ignore[assignment]
+    agents.api_get = forbidden  # type: ignore[assignment]
     watch.log = logs.append  # type: ignore[assignment]
 
 
@@ -379,7 +310,7 @@ def test_task_start() -> None:
     worker = task("t_work.md")
     check((code, out) == (0, "omnigent://s1\n"), "task start prints the address", (code, out))
     check(worker.fields == {"version": "v1.0.0", "status": "running", "managerat": MAIN, "is_manager": "false", "runat": "omnigent://s1", "tool": "codex", "session_id": "s1"}, "worker task fields", worker.fields)
-    check(launched[-1] == ("codex", "gpt-6.1-sol", "low", WORKDIR, "t_work", None, None), "worker launch defaults", launched[-1])
+    check(launched[-1] == ("codex", "gpt-6.1-sol", "low", WORKDIR, "t_work"), "worker launch defaults", launched[-1])
     first = to("omnigent://s1")[0]
     delegation = f'<manager_delegation from="{MAIN}">\nBuild the thing.\n- part one\n</manager_delegation>\n<human_instruction authoritative="true" source="manager_mail/m-7.txt:3-4">\nline three\nline four\n</human_instruction>\n'
     check(first.startswith("Task tag: t_work\nTask file: t_work.md\nUse --task-file t_work.md") and "$ getagentsmd\n" in first and "$ getagentsmd get agent_work\n" in first and first.endswith(delegation), "first prompt", first[-600:])
@@ -389,8 +320,10 @@ def test_task_start() -> None:
     sub = task("t_sub.md")
     check(code == 0 and (sub.fields["status"], sub.fields["is_manager"], sub.fields["managerat"]) == ("long_running", "true", "omnigent://s1"), "manager task fields", sub.fields)
     check(launched[-1][:3] == ("codex", "gpt-6-luna", "medium") and "$ getagentsmd get submanager\n" in to(sub.address)[0], "manager launch", launched[-1])
-    code, out = amh("task", "start", "t_tmux.md", "--dir", str(WORKDIR), "--prompt", str(prompt), "--tmux", "pb", "--proxy", "http://localhost:1/x", "--manager", MAIN)
-    check(code == 0 and task("t_tmux.md").address == "pb:3" and "session_id" not in task("t_tmux.md").fields and launched[-1][5:] == ("pb", "http://localhost:1/x"), "tmux task start", (code, out, launched[-1]))
+    # A task left over from before Omnigent: its address is not a session, so no agent can be reached there.
+    (ROOT / "t_tmux.md").write_text(f"---\nversion: v1.0.0\nstatus: running\nmanagerat: {MAIN}\nis_manager: false\nrunat: pb:3\ntool: codex\npending_task_items: []\n---\n", encoding="utf-8")
+    (ROOT / "TODO.md").write_text(text_of("TODO.md").replace("current:\n", "current:\nt_tmux.md pb:3\n", 1), encoding="utf-8")
+    launched.append(("codex", "x", "low", WORKDIR, "t_tmux"))
     code, out = amh("task", "start", "t_work.md", "--dir", str(WORKDIR), "--prompt", str(prompt), me=MAIN)
     check("already has a live agent" in str(code) and len(launched) == 3, "a live task is not started twice", code)
     check("go together" in str(amh("task", "start", "t_x.md", "--dir", ".", "--prompt", str(prompt), "--email", "m-7.txt", me=MAIN)[0]), "--email needs --lines")
@@ -466,9 +399,8 @@ def test_tell() -> None:
     check(amh("tell", "agent", "pb:9", "x", me=MAIN)[0] == "amh: pb:9 is down", "an agent error becomes a refusal")
     down.clear()
     check(amh("agent", "compact", "t_work.md")[0] == 0 and to(me)[-1] == "/compact", "agent compact")
-    check(amh("help", "tmux")[1] == (REPO / "python/amh/tmux.md").read_text(encoding="utf-8"), "help tmux prints the tmux page")
     code, out = amh("--help")
-    check(code == 0 and all(group in out for group in ("tell", "todo", "task", "agent", "mail", "manager", "amh help tmux")), "root help names every group", out)
+    check(code == 0 and all(group in out for group in ("tell", "todo", "task", "agent", "mail", "manager")), "root help names every group", out)
 
 
 def test_agent_views() -> None:
@@ -698,11 +630,11 @@ def test_close() -> None:
 
 def test_rotate() -> None:
     check("only Omnigent managers" in str(amh("manager", "rotate", "t_tmux.md")[0]), "a tmux manager is not rotated")
-    agents.api = lambda *_args: {"harness": "claude-native", "model_override": "claude-opus-5-5", "reasoning_effort": "low", "workspace": str(WORKDIR)}  # type: ignore[assignment]
+    agents.api_get = lambda *_args: {"harness": "claude-native", "model_override": "claude-opus-5-5", "reasoning_effort": "low", "workspace": str(WORKDIR)}  # type: ignore[assignment]
     n_stop = len(stopped)
     code, out = amh("manager", "rotate", "t_main.md", "--effort", "high")
     new = out.strip()
-    check(code == 0 and new == f"omnigent://s{len(launched)}" and launched[-1] == ("claude", "claude-opus-5-5", "high", WORKDIR, "t_main", None, None), "rotate launches the same tool and model", (code, out, launched[-1]))
+    check(code == 0 and new == f"omnigent://s{len(launched)}" and launched[-1] == ("claude", "claude-opus-5-5", "high", WORKDIR, "t_main"), "rotate launches the same tool and model", (code, out, launched[-1]))
     first = to(new)[0]
     check("$ getagentsmd get main_manager\n" in first and first.endswith(f"You replace the manager that ran at {MAIN}. Its task file t_main.md in {ROOT} holds its open work and history; take over from there.\n"), "the new manager is told to take over", first[-300:])
     main_task = task("t_main.md")

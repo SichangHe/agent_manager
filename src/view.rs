@@ -43,8 +43,13 @@ fn terminal(who: &str) -> Result<(String, String), String> {
     let parked = format!(
         "{address} has no running terminal; Omnigent parks idle agents. Message it to wake it (`amh tell agent`), then view it again"
     );
-    let resources = omnigent::get(&values, &format!("/v1/sessions/{session}/resources"))
-        .map_err(|error| format!("{parked} ({error})"))?;
+    let resources = omnigent::api(
+        &values,
+        "GET",
+        &format!("/v1/sessions/{session}/resources"),
+        None,
+    )
+    .map_err(|error| format!("{parked} ({error})"))?;
     let running = resources["data"]
         .as_array()
         .into_iter()

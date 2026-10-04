@@ -59,10 +59,10 @@ def instructions(guides: tuple[str, ...], task_name: str) -> str:
     return "\n".join(parts)
 
 
-def start_agent(config: Config, name: str, fields: dict[str, str], tool: str, model: str, effort: str, workdir: Path, guides: tuple[str, ...], request: str, record: str, tmux_session: str | None = None, proxy: str | None = None) -> Task:
+def start_agent(config: Config, name: str, fields: dict[str, str], tool: str, model: str, effort: str, workdir: Path, guides: tuple[str, ...], request: str, record: str) -> Task:
     """Launch an agent for task `name`, record where it runs plus `fields` and `record` in the task file, and give it its first prompt."""
     prompt = f"{instructions(guides, name)}\n{request}"
-    address = agents.launch(config, tool, model, effort, workdir, Path(name).stem, tmux_session, proxy)
+    address = agents.launch(config, tool, model, effort, workdir, Path(name).stem)
     with taskfile.locked(config):
         task = taskfile.load(config, name) if (config.root / name).exists() else Task(name, {"version": "v1.0.0"}, [], "")
         task.fields |= {**fields, "runat": address, "tool": tool}
@@ -82,7 +82,7 @@ def start_agent(config: Config, name: str, fields: dict[str, str], tool: str, mo
 
 
 def start_task(
-    config: Config, name: str, workdir: Path, goal: str, manager: str, tool: str | None = None, model: str | None = None, effort: str | None = None, as_manager: bool = False, tmux_session: str | None = None, proxy: str | None = None, email: str | None = None, lines: str | None = None
+    config: Config, name: str, workdir: Path, goal: str, manager: str, tool: str | None = None, model: str | None = None, effort: str | None = None, as_manager: bool = False, email: str | None = None, lines: str | None = None
 ) -> str:
     """Create or reuse a task file, launch its agent with `goal` as its manager's request, and return the agent's address.
 
@@ -105,7 +105,7 @@ def start_task(
     # 🧑 “Long running simply means that the agent will not be closed if they have zero pending item.”
     fields = {"status": "long_running" if as_manager else "running", "managerat": manager, "is_manager": str(as_manager).lower()}
     guides = (*MANAGER_GUIDES, "submanager") if as_manager else ("agent_work",)
-    return start_agent(config, name, fields, tool, model or default_model, effort or default_effort, workdir, guides, request, request, tmux_session, proxy).address
+    return start_agent(config, name, fields, tool, model or default_model, effort or default_effort, workdir, guides, request, request).address
 
 
 def close_task(config: Config, name: str, agent_gone: bool, email: bool, own: bool) -> str:
@@ -188,7 +188,7 @@ def rotate(config: Config, name: str, tool: str | None, model: str | None, effor
     old = taskfile.load(config, name).address
     if not agents.is_omnigent(old):
         raise SystemExit("amh: only Omnigent managers can be rotated")
-    session = agents.api(config, "GET", agents.session_path(old) + "?include_items=false")
+    session = agents.api_get(agents.session_path(old) + "?include_items=false")
     is_main = old == config.main_manager
     guides = (*MANAGER_GUIDES, "main_manager" if is_main else "submanager")
     request = f"You replace the manager that ran at {old}. Its task file {name} in {config.root} holds its open work and history; take over from there.\n"

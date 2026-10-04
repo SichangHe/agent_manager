@@ -8,9 +8,8 @@ one program for agents and managers; usage lives in `amh --help`, not here
     - `src/cli.rs`: the command tree with every help text
     - `src/main.rs`: turns the parsed action into one JSON object and calls `amh.cli.run`; maps the result and `SystemExit` to the exit status
     - `src/bridge.rs`: the built-in Python module `amh_rs`, through which the remaining Python calls the parts already ported
-    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`
+    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`; talking to agents; the agent view; the action log
     - `amh_rs.run_action` runs a ported action and returns `None` for the others, which `amh.cli.run` then runs in Python
-    - `amh help tmux` prints `python/amh/tmux.md`
 - Python (`python/amh/`): everything else, until each part is ported
     - compiled into the binary and imported from memory, so no source path is needed at run time
     - embedded interpreter: the system Python (`.cargo/config.toml`), UTF-8 forced, standard library only
@@ -24,12 +23,12 @@ one program for agents and managers; usage lives in `amh --help`, not here
 - `use-amh`: stub that old command names link to
 - test: `cargo build --release && python3 test_amh.py`; prints only failures
     - re-runs itself inside the built binary (`AMH_RUN_SCRIPT`), so the Rust parts are exercised; command lines are parsed by the binary (`AMH_PARSE_ONLY=1`)
-    - runs on a temporary copy of the root's `*.md` with fakes for Omnigent, tmux, IMAP, SMTP; refuses to run on the live root
+    - runs on a temporary copy of the root's `*.md` with fakes for the agent calls, IMAP, SMTP; refuses to run on the live root
 
 records, all under the work-log root (`work_logs` in `env.toml`)
 - task file `NAME.md`
     - frontmatter: `status` `runat` `managerat` `is_manager` `tool` `pending_task_items`
-        - `runat`: agent address, `omnigent://ID` or tmux `SESSION:WINDOW`, or `retired`
+        - `runat`: agent address `omnigent://ID`, or `retired`
         - `status`: `running` `long_running` `blocked` (+ `blocked_on`) `done`
         - item starting `🧑 ` = the human's request
     - body: free text; whole-line `(notes)`; `(pending)` blocks
@@ -53,15 +52,15 @@ modules
     - `src/tasks.rs`: the `Task` record and every change to it as pure functions: add, remove, reword, move an item; note; status; `show`; `check` of task files against the task list; the notice text for the human
     - `src/actions.rs`: the input and output around them: settings, the lock, loading and saving, the caller's own task, the task list row, and the notice email (sent through the Python mail part)
 - `amh agent view WHO` (`src/view.rs`, Rust): the human's command-line view; attaches the caller's terminal to the agent's own tmux terminal that Omnigent runs (`--read-only` to only watch); a parked agent has none until a message wakes it
-- Omnigent client (`src/omnigent.rs`, Rust): JSON over HTTP to the local server; so far only the read used by the view
-    - 🧑 "the Rust port would only support Omnigent, not tmux": the tmux launch, paste, and status code stays Python and goes away with it
+- agents (`src/omnigent.rs`, Rust): every agent is an Omnigent session, reached as JSON over HTTP on the local server
+    - 🧑 "the Rust port would only support Omnigent, not tmux": no tmux launch, paste, or status; an address that is not `omnigent://ID` is reported as not reachable
+    - `send`: one message event; a multi-line message is followed by one typed line, because Claude Code treats multi-line input as pasted text and does not act on it alone
+    - `classify`: pure; `running`, `ready` (idle, also when Omnigent has parked the runner), `error` (failed, with the harness error), `missing`
+    - `launch`: needs exactly one `TOOL-native-ui` agent and one online host; every tool runs with no sandbox and no permission prompts; waits up to 90 s for the runner
+    - `stop`, `saw_message` (did the session's history take the message), `own_address` (the caller's session variable), `launch_default` (model and effort per tool, `[launch.TOOL]` in `config.toml`)
 - action log (`src/log.rs`, Rust): every `amh` run appends one line to `amh-actions.log` in the state folder: time, caller (Omnigent session, else tmux pane, else user), exit status, and the parsed command line
 - `taskfile` (Python): the `Task` record, loading and saving, the one lock file that serializes every writer, finding the caller's task
-- `agents`: send, status, stop, launch for Omnigent (HTTP) and tmux
-    - `own_address`: the caller's Omnigent session variable, else its tmux pane
-    - multi-line message to Omnigent is followed by one typed line
-        - Claude Code treats multi-line input as pasted text and does not act on it alone
-    - tmux commands drop `TMUX` so they reach the user's default server
+- `agents` (Python): thin wrappers over the Rust agent functions
 - `mail`: send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
 - `work`: what each action does; `problems`, `check`, `tree`, `rotate`

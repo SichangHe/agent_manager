@@ -53,7 +53,7 @@ def task_start(config: Config, args: SimpleNamespace) -> None:
     if bool(args.email) != bool(args.lines):
         raise SystemExit("amh: --email and --lines go together")
     goal = Path(args.prompt).read_text(encoding="utf-8")
-    print(work.start_task(config, args.task, Path(args.dir), goal, args.manager or agents.own_address(), args.tool, args.model, args.effort, args.as_manager, args.tmux, args.proxy, args.email, args.lines))
+    print(work.start_task(config, args.task, Path(args.dir), goal, args.manager or agents.own_address(), args.tool, args.model, args.effort, args.as_manager, args.email, args.lines))
 
 
 def task_close(config: Config, args: SimpleNamespace) -> None:
