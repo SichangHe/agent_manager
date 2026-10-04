@@ -14,7 +14,7 @@ pub fn command() -> Command {
             )
             .subcommand(Command::new("human").about("Email the human.").long_about("Email the human.\n\nThe body comes from --file, or from standard input when --file is omitted.\nReuse the subject of the thread you are answering; the tag of your task is added for you.")
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
-                .arg(Arg::new("subject").long("subject").required(true).help("plain English, under 60 characters"))
+                .arg(Arg::new("subject").long("subject").required(true).help("plain English; a new subject must be under 60 characters, a reply reuses the subject of its thread"))
                 .arg(Arg::new("file").long("file").help("file holding the email body"))
                 .arg(Arg::new("attach").long("attach").action(ArgAction::Append).value_name("PATH").help("a file to attach, such as a figure the human asked to see; repeat as needed; 20 MB in total at most"))
                 .arg(Arg::new("replaces").long("replaces").action(ArgAction::Append).value_name("MESSAGE_ID").help("an earlier email of yours that this one replaces; if the human has not read it, it goes to the trash; repeat as needed"))
