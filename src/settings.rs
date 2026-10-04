@@ -1,13 +1,10 @@
-//! Settings: the committed `config.toml` and the machine-local `env.toml`, exposed to the Python as module `amh_rs`.
+//! Settings: the committed `config.toml` and the machine-local `env.toml`.
 // 🧑 "Separate config file, which should live in .config or something and get committed, and env, which should be in local state or something and include things like where the work_logs is"
 // 🧑 "The config file can use `$AMH_CFG_DIR` for paths" ... "Also respect XDG etc."
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::{env, fs};
-
-use pyo3::exceptions::PyRuntimeError;
-use pyo3::prelude::*;
 
 /// Resolve one of the program's folders: the explicit variable, else `amh` under the XDG base, else under the home default.
 fn folder(explicit: &str, xdg: &str, home_default: &str) -> PathBuf {
@@ -27,7 +24,7 @@ fn config_dir() -> PathBuf {
 }
 
 /// The folder of `env.toml` and of everything the program records while running.
-fn state_dir() -> PathBuf {
+pub fn state_dir() -> PathBuf {
     folder("AMH_STATE_DIR", "XDG_STATE_HOME", ".local/state")
 }
 
@@ -54,7 +51,7 @@ fn flatten(key: String, value: &toml::Value, values: &mut BTreeMap<String, Strin
 }
 
 /// Read both files; `env.toml` must exist, and its values win over `config.toml`.
-fn load() -> Result<BTreeMap<String, String>, String> {
+pub fn load() -> Result<BTreeMap<String, String>, String> {
     let mut values = BTreeMap::new();
     for (path, required) in [
         (config_dir().join("config.toml"), false),
@@ -74,22 +71,4 @@ fn load() -> Result<BTreeMap<String, String>, String> {
         }
     }
     Ok(values)
-}
-
-/// The parts of `amh` that are already Rust, callable from the embedded Python.
-#[pymodule]
-pub mod amh_rs {
-    use super::*;
-
-    /// Every setting under its dotted key.
-    #[pyfunction]
-    fn settings() -> PyResult<BTreeMap<String, String>> {
-        load().map_err(|message| PyRuntimeError::new_err(format!("amh: {message}")))
-    }
-
-    /// The folder holding `env.toml` and the program's records.
-    #[pyfunction]
-    fn state_dir() -> PathBuf {
-        super::state_dir()
-    }
 }

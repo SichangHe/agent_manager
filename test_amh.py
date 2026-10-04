@@ -109,7 +109,7 @@ def text_of(name: str) -> str:
 def todo_section(name: str) -> str:
     rows = text_of("TODO.md").split("\n")
     at = [i for i, row in enumerate(rows) if row.split(" ", 1)[0] == name]
-    return taskfile.section_at(rows, at[0]) if len(at) == 1 else f"{len(at)} rows"
+    return next(rows[i].strip().lower() for i in range(at[0], -1, -1) if rows[i].strip().lower() in taskfile.SECTIONS) if len(at) == 1 else f"{len(at)} rows"
 
 
 def email(sender: str, subject: str, body: str, message_id: str, image: bool = False, auth: str = "") -> bytes:

@@ -3,8 +3,10 @@
 //! Rust parses the command line. The embedded Python in `python/amh` does the work until each part is ported.
 // 🧑 "at the beginning use py03 to call everything and only have the Rust part do command line parsing"
 
+mod bridge;
 mod cli;
 mod settings;
+mod taskfile;
 
 use std::ffi::CString;
 use std::process::ExitCode;
@@ -15,7 +17,7 @@ use pyo3::prelude::*;
 use pyo3::types::{IntoPyDict, PyDict};
 use serde_json::{Map, Value};
 
-use settings::amh_rs;
+use bridge::amh_rs;
 
 /// The Python package, compiled into the binary so that no source path is needed at run time.
 const SOURCES: &[(&str, &str)] = &[

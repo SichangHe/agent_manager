@@ -7,6 +7,8 @@ one program for agents and managers; usage lives in `amh --help`, not here
 - Rust (`src/`): parses the command line (clap), then calls the Python through PyO3
     - `src/cli.rs`: the command tree with every help text
     - `src/main.rs`: turns the parsed action into one JSON object and calls `amh.cli.run`; maps the result and `SystemExit` to the exit status
+    - `src/bridge.rs`: the built-in Python module `amh_rs`, through which the remaining Python calls the parts already ported
+    - ported so far: settings, task files and task list
     - `amh help tmux` prints `python/amh/tmux.md`
 - Python (`python/amh/`): everything else, until each part is ported
     - compiled into the binary and imported from memory, so no source path is needed at run time
@@ -42,7 +44,9 @@ modules
     - both files flatten to dotted keys (`mail.agent_address`); `env.toml` wins
     - the state folder also holds what the program records: the lock, the watcher log, and the `amh-*.txt` records
 - `config`: the settings as the Python sees them
-- `taskfile`: parse/render task files without a YAML library; one lock file serializes every writer; atomic replace
+- task files and task list (`src/taskfile.rs`, Rust): parse and render task files without a YAML library, find `(pending)` blocks, mark items, place a task's row in `TODO.md`, atomic file replace keeping permissions
+    - checked against the previous Python on every file of the live root: same parse, render, blocks, and placement
+- `taskfile` (Python): the `Task` record, loading and saving, the one lock file that serializes every writer, finding the caller's task
 - `agents`: send, status, stop, launch for Omnigent (HTTP) and tmux
     - `own_address`: the caller's Omnigent session variable, else its tmux pane
     - multi-line message to Omnigent is followed by one typed line
