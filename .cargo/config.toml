@@ -1,0 +1,3 @@
+# The embedded Python is the system one, so `amh` does not depend on any virtual environment an agent has active.
+[env]
+PYO3_PYTHON = "/usr/bin/python3"

@@ -1,0 +1,17 @@
+[Unit]
+Description=amh watcher: takes in the human's email and delivers pending work to agents
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+UMask=0077
+Environment=PATH=%h/.nix-profile/bin:%h/.config/bin:/usr/bin:/bin
+ExecStart=%h/.cargo/bin/amh manager watch
+StandardOutput=append:%h/.local/state/omo-manager/amh-watch.log
+StandardError=append:%h/.local/state/omo-manager/amh-watch.log
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target
