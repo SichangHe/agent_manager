@@ -12,6 +12,8 @@ one program for agents and managers; usage lives in `amh --help`, not here
     - compiled into the binary and imported from memory, so no source path is needed at run time
     - embedded interpreter: the system Python (`.cargo/config.toml`), UTF-8 forced, standard library only
 - port order: one part at a time, each left in production for a while before the next
+    - planned: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher
+    - the human's earlier design choices to follow while porting: `docs/design-choices.md`
 - install: `cargo install --path .`; settings in `$XDG_CONFIG_HOME/amh/local.env` (default `~/.config/amh/local.env`)
 - watcher: `amh manager watch` in the foreground; `amh-watch.service` is the user systemd unit for it
 - `use-amh`: stub that old command names link to
