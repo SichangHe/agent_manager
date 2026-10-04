@@ -73,6 +73,11 @@ pub fn load() -> Result<BTreeMap<String, String>, String> {
     Ok(values)
 }
 
+/// One setting by its dotted key, e.g. `mail.agent_address`; empty when it is not set.
+pub fn get<'a>(values: &'a BTreeMap<String, String>, key: &str) -> &'a str {
+    values.get(key).map(String::as_str).unwrap_or_default()
+}
+
 /// The work-log root holding task files, `TODO.md`, and stored human mail.
 pub fn work_logs(values: &BTreeMap<String, String>) -> PathBuf {
     match values.get("work_logs") {

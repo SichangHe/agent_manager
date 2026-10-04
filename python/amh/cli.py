@@ -16,7 +16,7 @@ from types import SimpleNamespace
 
 import amh_rs
 
-from amh import agents, config as configuration, guest, mail, taskfile, watch, work
+from amh import agents, config as configuration, mail, taskfile, work
 from amh.config import Config
 
 Run = Callable[[Config, SimpleNamespace], int | None]
@@ -37,11 +37,7 @@ def tell_agent(config: Config, args: SimpleNamespace) -> None:
     if bool(args.text) == bool(args.file):
         raise SystemExit("amh: give the message as TEXT or as --file, not both")
     text = Path(args.file).read_text(encoding="utf-8") if args.file else args.text
-    agents.send(config, address(config, args.who), work.envelope(agents.own_address(), text))
-
-
-def tell_guest(config: Config, args: SimpleNamespace) -> None:
-    print(f"Email sent to the guest.\nMessage-ID: {guest.reply(config, args.mail, Path(args.file).read_text(encoding='utf-8'), [Path(image) for image in args.image])}")
+    agents.send(config, address(config, args.who), amh_rs.envelope(agents.own_address(), text))
 
 
 def address(config: Config, who: str) -> str:
@@ -49,11 +45,11 @@ def address(config: Config, who: str) -> str:
     return taskfile.load(config, who).address if who.endswith(".md") else who
 
 
-def task_start(config: Config, args: SimpleNamespace) -> None:
+def task_start(_config: Config, args: SimpleNamespace) -> None:
     if bool(args.email) != bool(args.lines):
         raise SystemExit("amh: --email and --lines go together")
     goal = Path(args.prompt).read_text(encoding="utf-8")
-    print(work.start_task(config, args.task, Path(args.dir), goal, args.manager or agents.own_address(), args.tool, args.model, args.effort, args.as_manager, args.email, args.lines))
+    print(amh_rs.start_task(args.task, args.dir, goal, args.manager or agents.own_address(), args.tool, args.model, args.effort, args.as_manager, args.email, args.lines))
 
 
 def task_close(config: Config, args: SimpleNamespace) -> None:
@@ -61,10 +57,10 @@ def task_close(config: Config, args: SimpleNamespace) -> None:
     print(f"closed {name} at {work.close_task(config, name, args.agent_gone, not args.no_email, own=args.task is None)}")
 
 
-def agent_problems(config: Config, _args: SimpleNamespace) -> int:
-    found = work.problems(config)
-    for task, problem, evidence in found:
-        print(f"{task.name} at {task.address}: {problem} ({evidence})")
+def agent_problems(_config: Config, _args: SimpleNamespace) -> int:
+    found = amh_rs.problems()
+    for name, at, problem, evidence in found:
+        print(f"{name} at {at}: {problem} ({evidence})")
     return 3 if found else 0
 
 
@@ -117,7 +113,6 @@ HANDLERS: dict[tuple[str, str], Run] = {
     ("tell", "manager"): tell_manager,
     ("tell", "human"): tell_human,
     ("tell", "agent"): tell_agent,
-    ("tell", "guest"): tell_guest,
     ("task", "start"): task_start,
     ("task", "close"): task_close,
     ("agent", "problems"): agent_problems,
@@ -130,7 +125,6 @@ HANDLERS: dict[tuple[str, str], Run] = {
     ("manager", "watchers"): manager_watchers,
     ("manager", "rotate"): manager_rotate,
     ("manager", "worktree"): manager_worktree,
-    ("manager", "watch"): lambda _config, _args: watch.run(),
 }
 
 

@@ -1,18 +1,24 @@
 //! `amh`, the agent manager helper.
 //!
-//! Rust parses the command line. The embedded Python in `python/amh` does the work until each part is ported.
+//! Rust parses the command line and runs the ported parts, the watcher among them. The embedded Python in `python/amh` does the rest until each part is ported.
 // 🧑 "at the beginning use py03 to call everything and only have the Rust part do command line parsing"
 
 mod actions;
+mod agents;
 mod bridge;
 mod cli;
+mod decide;
+mod guest;
 mod log;
 mod mail;
 mod omnigent;
 mod settings;
+mod store;
 mod taskfile;
 mod tasks;
 mod view;
+mod watch;
+mod work;
 
 use std::ffi::CString;
 use std::process::ExitCode;
@@ -32,9 +38,7 @@ const SOURCES: &[(&str, &str)] = &[
     ("amh.taskfile", include_str!("../python/amh/taskfile.py")),
     ("amh.agents", include_str!("../python/amh/agents.py")),
     ("amh.mail", include_str!("../python/amh/mail.py")),
-    ("amh.guest", include_str!("../python/amh/guest.py")),
     ("amh.work", include_str!("../python/amh/work.py")),
-    ("amh.watch", include_str!("../python/amh/watch.py")),
     ("amh.cli", include_str!("../python/amh/cli.py")),
 ];
 /// Makes `import amh.*` load from `SOURCES`.
@@ -157,9 +161,11 @@ fn main() -> ExitCode {
         );
         return ExitCode::FAILURE;
     }
-    let long_running = values["action"] == "watch";
-    if long_running {
+    if (values["group"].as_str(), values["action"].as_str()) == (Some("manager"), Some("watch")) {
         log::record(&parsed, "started");
+        let code = watch::run();
+        log::record(&parsed, &format!("exit={code}"));
+        return ExitCode::from(code);
     }
     pyo3::append_to_inittab!(amh_rs);
     force_utf8();

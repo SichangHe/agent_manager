@@ -7,7 +7,8 @@ use std::path::PathBuf;
 use pyo3::exceptions::{PyOSError, PyRuntimeError, PySystemExit, PyValueError};
 use pyo3::prelude::*;
 
-use crate::{mail, omnigent, taskfile};
+use crate::store::Store;
+use crate::{agents, mail, omnigent, taskfile, work};
 
 /// A found email as the Python takes it: uid, subject, Message-ID, references, date.
 type HeaderRow = (String, String, String, String, String, String);
@@ -39,28 +40,6 @@ fn header_rows(headers: Vec<mail::Header>) -> Vec<HeaderRow> {
     headers.into_iter().map(row).collect()
 }
 
-/// One logged-in connection to the agent account's mailbox, which the watcher keeps across polls; every failure is an `OSError`.
-#[pyclass(unsendable)]
-pub struct Mailbox(mail::Mailbox);
-
-#[pymethods]
-impl Mailbox {
-    /// The headers of matching mail in `folder`, oldest first.
-    fn search(&mut self, folder: &str, readonly: bool, query: &str) -> PyResult<Vec<HeaderRow>> {
-        let found = self.0.search(folder, readonly, query);
-        found.map(header_rows).map_err(PyOSError::new_err)
-    }
-
-    /// Each unread inbox email from `sender` as its uid and raw bytes, without marking it read.
-    fn unseen_from(&mut self, sender: &str) -> PyResult<Vec<(String, Vec<u8>)>> {
-        self.0.unseen_from(sender).map_err(PyOSError::new_err)
-    }
-
-    fn mark_read(&mut self, uid: &str) -> PyResult<()> {
-        self.0.mark_read(uid).map_err(PyOSError::new_err)
-    }
-}
-
 #[pymodule]
 pub mod amh_rs {
     use super::*;
@@ -70,13 +49,9 @@ pub mod amh_rs {
     #[pymodule_export]
     const SECTIONS: [&str; 4] = taskfile::SECTIONS;
     #[pymodule_export]
-    const MAIL_WATCHER: &str = mail::WATCHER;
+    const MANAGER_GUIDES: [&str; 3] = work::MANAGER_GUIDES;
     #[pymodule_export]
     const MAIL_NOTICE_SENDER: &str = mail::NOTICE_SENDER;
-    #[pymodule_export]
-    const MAIL_SENT_LOG: &str = mail::SENT_LOG;
-    #[pymodule_export]
-    use super::Mailbox;
 
     /// Every setting under its dotted key.
     #[pyfunction]
@@ -147,47 +122,16 @@ pub mod amh_rs {
         Ok(omnigent::status(&loaded()?, address))
     }
 
-    /// Answer yes to every permission prompt an agent waits on; returns what was approved.
-    #[pyfunction]
-    fn agent_approve(address: &str) -> PyResult<Vec<String>> {
-        omnigent::approve_prompts(&loaded()?, address).map_err(PyValueError::new_err)
-    }
-
     /// Stop an agent by ending its session.
     #[pyfunction]
     fn agent_stop(address: &str) -> PyResult<()> {
         omnigent::stop(&loaded()?, address).map_err(PyValueError::new_err)
     }
 
-    /// Start an agent with no prompt and return its address.
-    #[pyfunction]
-    fn agent_launch(
-        tool: &str,
-        model: &str,
-        effort: &str,
-        workdir: &str,
-        title: &str,
-    ) -> PyResult<String> {
-        omnigent::launch(&loaded()?, tool, model, effort, workdir, title)
-            .map_err(PyValueError::new_err)
-    }
-
-    /// Whether an agent's recent history holds the last line of `text`.
-    #[pyfunction]
-    fn agent_saw(address: &str, text: &str) -> PyResult<bool> {
-        omnigent::saw_message(&loaded()?, address, text).map_err(PyValueError::new_err)
-    }
-
     /// Where the calling agent runs.
     #[pyfunction]
     fn own_address() -> PyResult<String> {
         omnigent::own_address().map_err(PyValueError::new_err)
-    }
-
-    /// The model and effort a tool starts with.
-    #[pyfunction]
-    fn launch_default(tool: &str, as_manager: bool) -> PyResult<(String, String)> {
-        omnigent::launch_default(&loaded()?, tool, as_manager).map_err(PyValueError::new_err)
     }
 
     /// One read from the Omnigent server as JSON text.
@@ -276,12 +220,6 @@ pub mod amh_rs {
         Ok((message_id, raw))
     }
 
-    /// Send built email bytes to one address through the agent account; `OSError` when it fails.
-    #[pyfunction]
-    fn mail_deliver(to: &str, raw: &[u8]) -> PyResult<()> {
-        mail::deliver(&loaded()?, to, raw).map_err(PyOSError::new_err)
-    }
-
     /// Email the human on the tag's thread and return the new Message-ID; `SystemExit` when the request is refused, `OSError` when the network or a file fails.
     #[pyfunction]
     fn mail_send(
@@ -314,11 +252,86 @@ pub mod amh_rs {
         found.map(header_rows).map_err(PyOSError::new_err)
     }
 
-    /// Log in to the agent account's mailbox.
+    /// Mark text as coming from an agent.
     #[pyfunction]
-    fn mail_connect() -> PyResult<Mailbox> {
-        let mailbox = mail::Mailbox::agent(&loaded()?);
-        mailbox.map(Mailbox).map_err(PyOSError::new_err)
+    fn envelope(sender: &str, text: &str) -> String {
+        work::envelope(sender, text)
+    }
+
+    /// The active tasks whose agent is gone, failed, stuck, or idle with open items: task file, address, problem, evidence.
+    #[pyfunction]
+    fn problems() -> PyResult<Vec<(String, String, &'static str, String)>> {
+        let settings = loaded()?;
+        let found = agents::problems(&settings, &Store::new(&settings));
+        let row = |(task, problem, evidence): (crate::tasks::Task, work::Problem, String)| {
+            let address = task.address().to_owned();
+            (task.name, address, problem.name(), evidence)
+        };
+        found
+            .map(|found| found.into_iter().map(row).collect())
+            .map_err(PySystemExit::new_err)
+    }
+
+    /// Create or reuse a task file, launch its agent with `goal` as its manager's request, and return the agent's address; `SystemExit` when it fails.
+    #[pyfunction]
+    #[pyo3(signature = (name, workdir, goal, manager, tool, model, effort, as_manager, email, lines))]
+    #[expect(clippy::too_many_arguments, reason = "one per command-line value")]
+    fn start_task(
+        name: &str,
+        workdir: &str,
+        goal: &str,
+        manager: &str,
+        tool: Option<&str>,
+        model: Option<&str>,
+        effort: Option<&str>,
+        as_manager: bool,
+        email: Option<&str>,
+        lines: Option<&str>,
+    ) -> PyResult<String> {
+        let settings = loaded()?;
+        let new = agents::NewTask {
+            name,
+            workdir,
+            goal,
+            manager,
+            tool,
+            model,
+            effort,
+            as_manager,
+            email,
+            lines,
+        };
+        agents::start_task(&settings, &Store::new(&settings), &new).map_err(PySystemExit::new_err)
+    }
+
+    /// Launch an agent for task `name`, record where it runs plus `fields` and `record` in the task file, give it its first prompt, and return its address; `SystemExit` when it fails.
+    #[pyfunction]
+    #[expect(clippy::too_many_arguments, reason = "one per value of the start")]
+    fn start_agent(
+        name: &str,
+        fields: Vec<(String, String)>,
+        tool: &str,
+        model: &str,
+        effort: &str,
+        workdir: &str,
+        guides: Vec<String>,
+        request: &str,
+        record: &str,
+    ) -> PyResult<String> {
+        let settings = loaded()?;
+        let start = agents::Start {
+            name,
+            fields: &fields,
+            tool,
+            model,
+            effort,
+            workdir,
+            guides: &guides.iter().map(String::as_str).collect::<Vec<_>>(),
+            request,
+            record,
+        };
+        agents::start_agent(&settings, &Store::new(&settings), &start)
+            .map_err(PySystemExit::new_err)
     }
 }
 

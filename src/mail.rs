@@ -19,6 +19,8 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{SmtpTransport, Transport};
 use mail_parser::{HeaderName, HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 
+use crate::settings;
+
 /// The sender name of the watcher's own emails, which are not recorded as an agent's answer.
 pub const WATCHER: &str = "amh watcher";
 /// The record in the state folder of every email an agent sent: lines `EPOCH TAG`.
@@ -322,10 +324,6 @@ pub fn compose(draft: &Draft, message_id: &str) -> Result<Vec<u8>, String> {
         .map_err(|error| format!("cannot build the email: {error}"))
 }
 
-fn setting<'a>(settings: &'a BTreeMap<String, String>, key: &str) -> &'a str {
-    settings.get(key).map(String::as_str).unwrap_or_default()
-}
-
 /// A fresh Message-ID in the agent account's domain, which Gmail keeps as given.
 pub fn new_id() -> String {
     let since = SystemTime::now().duration_since(UNIX_EPOCH);
@@ -335,7 +333,7 @@ pub fn new_id() -> String {
 
 /// Send built email bytes to one address through the agent account.
 pub fn deliver(settings: &BTreeMap<String, String>, to: &str, raw: &[u8]) -> Result<(), String> {
-    let from = setting(settings, "mail.agent_address");
+    let from = settings::get(settings, "mail.agent_address");
     let failed = |error: &dyn std::fmt::Display| format!("the email was not sent: {error}");
     let address = |text: &str| {
         text.parse::<lettre::Address>()
@@ -343,7 +341,7 @@ pub fn deliver(settings: &BTreeMap<String, String>, to: &str, raw: &[u8]) -> Res
     };
     let envelope = lettre::address::Envelope::new(Some(address(from)?), vec![address(to)?])
         .map_err(|error| failed(&error))?;
-    let password = setting(settings, "mail.agent_password").to_owned();
+    let password = settings::get(settings, "mail.agent_password").to_owned();
     let smtp = SmtpTransport::relay("smtp.gmail.com")
         .map_err(|error| failed(&error))?
         .credentials(Credentials::new(from.to_owned(), password))
@@ -364,8 +362,8 @@ impl Mailbox {
     pub fn agent(settings: &BTreeMap<String, String>) -> Result<Self, String> {
         Self::login(
             "imap.gmail.com",
-            setting(settings, "mail.agent_address"),
-            setting(settings, "mail.agent_password"),
+            settings::get(settings, "mail.agent_address"),
+            settings::get(settings, "mail.agent_password"),
         )
     }
 
@@ -373,7 +371,7 @@ impl Mailbox {
     ///
     /// The himalaya config names the host, the login, and the shell command that prints the password.
     pub fn human(settings: &BTreeMap<String, String>) -> Result<Self, String> {
-        let path = match setting(settings, "mail.human_mailbox_config") {
+        let path = match settings::get(settings, "mail.human_mailbox_config") {
             "" => PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
                 .join(".config/himalaya/config.toml"),
             path => PathBuf::from(path),
@@ -543,9 +541,9 @@ pub fn send(
         .and_then(|mut mailbox| mailbox.search(ALL_MAIL, true, &thread_query(tag)))
         .map_err(SendError::Failed)?;
     let plan = plan(tag, subject, &found).map_err(SendError::Refused)?;
-    let to = setting(settings, "mail.human_address");
+    let to = settings::get(settings, "mail.human_address");
     let draft = Draft {
-        from: setting(settings, "mail.agent_address"),
+        from: settings::get(settings, "mail.agent_address"),
         to,
         subject: &plan.subject,
         body,
@@ -582,7 +580,7 @@ pub fn unread(
     trash_ids: &[String],
 ) -> Result<Vec<Header>, String> {
     let mut mailbox = Mailbox::human(settings)?;
-    let agent = setting(settings, "mail.agent_address");
+    let agent = settings::get(settings, "mail.agent_address");
     let query = format!("UNSEEN FROM \"{agent}\" SUBJECT \"[{tag}]\"");
     let found = mailbox.search("INBOX", trash_ids.is_empty(), &query)?;
     let (doomed, kept): (Vec<Header>, Vec<Header>) = found

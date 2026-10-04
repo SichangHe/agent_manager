@@ -4,26 +4,29 @@
 
 one program for agents and managers; usage lives in `amh --help`, not here
 - 🧑 "do a port and replace things part by part ... at the beginning use py03 to call everything and only have the Rust part do command line parsing ... Test in production"
-- Rust (`src/`): parses the command line (clap), then calls the Python through PyO3
+- Rust (`src/`): parses the command line (clap), runs the watcher itself, and calls the Python through PyO3 for the other actions
     - `src/cli.rs`: the command tree with every help text
-    - `src/main.rs`: turns the parsed action into one JSON object and calls `amh.cli.run`; maps the result and `SystemExit` to the exit status
+    - `src/main.rs`: runs `manager watch` and `agent view` with no Python; else turns the parsed action into one JSON object and calls `amh.cli.run`; maps the result and `SystemExit` to the exit status
     - `src/bridge.rs`: the built-in Python module `amh_rs`, through which the remaining Python calls the parts already ported
-    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`; talking to agents; the agent view; the action log; mail
+    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`; talking to agents; the agent view; the action log; mail; the watcher; the guest mailbox and `tell guest`; starting an agent on a task; agent problems
     - `amh_rs.run_action` runs a ported action and returns `None` for the others, which `amh.cli.run` then runs in Python
-- Python (`python/amh/`): everything else, until each part is ported
+- Python (`python/amh/`): the handlers of the other actions (`cli`), `tell manager/human`, `task close`, `agent tree`, `manager rotate` (`work`), and thin wrappers (`config`, `taskfile`, `agents`, `mail`), until each is ported
     - compiled into the binary and imported from memory, so no source path is needed at run time
     - embedded interpreter: the system Python (`.cargo/config.toml`), UTF-8 forced, standard library only
 - port order: one part at a time, each left in production for a while before the next
-    - planned: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher (next)
+    - done: settings (TOML) -> task files and task list -> todo/task actions -> agents -> mail -> watcher and guest mailbox; next: the rest of `work` and `cli`
     - the human's earlier design choices to follow while porting: `docs/design-choices.md`
     - the human's architecture vision (state model apart from input/output, simulation, task lifecycle and dependencies, events, messaging, boundaries): `docs/vision.md`
     - rule taken from it for every ported part: pure functions over plain data in one module, input/output in a thin caller (`src/taskfile.rs` is the pattern)
 - install: `cargo install --path .`
 - watcher: `amh manager watch` in the foreground; `amh-watch.service` is the user systemd unit for it
 - `use-amh`: stub that old command names link to
-- test: `cargo build --release && python3 test_amh.py`; prints only failures
-    - re-runs itself inside the built binary (`AMH_RUN_SCRIPT`), so the Rust parts are exercised; command lines are parsed by the binary (`AMH_PARSE_ONLY=1`)
-    - runs on a temporary copy of the root's `*.md` with fakes for the agent calls and the mail network calls; emails are built and parsed by the real Rust code; refuses to run on the live root
+- test: `cargo test`, then `cargo build --release && python3 test_amh.py`; the script prints only failures
+    - `cargo test`: the pure decisions of the watcher, the guest mailbox, and starting agents, on small made-up inputs; no fake Omnigent or mail server
+    - `test_amh.py`: what still runs through the Python
+        - re-runs itself inside the built binary (`AMH_RUN_SCRIPT`), so the Rust parts are exercised; command lines are parsed by the binary (`AMH_PARSE_ONLY=1`)
+        - runs on a temporary copy of the root's `*.md` with fakes for the Python agent and mail wrappers and for `amh_rs.start_agent`; refuses to run on the live root
+    - the watcher's input and output is tested in production; before deploying a change to it, run it once on a temporary state folder and root with made-up agent addresses and no mail login
 
 records, all under the work-log root (`work_logs` in `env.toml`)
 - task file `NAME.md`
@@ -52,6 +55,8 @@ modules
     - `src/tasks.rs`: the `Task` record and every change to it as pure functions: add, remove, reword, move an item; note; status; `show`; `check` of task files against the task list; the notice text for the human
     - `src/actions.rs`: the input and output around them: settings, the lock, loading and saving, the caller's own task, the task list row, and the notice email (sent through the Python mail part)
         - a task's earlier notice that the human has not read is folded into the new one and trashed, so at most one notice per task waits unread; the last notice per task is kept in `amh-notices.json`
+        - `tell guest` runs here too
+    - `src/store.rs`: the work-log root on disk: the lock, loading and saving task files, the task list row, the caller's own task; shared by the actions, the watcher, and starting agents
 - `amh agent view WHO` (`src/view.rs`, Rust): the human's command-line view; attaches the caller's terminal to the agent's own tmux terminal that Omnigent runs (`--read-only` to only watch); a parked agent has none until a message wakes it
 - agents (`src/omnigent.rs`, Rust): every agent is an Omnigent session, reached as JSON over HTTP on the local server
     - 🧑 "the Rust port would only support Omnigent, not tmux": no tmux launch, paste, or status; an address that is not `omnigent://ID` is reported as not reachable
@@ -62,12 +67,18 @@ modules
         - 🧑 "Sounds good, but should not be the default, which is no question any time at all"
     - `stop`, `saw_message` (did the session's history take the message), `own_address` (the caller's session variable), `launch_default` (model and effort per tool, `[launch.TOOL]` in `config.toml`)
 - action log (`src/log.rs`, Rust): every `amh` run appends one line to `amh-actions.log` in the state folder: time, caller (Omnigent session, else tmux pane, else user), exit status, and the parsed command line
+- the agents of tasks (Rust)
+    - `src/work.rs`, pure: `envelope`; `problem_of` (an agent that is `missing`, `error`, `stuck`, or idle with open items; a blocked or retired task has none; a `long_running` task with `blocked_on` is not idle); the request, the first prompt, and the task record of a started agent
+    - `src/agents.rs`, input and output: `problems`; `start_task` and `start_agent` (run each `getagentsmd` command with a 30 s limit, launch, record under the lock, send the first prompt, wait up to 90 s for it to show in the history)
+    - `amh agent problems`, `task start`, `manager rotate`, and `task close` call these through `amh_rs`
+    - unlike the earlier Python: `--lines` counts lines as `sed` does (line breaks are `\n`, `\r\n`, `\r` only)
 - `taskfile` (Python): the `Task` record, loading and saving, the one lock file that serializes every writer, finding the caller's task
 - `agents` (Python): thin wrappers over the Rust agent functions
 - mail (`src/mail.rs`, Rust; `python/amh/mail.py` holds thin wrappers): send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
     - pure: `bare`, `tag_of`, `plan` (subject and thread of an outgoing email from the emails found with the tag), `compose` (the bytes to send), `parse` (a raw email -> sender, headers, body, images), `header_of`
     - input and output: `Mailbox` (one logged-in IMAP connection: `search`, `unseen_from`, `mark_read`), `deliver` (SMTP), `send`, `unread`
     - the watcher holds one `Mailbox` across polls and logs in again only after a failure; every network failure reaches the Python as `OSError`
+    - a stored email is read as Python's text mode read it: `\r\n` and `\r` become `\n`
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
     - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; item notices (`X-AMH-From: amh notice ...`) are left out of that list
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
@@ -76,9 +87,20 @@ modules
     - an HTML-only body is kept as written, not converted to text
     - unlike the earlier Python: a found email's date is as written, not rewritten to one format; sent mail carries a `Date` header and the Message-ID `<NANOSECONDS.PID@gmail.com>`
     - checked read-only against the earlier Python on the live mailboxes: same search results, subjects, unread listing, and parse of real emails
-- `work`: what each action does; `problems`, `check`, `tree`, `rotate`
+- `work` (Python): `tell manager`, `tell human`, `close_task`, `tree`, `rotate`
     - `rotate` of the main manager rewrites its address in `env.toml`
-- `watch`: loop every 5 s
+- watcher (Rust): loop every 5 s, no Python
+    - `src/decide.rs`, pure: `route`, `for_manager`; `plan` (who gets a task's blocks), the message texts, `settle` (what follows from a delivery `Outcome`), `without_marker`; `nudges` (reminders and problem reports); `chase` (unanswered email)
+    - `src/watch.rs`, input and output: the kept mailbox connection (`Link`), files, agents, the clock, the log; remembers only retry and reminder times between polls
+    - log: one line per event on stdout, `YYYY-MM-DD HH:MM:SS TEXT`; an error is shown as its message
+    - records in the state folder, same formats as the Python watcher wrote: `amh-awaiting.txt` (`EPOCH TASK MAIL STAGE`), `amh-told-human.txt`, `amh-problem-notices.txt`; reads `amh-sent.txt`
+    - checked against the Python watcher on a frozen copy of the live root with the agents and mail replaced: same routing and delivery text of the 200 newest stored emails, same targets for every task file, same messages, log lines, notices, and records for deliveries, problem reports, and chasing
+    - unlike the Python watcher
+        - nothing is reminded or reported in a minute in which any agent's state could not be read; before, agents listed ahead of the unreadable one were still reminded
+        - a failure to store guest mail keeps the mailbox connection; a failure to start the guest agent is logged, the process does not exit
+        - a failure to write `amh-awaiting.txt` is logged and the delivered block's marker is still deleted, so the block is not delivered twice
+        - a malformed row of `amh-awaiting.txt` or `amh-sent.txt` is dropped
+        - stored human mail is created with mode 0600, not created and then restricted
     - mail intake: store, route, append `(pending)` + source line, mark read
         - route: `[tag]` task; `for manager` at body edge -> its manager; done task -> its manager; else main manager
         - stored file exists = already taken in
@@ -98,8 +120,12 @@ modules
         - mail for a `missing` or `stuck` agent goes to its manager instead
         - reported keys live in `amh-problem-notices.txt`; a problem that goes away is forgotten, so a recurrence is reported again
         - nothing is reported while Omnigent is unreachable
-- `guest`: guest mailbox; mail from `AMH_GUEST_ADDRESS` with SPF pass is stored under `guest_NAME_manager_mail/`, a dedicated agent (task `guest_NAME.md`, NAME from `AMH_GUEST_NAME`) is started or reused, and it answers with `amh tell guest`
-- `cli`: one handler per action; `run` dispatches the JSON object from the Rust front end
+    - permission prompts: once a minute a `stuck` agent's permission prompts are answered yes and its manager is told
+- guest mailbox (`src/guest.rs`, Rust, pure; the watcher takes the mail in, `src/actions.rs` sends the answer)
+    - mail whose `From` is exactly `guest.address` and whose first `Authentication-Results` has `spf=pass` and `smtp.mailfrom=` that address is stored under `guest_NAME_manager_mail/` with its thread headers and up to 4 images of 10 MB each; other mail from that address is marked read and dropped
+    - a dedicated agent (task `guest_NAME.md`, NAME from `guest.name`) is started under the main manager or reused; the email becomes its open item and a `(pending)` block
+    - it answers with `amh tell guest`, which sends to the guest alone on the thread of the stored email
+- `cli` (Python): one handler per action not yet ported; `run` dispatches the JSON object from the Rust front end
 
 dropped on purpose from the old scripts
 - report envelopes/receipts: `tell manager` posts straight to the manager

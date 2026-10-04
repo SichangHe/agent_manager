@@ -3,128 +3,21 @@
 //! The changes themselves are the pure functions of `tasks`; this module does the input and output around them.
 
 use std::collections::BTreeMap;
-use std::fs::{self, File};
-use std::path::PathBuf;
+use std::fs;
+use std::path::Path;
 
 use pyo3::exceptions::PySystemExit;
 use pyo3::prelude::*;
 use serde_json::Value;
 
+use crate::mail::{self, Attached, Draft};
+use crate::store::Store;
 use crate::tasks::{self, Task};
-use crate::{omnigent, settings, taskfile};
+use crate::{guest, settings};
 
 /// An expected refusal: the message is printed and the command fails.
 fn refuse(message: impl Into<String>) -> PyErr {
     PySystemExit::new_err(message.into())
-}
-
-/// The work-log root with the lock every writer of it takes.
-struct Store {
-    root: PathBuf,
-    state_dir: PathBuf,
-}
-
-impl Store {
-    fn open() -> PyResult<Self> {
-        let values = settings::load().map_err(|message| refuse(format!("amh: {message}")))?;
-        let root = settings::work_logs(&values);
-        Ok(Self {
-            root,
-            state_dir: settings::state_dir(),
-        })
-    }
-
-    /// Serialize every writer of the root through one lock file, held until the returned file is dropped.
-    fn lock(&self) -> PyResult<File> {
-        let failed = |error: std::io::Error| {
-            refuse(format!(
-                "amh: cannot lock {}: {error}",
-                self.state_dir.display()
-            ))
-        };
-        fs::create_dir_all(&self.state_dir).map_err(failed)?;
-        let lock = File::create(self.state_dir.join("amh.lock")).map_err(failed)?;
-        lock.lock().map_err(failed)?;
-        Ok(lock)
-    }
-
-    fn load(&self, name: &str) -> PyResult<Task> {
-        let path = self.root.join(name);
-        if name.contains('/') || !name.ends_with(".md") || !path.is_file() {
-            return Err(refuse(format!(
-                "amh: no task file {name} in the work-log root"
-            )));
-        }
-        let text = fs::read_to_string(&path)
-            .map_err(|error| refuse(format!("amh: cannot read {name}: {error}")))?;
-        Task::parse(name, &text).map_err(|message| refuse(format!("amh: {message}")))
-    }
-
-    fn save(&self, task: &Task) -> PyResult<()> {
-        self.write(&task.name, &task.render())
-    }
-
-    fn write(&self, name: &str, text: &str) -> PyResult<()> {
-        taskfile::write(&self.root.join(name), text)
-            .map_err(|error| refuse(format!("amh: cannot write {name}: {error}")))
-    }
-
-    fn list(&self) -> PyResult<String> {
-        fs::read_to_string(self.root.join("TODO.md"))
-            .map_err(|error| refuse(format!("amh: cannot read TODO.md: {error}")))
-    }
-
-    /// Every task file in the root that is not done, by file name.
-    fn active(&self) -> PyResult<Vec<Task>> {
-        let entries = fs::read_dir(&self.root).map_err(|error| {
-            refuse(format!("amh: cannot read {}: {error}", self.root.display()))
-        })?;
-        let mut names: Vec<String> = entries
-            .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-            .filter(|name| name.ends_with(".md") && !name.starts_with('.'))
-            .collect();
-        names.sort();
-        let parsed = names.iter().filter_map(|name| {
-            Task::parse(name, &fs::read_to_string(self.root.join(name)).ok()?).ok()
-        });
-        Ok(parsed.filter(Task::is_active).collect())
-    }
-
-    /// The caller's task: the named file, else the one active task whose agent runs at the caller's address.
-    // 🧑 "We need to pass in the task file name at launch and let the agent pass in that when they use any helper command."
-    fn own(&self, named: Option<&str>) -> PyResult<Task> {
-        let from_launch = std::env::var("OMO_AGENT_TASK_FILE")
-            .ok()
-            .filter(|name| !name.is_empty());
-        if let Some(name) = named
-            .filter(|name| !name.is_empty())
-            .or(from_launch.as_deref())
-        {
-            return self.load(name);
-        }
-        let address = omnigent::own_address().map_err(refuse)?;
-        let mut matches: Vec<Task> = self
-            .active()?
-            .into_iter()
-            .filter(|task| task.address() == address)
-            .collect();
-        match matches.len() {
-            1 => Ok(matches.remove(0)),
-            n => Err(refuse(format!(
-                "amh: {n} active tasks run at {address}; pass --task-file NAME.md"
-            ))),
-        }
-    }
-
-    /// Put the task's row at the top of its section of the task list.
-    fn place(&self, task: &Task) -> PyResult<()> {
-        match taskfile::placed(&self.list()?, &task.name, task.address(), task.section())
-            .map_err(refuse)?
-        {
-            Some(list) => self.write("TODO.md", &list),
-            None => Ok(()),
-        }
-    }
 }
 
 /// Email the human about their items on a task's list, through the Python wrappers of the mail part, which the tests replace.
@@ -141,9 +34,9 @@ fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResu
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
     let config = py.import("amh.config")?.call_method0("load")?;
-    let mail = py.import("amh.mail")?;
+    let wrappers = py.import("amh.mail")?;
     let unread_ids = |trash: Vec<String>| -> PyResult<Vec<String>> {
-        let unread = mail.call_method1("unread", (&config, task.tag(), trash))?;
+        let unread = wrappers.call_method1("unread", (&config, task.tag(), trash))?;
         unread
             .try_iter()?
             .map(|header| header?.getattr("message_id")?.extract())
@@ -156,7 +49,7 @@ fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResu
     if let Some((_, text)) = &earlier {
         body = format!("{text}{body}");
     }
-    let sent: String = mail
+    let sent: String = wrappers
         .call_method1(
             "send",
             (
@@ -164,7 +57,7 @@ fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResu
                 task.tag(),
                 "",
                 &body,
-                format!("{} {}", crate::mail::NOTICE_SENDER, task.address()),
+                format!("{} {}", mail::NOTICE_SENDER, task.address()),
             ),
         )?
         .extract()?;
@@ -177,6 +70,51 @@ fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResu
     Ok(())
 }
 
+/// Email an answer to the guest alone, on the thread of the stored guest email `mail_name`; returns what to print.
+fn tell_guest(
+    settings: &BTreeMap<String, String>,
+    store: &Store,
+    mail_name: &str,
+    file: &str,
+    images: &[&str],
+) -> Result<String, String> {
+    let read = |path: &Path| {
+        fs::read_to_string(path)
+            .map_err(|error| format!("amh: cannot read {}: {error}", path.display()))
+    };
+    let body = read(Path::new(file))?;
+    let name = Path::new(mail_name).file_name().unwrap_or_default();
+    let stored = read(&store.root.join(guest::mail_dir(settings)).join(name))?;
+    let plan = guest::reply_plan(&stored, &body)?;
+    let mut attachments = Vec::new();
+    for image in images {
+        let path = Path::new(image);
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        attachments.push(Attached {
+            name: name.into_owned(),
+            kind: guest::image_kind(image)?.to_owned(),
+            data: fs::read(path).map_err(|error| format!("amh: cannot read {image}: {error}"))?,
+        });
+    }
+    let to = settings::get(settings, "guest.address");
+    let draft = Draft {
+        from: settings::get(settings, "mail.agent_address"),
+        to,
+        subject: &plan.subject,
+        body: &body,
+        reply_to: &plan.reply_to,
+        references: &plan.references,
+        sender: "",
+        attachments: &attachments,
+    };
+    let message_id = mail::new_id();
+    let raw = mail::compose(&draft, &message_id).map_err(|error| format!("amh: {error}"))?;
+    mail::deliver(settings, to, &raw).map_err(|error| format!("amh: {error}"))?;
+    Ok(format!(
+        "Email sent to the guest.\nMessage-ID: {message_id}\n"
+    ))
+}
+
 /// Run one todo or task action; `None` when the action is not ported yet. Returns the exit status and what to print.
 pub fn run(py: Python<'_>, values: &Value) -> PyResult<Option<(u8, String)>> {
     let text = |key: &str| values[key].as_str();
@@ -186,6 +124,7 @@ pub fn run(py: Python<'_>, values: &Value) -> PyResult<Option<(u8, String)>> {
     if !matches!(
         action,
         ("todo", _)
+            | ("tell", "guest")
             | (
                 "task",
                 "show" | "note" | "give" | "move" | "status" | "check"
@@ -193,21 +132,29 @@ pub fn run(py: Python<'_>, values: &Value) -> PyResult<Option<(u8, String)>> {
     ) {
         return Ok(None);
     }
-    let store = Store::open()?;
+    let settings = settings::load().map_err(|message| refuse(format!("amh: {message}")))?;
+    let store = Store::new(&settings);
     let output = match action {
-        ("todo", "list") => store.own(text("task_file"))?.items.join("\n") + "\n",
+        ("todo", "list") => {
+            store
+                .own(text("task_file"))
+                .map_err(refuse)?
+                .items
+                .join("\n")
+                + "\n"
+        }
         ("todo", "add") | ("task", "give") => {
-            let lock = store.lock()?;
+            let lock = store.lock().map_err(refuse)?;
             let mut task = match action.0 {
-                "task" => store.load(need("task"))?,
-                _ => store.own(text("task_file"))?,
+                "task" => store.load(need("task")).map_err(refuse)?,
+                _ => store.own(text("task_file")).map_err(refuse)?,
             };
             let new: Vec<String> = tasks::add_item(&mut task, need("item"), flag("from_human"))
                 .map_err(refuse)?
                 .into_iter()
                 .collect();
             if !new.is_empty() {
-                store.save(&task)?;
+                store.save(&task).map_err(refuse)?;
             }
             drop(lock);
             notify(py, &task, "created", &new)?;
@@ -219,19 +166,19 @@ pub fn run(py: Python<'_>, values: &Value) -> PyResult<Option<(u8, String)>> {
             format!("added {} open item(s){to}\n", new.len())
         }
         ("todo", "done") => {
-            let lock = store.lock()?;
-            let mut task = store.own(text("task_file"))?;
+            let lock = store.lock().map_err(refuse)?;
+            let mut task = store.own(text("task_file")).map_err(refuse)?;
             tasks::remove_item(&mut task, need("item"), need("evidence")).map_err(refuse)?;
-            store.save(&task)?;
+            store.save(&task).map_err(refuse)?;
             drop(lock);
             notify(py, &task, "deleted", &[need("item").to_owned()])?;
             "removed 1 open item\n".to_owned()
         }
         ("todo", "replace") => {
-            let _lock = store.lock()?;
-            let mut task = store.own(text("task_file"))?;
+            let _lock = store.lock().map_err(refuse)?;
+            let mut task = store.own(text("task_file")).map_err(refuse)?;
             tasks::replace_item(&mut task, need("old"), need("new")).map_err(refuse)?;
-            store.save(&task)?;
+            store.save(&task).map_err(refuse)?;
             "replaced 1 open item\n".to_owned()
         }
         ("task", "show") => {
@@ -242,35 +189,46 @@ pub fn run(py: Python<'_>, values: &Value) -> PyResult<Option<(u8, String)>> {
             let shown: PyResult<Vec<String>> = names
                 .iter()
                 .filter_map(Value::as_str)
-                .map(|name| store.load(name).map(|task| tasks::show(&task)))
+                .map(|name| Ok(tasks::show(&store.load(name).map_err(refuse)?)))
                 .collect();
             shown?.concat()
         }
         ("task", "note") => {
-            let _lock = store.lock()?;
-            let mut task = store.load(need("task"))?;
+            let _lock = store.lock().map_err(refuse)?;
+            let mut task = store.load(need("task")).map_err(refuse)?;
             tasks::add_note(&mut task, need("text"));
-            store.save(&task)?;
+            store.save(&task).map_err(refuse)?;
             String::new()
         }
         ("task", "move") => {
-            let _lock = store.lock()?;
-            let (mut source, mut to) = (store.load(need("source"))?, store.load(need("to"))?);
+            let _lock = store.lock().map_err(refuse)?;
+            let (mut source, mut to) = (
+                store.load(need("source")).map_err(refuse)?,
+                store.load(need("to")).map_err(refuse)?,
+            );
             tasks::move_item(&mut source, &mut to, need("item")).map_err(refuse)?;
-            store.save(&to)?;
-            store.save(&source)?;
+            store.save(&to).map_err(refuse)?;
+            store.save(&source).map_err(refuse)?;
             String::new()
         }
         ("task", "status") => {
-            let _lock = store.lock()?;
-            let mut task = store.load(need("task"))?;
+            let _lock = store.lock().map_err(refuse)?;
+            let mut task = store.load(need("task")).map_err(refuse)?;
             tasks::set_status(&mut task, need("status"), text("on")).map_err(refuse)?;
-            store.save(&task)?;
-            store.place(&task)?;
+            store.save(&task).map_err(refuse)?;
+            store.place(&task).map_err(refuse)?;
             String::new()
         }
+        ("tell", "guest") => {
+            let images = values["image"].as_array().into_iter().flatten();
+            let images: Vec<&str> = images.filter_map(Value::as_str).collect();
+            tell_guest(&settings, &store, need("mail"), need("file"), &images).map_err(refuse)?
+        }
         ("task", "check") => {
-            let findings = tasks::check(&store.list()?, &store.active()?);
+            let findings = tasks::check(
+                &store.list().map_err(refuse)?,
+                &store.active().map_err(refuse)?,
+            );
             let failed = u8::from(!findings.is_empty());
             return Ok(Some((
                 failed,
