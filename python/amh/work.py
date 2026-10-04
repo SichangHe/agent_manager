@@ -8,7 +8,7 @@ from pathlib import Path
 
 from amh import agents, mail, taskfile
 from amh.config import Config
-from amh.taskfile import HUMAN_MARK, Task
+from amh.taskfile import Task
 
 # 🧑 "make the manager reporting sound more like messaging the manager, to discourage agents to dump info to manager"
 MANAGER_MESSAGE_MAX_CHARS = 600
@@ -18,35 +18,6 @@ MANAGER_GUIDES = ("agent_work", "agent_manager", "agent_manager_core")
 def envelope(sender: str, text: str) -> str:
     """Mark text as coming from an agent, so the reader does not take it for the human's words."""
     return f'<agent_message from="{sender}">\n{text.strip()}\n</agent_message>'
-
-
-def notify_human(config: Config, task: Task, change: str, items: list[str]) -> None:
-    """Email the human that their requests were created or deleted on a task's list; call it outside the lock."""
-    # 🧑 “Pending items originated from the human need emails, ones from agents do not.”
-    theirs = [item.removeprefix(HUMAN_MARK) for item in items if item.startswith(HUMAN_MARK)]
-    if theirs:
-        _ = mail.send(config, task.tag, "", f"pending item {change}:\n" + "".join(f"- {item}\n" for item in theirs), task.address)
-
-
-def add_item(config: Config, task: Task, item: str, from_human: bool) -> list[str]:
-    """Append one open item to a freshly loaded task; return it in a list, or nothing when the task already has it."""
-    if task.fields["status"] == "done":
-        raise SystemExit(f"amh: {task.name} is done; start a new task instead")
-    marked = taskfile.mark(item, from_human)
-    if marked in task.items:
-        return []
-    task.items.append(marked)
-    taskfile.save(config, task)
-    return [marked]
-
-
-def remove_item(config: Config, task: Task, item: str, evidence: str) -> None:
-    """Remove one finished or cancelled item from a freshly loaded task, leaving a one-line record."""
-    if item not in task.items:
-        raise SystemExit(f"amh: {task.name} has no such open item; copy it exactly from `amh todo list`")
-    task.items.remove(item)
-    taskfile.note(task, f"removed open item: {evidence}")
-    taskfile.save(config, task)
 
 
 def tell_manager(config: Config, task: Task, text: str, state: str) -> None:
@@ -166,51 +137,6 @@ def close_task(config: Config, name: str, agent_gone: bool, email: bool, own: bo
         if not agent_gone:
             raise SystemExit(f"amh: {name} is marked done, but its agent was not stopped: {error}") from error
     return task.address
-
-
-def set_status(config: Config, name: str, status: str, blocked_on: str | None) -> None:
-    if (status == "blocked") != bool(blocked_on) and status != "long_running":
-        raise SystemExit("amh: `blocked` needs --on saying what it waits for; `running` takes no --on")
-    with taskfile.locked(config):
-        task = taskfile.load(config, name)
-        task.fields["status"] = status
-        _ = task.fields.pop("blocked_on", None)
-        if blocked_on:
-            task.fields["blocked_on"] = " ".join(blocked_on.split())
-        taskfile.save(config, task)
-        taskfile.place_in_list(config, task)
-
-
-def check(config: Config) -> list[str]:
-    """Return every disagreement between task files and the task list."""
-    # 🧑 "Maybe we should have a validation script that agents should run after editing task file/TODO file?"
-    findings = []
-    rows: dict[str, list[tuple[str, str]]] = {}
-    section = ""
-    for row in (config.root / "TODO.md").read_text(encoding="utf-8").splitlines():
-        if row.strip().lower() in taskfile.SECTIONS:
-            section = row.strip().lower()
-        elif section and re.match(r"\S+\.md( |$)", row):
-            name, _, address = row.partition(" ")
-            rows.setdefault(name, []).append((section, address.split(" ")[0]))
-    active = {task.name: task for task in taskfile.active_tasks(config)}
-    for name, task in active.items():
-        placed = rows.get(name, [])
-        if not placed and task.fields["status"] == "blocked":
-            continue
-        if len(placed) != 1:
-            findings.append(f"{name}: {len(placed)} rows in TODO.md, want 1")
-        elif placed[0] != (taskfile.section_of(task), task.address):
-            findings.append(f"{name}: TODO.md has it under `{placed[0][0]}` at {placed[0][1]}, the task file says `{taskfile.section_of(task)}` at {task.address}")
-    # 🧑 "You have current tasks in \"previous\" in TODO.md ... Act to prevent that in the future"
-    for name, placed in rows.items():
-        if name not in active and any(section != "previous:" for section, _ in placed):
-            findings.append(f"{name}: listed as open work in TODO.md but it is done or not a task file")
-    shared: dict[str, list[str]] = {}
-    for task in active.values():
-        shared.setdefault(task.address, []).append(task.name)
-    findings += [f"{address}: several active tasks run there: {', '.join(names)}" for address, names in shared.items() if len(names) > 1 and address != "retired"]
-    return findings
 
 
 def problems(config: Config) -> list[tuple[Task, str, str]]:

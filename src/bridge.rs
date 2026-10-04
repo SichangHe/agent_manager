@@ -14,8 +14,6 @@ pub mod amh_rs {
     use super::*;
 
     #[pymodule_export]
-    const HUMAN_MARK: &str = taskfile::HUMAN_MARK;
-    #[pymodule_export]
     const MARKER: &str = taskfile::MARKER;
     #[pymodule_export]
     const SECTIONS: [&str; 4] = taskfile::SECTIONS;
@@ -51,12 +49,6 @@ pub mod amh_rs {
         taskfile::pending_blocks(body)
     }
 
-    /// One open item as a single line with the right authorship mark; `ValueError` when empty.
-    #[pyfunction]
-    fn mark_item(item: &str, from_human: bool) -> PyResult<String> {
-        taskfile::mark(item, from_human).map_err(PyValueError::new_err)
-    }
-
     /// The task list with the task's row moved to the top of `section`, or `None` when already right; `ValueError` when the section is missing.
     #[pyfunction]
     fn placed_in_list(
@@ -73,5 +65,13 @@ pub mod amh_rs {
     fn write_file(path: PathBuf, text: &str) -> PyResult<()> {
         taskfile::write(&path, text)
             .map_err(|error| PyOSError::new_err(format!("{}: {error}", path.display())))
+    }
+
+    /// Run one action that is already ported, from the JSON object of the parsed command line; `None` for the others. Returns the exit status and what to print.
+    #[pyfunction]
+    fn run_action(py: Python<'_>, parsed: &str) -> PyResult<Option<(u8, String)>> {
+        let values = serde_json::from_str(parsed)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        crate::actions::run(py, &values)
     }
 }

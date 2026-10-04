@@ -3,10 +3,12 @@
 //! Rust parses the command line. The embedded Python in `python/amh` does the work until each part is ported.
 // 🧑 "at the beginning use py03 to call everything and only have the Rust part do command line parsing"
 
+mod actions;
 mod bridge;
 mod cli;
 mod settings;
 mod taskfile;
+mod tasks;
 
 use std::ffi::CString;
 use std::process::ExitCode;

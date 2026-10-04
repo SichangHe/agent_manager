@@ -14,43 +14,13 @@ from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 
+import amh_rs
+
 from amh import agents, config as configuration, guest, mail, taskfile, watch, work
 from amh.config import Config
 
 Run = Callable[[Config, SimpleNamespace], int | None]
 UNIT = "amh-watch.service"
-
-
-def todo_list(config: Config, args: SimpleNamespace) -> None:
-    print("\n".join(taskfile.own_task(config, args.task_file).items))
-
-
-def add_item(config: Config, args: SimpleNamespace) -> None:
-    """`todo add` to the caller's own task, or `task give` to the named task."""
-    named = getattr(args, "task", None)
-    with taskfile.locked(config):
-        task = taskfile.load(config, named) if named else taskfile.own_task(config, args.task_file)
-        new = work.add_item(config, task, args.item, args.from_human)
-    work.notify_human(config, task, "created", new)
-    print(f"added {len(new)} open item(s)" + (f" to {named}" if named else ""))
-
-
-def todo_done(config: Config, args: SimpleNamespace) -> None:
-    with taskfile.locked(config):
-        task = taskfile.own_task(config, args.task_file)
-        work.remove_item(config, task, args.item, args.evidence)
-    work.notify_human(config, task, "deleted", [args.item])
-    print("removed 1 open item")
-
-
-def todo_replace(config: Config, args: SimpleNamespace) -> None:
-    with taskfile.locked(config):
-        task = taskfile.own_task(config, args.task_file)
-        if args.old not in task.items:
-            raise SystemExit("amh: no such open item; copy it exactly from `amh todo list`")
-        task.items[task.items.index(args.old)] = taskfile.mark(args.new, args.old.startswith(taskfile.HUMAN_MARK))
-        taskfile.save(config, task)
-    print("replaced 1 open item")
 
 
 def tell_manager(config: Config, args: SimpleNamespace) -> None:
@@ -86,43 +56,9 @@ def task_start(config: Config, args: SimpleNamespace) -> None:
     print(work.start_task(config, args.task, Path(args.dir), goal, args.manager or agents.own_address(), args.tool, args.model, args.effort, args.as_manager, args.tmux, args.proxy, args.email, args.lines))
 
 
-def task_show(config: Config, args: SimpleNamespace) -> None:
-    for name in args.task:
-        task = taskfile.load(config, name)
-        print(f"{task.name}\n" + "".join(f"  {key}: {value}\n" for key, value in task.fields.items()) + "".join(f"  - {item}\n" for item in task.items), end="")
-
-
 def task_close(config: Config, args: SimpleNamespace) -> None:
     name = args.task or taskfile.own_task(config, args.task_file).name
     print(f"closed {name} at {work.close_task(config, name, args.agent_gone, not args.no_email, own=args.task is None)}")
-
-
-def task_status(config: Config, args: SimpleNamespace) -> None:
-    work.set_status(config, args.task, args.status, args.on)
-
-
-def task_note(config: Config, args: SimpleNamespace) -> None:
-    with taskfile.locked(config):
-        task = taskfile.load(config, args.task)
-        taskfile.note(task, args.text)
-        taskfile.save(config, task)
-
-
-def task_move(config: Config, args: SimpleNamespace) -> None:
-    with taskfile.locked(config):
-        source, to = taskfile.load(config, args.source), taskfile.load(config, args.to)
-        if args.item not in source.items or to.fields["status"] == "done" or args.source == args.to:
-            raise SystemExit(f"amh: {args.source} has no such open item, or {args.to} is done or the same task")
-        source.items.remove(args.item)
-        to.items += [args.item] if args.item not in to.items else []
-        taskfile.save(config, to)
-        taskfile.save(config, source)
-
-
-def task_check(config: Config, _args: SimpleNamespace) -> int:
-    findings = work.check(config)
-    print("\n".join(findings), end="\n" if findings else "")
-    return 1 if findings else 0
 
 
 def agent_problems(config: Config, _args: SimpleNamespace) -> int:
@@ -180,18 +116,8 @@ HANDLERS: dict[tuple[str, str], Run] = {
     ("tell", "human"): tell_human,
     ("tell", "agent"): tell_agent,
     ("tell", "guest"): tell_guest,
-    ("todo", "list"): todo_list,
-    ("todo", "add"): add_item,
-    ("todo", "done"): todo_done,
-    ("todo", "replace"): todo_replace,
     ("task", "start"): task_start,
-    ("task", "show"): task_show,
     ("task", "close"): task_close,
-    ("task", "status"): task_status,
-    ("task", "note"): task_note,
-    ("task", "give"): add_item,
-    ("task", "move"): task_move,
-    ("task", "check"): task_check,
     ("agent", "problems"): agent_problems,
     ("agent", "list"): agent_list,
     ("agent", "tree"): agent_tree,
@@ -207,7 +133,14 @@ HANDLERS: dict[tuple[str, str], Run] = {
 
 
 def run(parsed: str) -> int:
-    """Run one action from the command line as parsed by the Rust front end: a JSON object of `group`, `action`, and the action's values."""
+    """Run one action from the command line as parsed by the Rust front end; actions already ported run in Rust: a JSON object of `group`, `action`, and the action's values."""
+    try:
+        ported = amh_rs.run_action(parsed)
+    except agents.AgentError as error:
+        raise SystemExit(f"amh: {error}") from error
+    if ported is not None:
+        print(ported[1], end="")
+        return ported[0]
     values = json.loads(parsed)
     handler = HANDLERS[values.pop("group"), values.pop("action")]
     try:

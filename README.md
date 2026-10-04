@@ -8,7 +8,8 @@ one program for agents and managers; usage lives in `amh --help`, not here
     - `src/cli.rs`: the command tree with every help text
     - `src/main.rs`: turns the parsed action into one JSON object and calls `amh.cli.run`; maps the result and `SystemExit` to the exit status
     - `src/bridge.rs`: the built-in Python module `amh_rs`, through which the remaining Python calls the parts already ported
-    - ported so far: settings, task files and task list
+    - ported so far: settings; task files and task list; the `todo` actions and `task show/note/give/move/status/check`
+    - `amh_rs.run_action` runs a ported action and returns `None` for the others, which `amh.cli.run` then runs in Python
     - `amh help tmux` prints `python/amh/tmux.md`
 - Python (`python/amh/`): everything else, until each part is ported
     - compiled into the binary and imported from memory, so no source path is needed at run time
@@ -48,6 +49,9 @@ modules
 - `config`: the settings as the Python sees them
 - task files and task list (`src/taskfile.rs`, Rust): parse and render task files without a YAML library, find `(pending)` blocks, mark items, place a task's row in `TODO.md`, atomic file replace keeping permissions
     - checked against the previous Python on every file of the live root: same parse, render, blocks, and placement
+- todo and task actions (Rust)
+    - `src/tasks.rs`: the `Task` record and every change to it as pure functions: add, remove, reword, move an item; note; status; `show`; `check` of task files against the task list; the notice text for the human
+    - `src/actions.rs`: the input and output around them: settings, the lock, loading and saving, the caller's own task, the task list row, and the notice email (sent through the Python mail part)
 - `taskfile` (Python): the `Task` record, loading and saving, the one lock file that serializes every writer, finding the caller's task
 - `agents`: send, status, stop, launch for Omnigent (HTTP) and tmux
     - `own_address`: the caller's Omnigent session variable, else its tmux pane

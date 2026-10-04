@@ -14,7 +14,6 @@ import amh_rs
 from amh import agents
 from amh.config import Config
 
-HUMAN_MARK: str = amh_rs.HUMAN_MARK
 SECTIONS: tuple[str, ...] = tuple(amh_rs.SECTIONS)
 MARKER: str = amh_rs.MARKER
 
@@ -72,11 +71,6 @@ def save(config: Config, task: Task) -> None:
     write(config.root / task.name, task.render())
 
 
-def note(task: Task, text: str) -> None:
-    """Append a one-line `(note)` to the body, after a blank line so it never joins a pending block."""
-    task.body = task.body.rstrip("\n") + f"\n\n({' '.join(text.split())})\n"
-
-
 def pending_blocks(body: str) -> list[tuple[int, list[str]]]:
     """Find each `(pending)` line outside code fences, with the lines after it up to the next blank line."""
     return amh_rs.pending_blocks(body)
@@ -108,14 +102,6 @@ def own_task(config: Config, named: str | None) -> Task:
     if len(matches) != 1:
         raise SystemExit(f"amh: {len(matches)} active tasks run at {address}; pass --task-file NAME.md")
     return matches[0]
-
-
-def mark(item: str, from_human: bool) -> str:
-    """Normalize one item to a single line carrying exactly the right authorship mark."""
-    try:
-        return amh_rs.mark_item(item, from_human)
-    except ValueError as error:
-        raise SystemExit(str(error)) from error
 
 
 def section_of(task: Task) -> str:
