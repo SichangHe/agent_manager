@@ -25,7 +25,10 @@ pub const WATCHER: &str = "amh watcher";
 pub const SENT_LOG: &str = "amh-sent.txt";
 const ALL_MAIL: &str = "[Gmail]/All Mail";
 const TRASH: &str = "[Gmail]/Trash";
-const HEADERS: &str = "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES DATE)])";
+/// The start of `X-AMH-From` on the automatic "pending item created/deleted" emails.
+pub const NOTICE_SENDER: &str = "amh notice";
+const HEADERS: &str =
+    "(UID BODY.PEEK[HEADER.FIELDS (SUBJECT MESSAGE-ID REFERENCES DATE X-AMH-FROM)])";
 const ATTACHED_BYTES_MAX: u64 = 20 << 20;
 const NEW_TITLE_CHARS_MAX: usize = 60;
 const TIMEOUT: Duration = Duration::from_secs(60);
@@ -42,6 +45,8 @@ pub struct Header {
     pub references: String,
     /// As written.
     pub date: String,
+    /// The `X-AMH-From` header: who sent it through amh; starts with `NOTICE_SENDER` for an item notice.
+    pub sender: String,
 }
 
 /// A file carried by an email: its name, MIME type, and content.
@@ -207,6 +212,7 @@ pub fn header_of(uid: String, raw: &[u8]) -> Header {
             message_id: String::new(),
             references: String::new(),
             date: String::new(),
+            sender: String::new(),
         };
     };
     Header {
@@ -215,6 +221,7 @@ pub fn header_of(uid: String, raw: &[u8]) -> Header {
         message_id: written(&message, "Message-ID"),
         references: written(&message, "References"),
         date: written(&message, "Date"),
+        sender: written(&message, "X-AMH-From"),
     }
 }
 

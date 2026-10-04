@@ -206,6 +206,22 @@ def failure_text(config: Config, task: Task, problem: str, error: str) -> str:
     return f"The agent working on task file {task.name} {what}.\nTool: {task.fields.get('tool', 'unknown')}, running at {task.address}\nIts manager: {manager}\nOpen items on the task: {len(task.items)}\n" + (f"{'The prompt it waits on' if problem == 'stuck' else 'The error its harness reported'}:\n{error}\n" if error else "")
 
 
+def answer_prompts(config: Config) -> None:
+    """Answer yes to permission prompts that agents wait on, and tell each agent's manager what was approved."""
+    # 🧑 "Sounds good, but should not be the default, which is no question any time at all"
+    for task in taskfile.active_tasks(config):
+        if task.address == "retired" or agents.status(config, task.address)[0] != "stuck":
+            continue
+        try:
+            approved = agents.approve(config, task.address)
+            for prompt in approved:
+                log(f"answered yes for {task.name} at {task.address}: {prompt}")
+            if approved:
+                agents.send(config, task.fields.get("managerat", ""), f"The agent of {task.name} waited on a permission prompt; the watcher answered yes: " + " | ".join(approved))
+        except agents.AgentError as error:
+            log(f"answering the prompt of {task.name} failed: {error}")
+
+
 def nudge(config: Config, told_at: dict[tuple[str, str], float]) -> None:
     """Remind idle agents of their open items; report each agent failure once to its manager and, for harness errors, to the human."""
     notified = config.state_dir / "amh-problem-notices.txt"
@@ -273,6 +289,7 @@ def run() -> int:
             deliver_pending(config, failed_at)
             if time.monotonic() - last_nudge > 60:
                 last_nudge = time.monotonic()
+                answer_prompts(config)
                 nudge(config, told_at)
                 chase_answers(config)
         except (Exception, SystemExit) as error:

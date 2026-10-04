@@ -179,6 +179,51 @@ pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
     }
 }
 
+/// Answer yes to every permission prompt an agent waits on; returns what was approved. Other kinds of prompt are left alone.
+// 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
+// 🧑 "Sounds good, but should not be the default, which is no question any time at all"
+pub fn approve_prompts(settings: &Settings, address: &str) -> Result<Vec<String>, String> {
+    let id = session(address)?;
+    let found = api(
+        settings,
+        "GET",
+        &format!("/v1/sessions/{id}?include_items=false"),
+        None,
+    )?;
+    let mut approved = Vec::new();
+    for prompt in found["pending_elicitations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let params = &prompt["params"];
+        let is_permission = params["phase"] == "pre_tool_use"
+            && params["policy_name"]
+                .as_str()
+                .is_some_and(|name| name.ends_with("_permission"));
+        if let (true, Some(elicitation)) = (is_permission, prompt["elicitation_id"].as_str()) {
+            post_event(
+                settings,
+                address,
+                "approval",
+                json!({"elicitation_id": elicitation, "action": "accept"}),
+            )?;
+            let preview: String = shown(&params["content_preview"])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ")
+                .chars()
+                .take(200)
+                .collect();
+            approved.push(format!(
+                "{}: {preview}",
+                shown(&params["message"]).replace("**", "")
+            ));
+        }
+    }
+    Ok(approved)
+}
+
 /// Stop an agent by ending its session.
 pub fn stop(settings: &Settings, address: &str) -> Result<(), String> {
     post_event(settings, address, "stop_session", json!({})).map(|_| ())

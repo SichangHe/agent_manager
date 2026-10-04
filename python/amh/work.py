@@ -34,16 +34,20 @@ def tell_human(config: Config, task: Task, subject: str, body: str, replaces: li
     message_id = mail.send(config, task.tag, subject, body, task.address, attachments) if attachments else mail.send(config, task.tag, subject, body, task.address)
     print(f"Email sent.\nMessage-ID: {message_id}")
     # 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
+    # 🧑 "this process should ignore emails about pending tasks being created and removed"
     try:
-        others = [h for h in mail.unread(config, task.tag, replaces) if h.message_id != message_id]
+        others = [h for h in mail.unread(config, task.tag, replaces) if h.message_id != message_id and not h.is_notice]
     except Exception as error:
         print(f"The email is sent; do not resend it. The check for your earlier unread emails failed: {error!r}")
         return
     if others:
-        print("The human has not read these earlier emails of yours:")
+        print(f"The human has {len(others)} earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:")
         for header in others:
             print(f"  {header.message_id} {header.subject!r} {header.date}")
-        print("If one email could now replace them and the one just sent, send it with `--replaces ID` for each; replaced unread emails go to the trash.")
+        flags = " ".join(f"--replaces '{header.message_id}'" for header in others)
+        print("Do this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with")
+        print(f"  amh tell human --subject SAME_SUBJECT --file MERGED_FILE {flags} --replaces '{message_id}'")
+        print("The replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.")
 
 
 def instructions(guides: tuple[str, ...], task_name: str) -> str:

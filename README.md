@@ -58,6 +58,8 @@ modules
     - `send`: one message event; a multi-line message is followed by one typed line, because Claude Code treats multi-line input as pasted text and does not act on it alone
     - `classify`: pure; `running`, `ready` (idle, also when Omnigent has parked the runner), `stuck` (the tool waits on an unanswered prompt, so the session reads no messages), `error` (failed, with the harness error), `missing`
     - `launch`: needs exactly one `TOOL-native-ui` agent and one online host; every tool runs with no sandbox and no permission prompts; waits up to 90 s for the runner
+    - `approve_prompts`: answers yes to permission prompts a session waits on; the watcher calls it once a minute for `stuck` agents and tells the manager; other kinds of prompt stay `stuck` and are reported
+        - 🧑 "Sounds good, but should not be the default, which is no question any time at all"
     - `stop`, `saw_message` (did the session's history take the message), `own_address` (the caller's session variable), `launch_default` (model and effort per tool, `[launch.TOOL]` in `config.toml`)
 - action log (`src/log.rs`, Rust): every `amh` run appends one line to `amh-actions.log` in the state folder: time, caller (Omnigent session, else tmux pane, else user), exit status, and the parsed command line
 - `taskfile` (Python): the `Task` record, loading and saving, the one lock file that serializes every writer, finding the caller's task
@@ -67,6 +69,7 @@ modules
     - input and output: `Mailbox` (one logged-in IMAP connection: `search`, `unseen_from`, `mark_read`), `deliver` (SMTP), `send`, `unread`
     - the watcher holds one `Mailbox` across polls and logs in again only after a failure; every network failure reaches the Python as `OSError`
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
+    - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; item notices (`X-AMH-From: amh notice ...`) are left out of that list
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
     - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
     - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`

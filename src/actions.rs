@@ -157,7 +157,16 @@ fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResu
         body = format!("{text}{body}");
     }
     let sent: String = mail
-        .call_method1("send", (&config, task.tag(), "", &body, task.address()))?
+        .call_method1(
+            "send",
+            (
+                &config,
+                task.tag(),
+                "",
+                &body,
+                format!("{} {}", crate::mail::NOTICE_SENDER, task.address()),
+            ),
+        )?
         .extract()?;
     if let Some((id, _)) = earlier {
         // The new notice is sent; failing to trash the old one only leaves one more unread email.

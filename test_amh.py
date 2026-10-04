@@ -294,7 +294,7 @@ def test_todo() -> None:
     check(amh("todo", "add", "write   the\n code", me=me) == (0, "added 1 open item(s)\n") and not sent_mail, "todo add")
     check(amh("todo", "add", "write the code", me=me) == (0, "added 0 open item(s)\n"), "a duplicate item is not added")
     check(amh("todo", "add", "--from-human", "🧑 ship it", "--task-file", "t_work.md") == (0, "added 1 open item(s)\n"), "todo add --from-human by --task-file")
-    check(sent_mail == [("t_work", "", "pending item created:\n- ship it\n", me)], "the human is told their item was created", sent_mail)
+    check(sent_mail == [("t_work", "", "pending item created:\n- ship it\n", f"amh notice {me}")], "the human is told their item was created", sent_mail)
     check(amh("todo", "list", me=me) == (0, "write the code\n🧑 ship it\n"), "todo list", amh("todo", "list", me=me))
     os.environ["OMO_AGENT_TASK_FILE"] = "t_work.md"
     check(amh("todo", "list")[1] == "write the code\n🧑 ship it\n", "the task file named at launch identifies the caller")
@@ -306,8 +306,8 @@ def test_todo() -> None:
     check("no such open item" in str(amh("todo", "done", "absent", "--evidence", "e", me=me)[0]), "done refuses an unknown item")
     check(amh("todo", "done", "write the code", "--evidence", "tests\npass", me=me) == (0, "removed 1 open item\n") and len(sent_mail) == 1, "todo done of an agent item sends no email")
     check(task("t_work.md").body.endswith("</human_instruction>\n\n(removed open item: tests pass)\n"), "the removal note follows a blank line", task("t_work.md").body[-80:])
-    check(amh("todo", "done", "🧑 ship it today", "--evidence", "shipped", me=me)[0] == 0 and sent_mail[-1] == ("t_work", "", "pending item deleted:\n- ship it today\n", me), "the human is told their item was deleted", sent_mail[-1])
-    unread_now.append(mail.Header("9", "[t_work] x", f"<sent-{len(sent_mail)}@x>", "", ""))
+    check(amh("todo", "done", "🧑 ship it today", "--evidence", "shipped", me=me)[0] == 0 and sent_mail[-1] == ("t_work", "", "pending item deleted:\n- ship it today\n", f"amh notice {me}"), "the human is told their item was deleted", sent_mail[-1])
+    unread_now.append(mail.Header("9", "[t_work] x", f"<sent-{len(sent_mail)}@x>", "", "", "amh notice x"))
     n_trash = len(unread_args)
     _ = amh("todo", "add", "one more", "--from-human", me=me)
     check(sent_mail[-1][2] == "pending item deleted:\n- ship it today\npending item created:\n- one more\n" and unread_args[-1] == ("t_work", [f"<sent-{len(sent_mail) - 1}@x>"]) and len(unread_args) == n_trash + 2, "an unread earlier notice is folded into the new one and trashed", (sent_mail[-1], unread_args[n_trash:]))
@@ -320,7 +320,7 @@ def test_todo() -> None:
 def test_task_actions() -> None:
     check(amh("task", "give", "t_work.md", "do x") == (0, "added 1 open item(s) to t_work.md\n"), "task give")
     n_mail = len(sent_mail)
-    check(amh("task", "give", "t_work.md", "do y", "--from-human")[0] == 0 and sent_mail[n_mail:] == [("t_work", "", "pending item created:\n- do y\n", "omnigent://s1")], "task give --from-human emails", sent_mail[n_mail:])
+    check(amh("task", "give", "t_work.md", "do y", "--from-human")[0] == 0 and sent_mail[n_mail:] == [("t_work", "", "pending item created:\n- do y\n", "amh notice omnigent://s1")], "task give --from-human emails", sent_mail[n_mail:])
     check(amh("task", "show", "t_work.md", "t_sub.md")[1].startswith("t_work.md\n  version: v1.0.0\n  status: running\n  managerat: omnigent://main\n  is_manager: false\n  runat: omnigent://s1\n  tool: codex\n  session_id: s1\n  - do x\n  - 🧑 do y\nt_sub.md\n"), "task show", amh("task", "show", "t_work.md")[1])
     check("no task file" in str(amh("task", "show", "absent.md")[0]) and "no task file" in str(amh("task", "show", "../x.md")[0]), "an unknown task file is refused")
     check(amh("task", "move", "t_work.md", "t_sub.md", "do x") == (0, "") and task("t_work.md").items == ["🧑 do y"] and task("t_sub.md").items == ["do x"], "task move")
@@ -350,10 +350,10 @@ def test_tell() -> None:
     check("records no manager" in str(amh("tell", "manager", "x", me=MAIN)[0]), "the main manager has no manager")
     body = WORKDIR / "body.txt"
     body.write_text("Report body\n", encoding="utf-8")
-    unread_now[:] = [mail.Header("4", "[t_work] Earlier", "<old@x>", "", "Mon")]
+    unread_now[:] = [mail.Header("4", "[t_work] Earlier", "<old@x>", "", "Mon"), mail.Header("5", "[t_work] Earlier", "<notice@x>", "", "Mon", "amh notice omnigent://s1")]
     code, out = amh("tell", "human", "--subject", "Progress", "--file", str(body), "--replaces", "<gone@x>", me=me)
     check(code == 0 and sent_mail[-1] == ("t_work", "Progress", "Report body\n", me) and unread_args[-1] == ("t_work", ["<gone@x>"]), "tell human sends on the task's tag", (sent_mail[-1], unread_args[-1]))
-    check(out.startswith(f"Email sent.\nMessage-ID: <sent-{len(sent_mail)}@x>\nThe human has not read these earlier emails of yours:\n  <old@x> '[t_work] Earlier' Mon\n") and "--replaces ID" in out, "tell human lists earlier unread emails", out)
+    check(out.startswith(f"Email sent.\nMessage-ID: <sent-{len(sent_mail)}@x>\nThe human has 1 earlier unread email(s) of yours besides the one just sent.") and "  <old@x> '[t_work] Earlier' Mon\n" in out and f"--replaces '<old@x>' --replaces '<sent-{len(sent_mail)}@x>'" in out, "tell human lists earlier unread emails", out)
     check(amh("mail", "unread", me=me) == (0, "<old@x> '[t_work] Earlier' Mon\n"), "mail unread")
     unread_now.clear()
     check(amh("tell", "human", "--subject", "Progress", "--file", str(body), me=me)[1] == f"Email sent.\nMessage-ID: <sent-{len(sent_mail)}@x>\n", "tell human with nothing unread")

@@ -67,6 +67,14 @@ def status(_config: Config, address: str) -> tuple[str, str]:
     return amh_rs.agent_status(address)
 
 
+def approve(_config: Config, address: str) -> list[str]:
+    """Answer yes to every permission prompt an agent waits on; return what was approved."""
+    try:
+        return amh_rs.agent_approve(address)
+    except ValueError as error:
+        raise AgentError(str(error)) from error
+
+
 def stop(_config: Config, address: str) -> None:
     """Stop an agent by ending its Omnigent session."""
     try:

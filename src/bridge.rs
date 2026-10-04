@@ -10,7 +10,7 @@ use pyo3::prelude::*;
 use crate::{mail, omnigent, taskfile};
 
 /// A found email as the Python takes it: uid, subject, Message-ID, references, date.
-type HeaderRow = (String, String, String, String, String);
+type HeaderRow = (String, String, String, String, String, String);
 /// A file carried by an email as the Python takes it: name, MIME type, content.
 type FileRow = (String, String, Vec<u8>);
 /// A received email as the Python takes it: sender address, `Authentication-Results`, Message-ID, In-Reply-To, References, subject, body, images.
@@ -26,7 +26,16 @@ type MailRow = (
 );
 
 fn header_rows(headers: Vec<mail::Header>) -> Vec<HeaderRow> {
-    let row = |h: mail::Header| (h.uid, h.subject, h.message_id, h.references, h.date);
+    let row = |h: mail::Header| {
+        (
+            h.uid,
+            h.subject,
+            h.message_id,
+            h.references,
+            h.date,
+            h.sender,
+        )
+    };
     headers.into_iter().map(row).collect()
 }
 
@@ -62,6 +71,8 @@ pub mod amh_rs {
     const SECTIONS: [&str; 4] = taskfile::SECTIONS;
     #[pymodule_export]
     const MAIL_WATCHER: &str = mail::WATCHER;
+    #[pymodule_export]
+    const MAIL_NOTICE_SENDER: &str = mail::NOTICE_SENDER;
     #[pymodule_export]
     const MAIL_SENT_LOG: &str = mail::SENT_LOG;
     #[pymodule_export]
@@ -134,6 +145,12 @@ pub mod amh_rs {
     #[pyfunction]
     fn agent_status(address: &str) -> PyResult<(&'static str, String)> {
         Ok(omnigent::status(&loaded()?, address))
+    }
+
+    /// Answer yes to every permission prompt an agent waits on; returns what was approved.
+    #[pyfunction]
+    fn agent_approve(address: &str) -> PyResult<Vec<String>> {
+        omnigent::approve_prompts(&loaded()?, address).map_err(PyValueError::new_err)
     }
 
     /// Stop an agent by ending its session.
@@ -217,12 +234,13 @@ pub mod amh_rs {
         subject: &str,
         found: Vec<HeaderRow>,
     ) -> PyResult<(String, String, String)> {
-        let header = |(uid, subject, message_id, references, date)| mail::Header {
+        let header = |(uid, subject, message_id, references, date, sender)| mail::Header {
             uid,
             subject,
             message_id,
             references,
             date,
+            sender,
         };
         let found: Vec<mail::Header> = found.into_iter().map(header).collect();
         mail::plan(tag, subject, &found)

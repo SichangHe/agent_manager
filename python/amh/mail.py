@@ -24,6 +24,12 @@ class Header(NamedTuple):
     message_id: str
     references: str
     date: str
+    sender: str = ""
+
+    @property
+    def is_notice(self) -> bool:
+        """Whether this is an automatic "pending item created/deleted" email."""
+        return self.sender.startswith(amh_rs.MAIL_NOTICE_SENDER)
 
 
 class Mail(NamedTuple):

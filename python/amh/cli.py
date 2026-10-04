@@ -107,6 +107,8 @@ def manager_worktree(config: Config, _args: SimpleNamespace) -> None:
 
 def mail_unread(config: Config, args: SimpleNamespace) -> int:
     for header in mail.unread(config, taskfile.own_task(config, args.task_file).tag, []):
+        if header.is_notice:
+            continue
         print(f"{header.message_id} {header.subject!r} {header.date}")
     return 0
 
