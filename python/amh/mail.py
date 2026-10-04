@@ -126,13 +126,14 @@ def send(config: Config, tag: str, subject: str, body: str, sender: str, attachm
     # 🧑 "Let email_me.py prefer the task file name in the subject tag. I find it easier"
     # 🧑 "pending item created/deleted messages should reuse subject of the agent’s previous email"
     title = bare(subject)
-    if len(title) >= 60:
-        raise SystemExit("amh: the subject must be under 60 characters")
     box = connect(config)
     try:
         thread = [h for h in search(box, ALL_MAIL, True, *raw(f'subject:"[{tag}]"')) if tag_of(h.subject) == tag and (not title or bare(h.subject) == title)]
     finally:
         box.shutdown()
+    # The length limit is for new subjects only: a reply must be able to reuse the subject of the thread it answers, whatever its length.
+    if len(title) >= 60 and not thread:
+        raise SystemExit("amh: a new subject must be under 60 characters")
     last = thread[-1] if thread else Header("", "", "", "", "")
     message = compose(config, config.get("mail.human_address"), f"{'Re: ' if thread else ''}[{tag}] {title or (bare(last.subject) if thread else tag)}", body, last.message_id, last.references)
     message["X-AMH-From"] = sender

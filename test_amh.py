@@ -248,6 +248,10 @@ def test_transport() -> None:
         check(False, "long subject is refused")
     except SystemExit:
         pass
+    long_title = "a subject the human's thread already has, longer than sixty characters"
+    agent_inbox.raws["8"] = email(HUMAN, f"Re: [t_work] {long_title}", "old", "<d@x>")
+    _ = mail.send(CONFIG, "t_work", f"Re: [t_work] {long_title}", "b", "w")
+    check(smtp_out[-1]["Subject"] == f"Re: [t_work] {long_title}" and smtp_out[-1]["In-Reply-To"] == "<d@x>", "a reply may reuse a long existing subject", smtp_out[-1]["Subject"])
     human_inbox.raws = {"1": email(AGENT, "[t_work] Progress", "x", "<a@x>"), "2": email(AGENT, "[t_work] Progress", "x", "<b@x>"), "3": email(AGENT, "[other] Progress", "x", "<c@x>")}
     check([h.message_id for h in mail.unread(CONFIG, "t_work", [])] == ["<a@x>", "<b@x>"] and human_inbox.readonly and human_inbox.user == (HUMAN, "secret"), "unread lists the tag's emails read-only, logged in as the human")
     check([h.message_id for h in mail.unread(CONFIG, "t_work", ["<a@x>"])] == ["<b@x>"] and human_inbox.moved == ["1"], "replaced unread email goes to the trash", human_inbox.moved)
