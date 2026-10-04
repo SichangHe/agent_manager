@@ -307,6 +307,13 @@ def test_todo() -> None:
     check(amh("todo", "done", "write the code", "--evidence", "tests\npass", me=me) == (0, "removed 1 open item\n") and len(sent_mail) == 1, "todo done of an agent item sends no email")
     check(task("t_work.md").body.endswith("</human_instruction>\n\n(removed open item: tests pass)\n"), "the removal note follows a blank line", task("t_work.md").body[-80:])
     check(amh("todo", "done", "🧑 ship it today", "--evidence", "shipped", me=me)[0] == 0 and sent_mail[-1] == ("t_work", "", "pending item deleted:\n- ship it today\n", me), "the human is told their item was deleted", sent_mail[-1])
+    unread_now.append(mail.Header("9", "[t_work] x", f"<sent-{len(sent_mail)}@x>", "", ""))
+    n_trash = len(unread_args)
+    _ = amh("todo", "add", "one more", "--from-human", me=me)
+    check(sent_mail[-1][2] == "pending item deleted:\n- ship it today\npending item created:\n- one more\n" and unread_args[-1] == ("t_work", [f"<sent-{len(sent_mail) - 1}@x>"]) and len(unread_args) == n_trash + 2, "an unread earlier notice is folded into the new one and trashed", (sent_mail[-1], unread_args[n_trash:]))
+    unread_now.clear()
+    _ = amh("todo", "done", "🧑 one more", "--evidence", "test", me=me)
+    check(sent_mail[-1][2] == "pending item deleted:\n- one more\n", "a notice the human has read is not repeated", sent_mail[-1])
     check(task("t_work.md").items == [] and "pending_task_items: []\n" in text_of("t_work.md"), "an empty list is written inline")
 
 

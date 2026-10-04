@@ -2,6 +2,7 @@
 //!
 //! The changes themselves are the pure functions of `tasks`; this module does the input and output around them.
 
+use std::collections::BTreeMap;
 use std::fs::{self, File};
 use std::path::PathBuf;
 
@@ -126,14 +127,44 @@ impl Store {
     }
 }
 
-/// Email the human about their items on a task's list, through the Python wrapper of the mail part, which the tests replace.
+/// Email the human about their items on a task's list, through the Python wrappers of the mail part, which the tests replace.
+///
+/// A task's earlier notice that the human has not read yet is folded into the new one and trashed, so at most one notice per task waits unread.
+// 🧑 "At all time, try to keep 1 unread email for the human from yourself."
 fn notify(py: Python<'_>, task: &Task, change: &str, items: &[String]) -> PyResult<()> {
-    let Some(body) = tasks::human_notice(change, items) else {
+    let Some(mut body) = tasks::human_notice(change, items) else {
         return Ok(());
     };
+    let record = settings::state_dir().join("amh-notices.json");
+    let mut notices: BTreeMap<String, (String, String)> = fs::read_to_string(&record)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
     let config = py.import("amh.config")?.call_method0("load")?;
-    py.import("amh.mail")?
-        .call_method1("send", (config, task.tag(), "", body, task.address()))?;
+    let mail = py.import("amh.mail")?;
+    let unread_ids = |trash: Vec<String>| -> PyResult<Vec<String>> {
+        let unread = mail.call_method1("unread", (&config, task.tag(), trash))?;
+        unread
+            .try_iter()?
+            .map(|header| header?.getattr("message_id")?.extract())
+            .collect()
+    };
+    let earlier = notices
+        .get(task.tag())
+        .filter(|(id, _)| unread_ids(Vec::new()).is_ok_and(|ids| ids.contains(id)))
+        .cloned();
+    if let Some((_, text)) = &earlier {
+        body = format!("{text}{body}");
+    }
+    let sent: String = mail
+        .call_method1("send", (&config, task.tag(), "", &body, task.address()))?
+        .extract()?;
+    if let Some((id, _)) = earlier {
+        // The new notice is sent; failing to trash the old one only leaves one more unread email.
+        let _ = unread_ids(vec![id]);
+    }
+    notices.insert(task.tag().to_owned(), (sent, body));
+    let _ = fs::write(&record, serde_json::to_string(&notices).unwrap_or_default());
     Ok(())
 }
 

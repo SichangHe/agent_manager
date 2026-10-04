@@ -51,6 +51,7 @@ modules
 - todo and task actions (Rust)
     - `src/tasks.rs`: the `Task` record and every change to it as pure functions: add, remove, reword, move an item; note; status; `show`; `check` of task files against the task list; the notice text for the human
     - `src/actions.rs`: the input and output around them: settings, the lock, loading and saving, the caller's own task, the task list row, and the notice email (sent through the Python mail part)
+        - a task's earlier notice that the human has not read is folded into the new one and trashed, so at most one notice per task waits unread; the last notice per task is kept in `amh-notices.json`
 - `amh agent view WHO` (`src/view.rs`, Rust): the human's command-line view; attaches the caller's terminal to the agent's own tmux terminal that Omnigent runs (`--read-only` to only watch); a parked agent has none until a message wakes it
 - agents (`src/omnigent.rs`, Rust): every agent is an Omnigent session, reached as JSON over HTTP on the local server
     - 🧑 "the Rust port would only support Omnigent, not tmux": no tmux launch, paste, or status; an address that is not `omnigent://ID` is reported as not reachable
