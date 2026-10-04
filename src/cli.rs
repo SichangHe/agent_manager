@@ -16,6 +16,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
                 .arg(Arg::new("subject").long("subject").required(true).help("plain English, under 60 characters"))
                 .arg(Arg::new("file").long("file").help("file holding the email body"))
+                .arg(Arg::new("attach").long("attach").action(ArgAction::Append).value_name("PATH").help("a file to attach, such as a figure the human asked to see; repeat as needed; 20 MB in total at most"))
                 .arg(Arg::new("replaces").long("replaces").action(ArgAction::Append).value_name("MESSAGE_ID").help("an earlier email of yours that this one replaces; if the human has not read it, it goes to the trash; repeat as needed"))
             )
             .subcommand(Command::new("agent").about("Message an agent you manage.")

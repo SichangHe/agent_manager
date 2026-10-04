@@ -230,6 +230,11 @@ def test_pending_blocks() -> None:
 def test_transport() -> None:
     """The real mail senders, on fake IMAP and SMTP; the Omnigent client is Rust and is exercised in production."""
     agent_inbox.raws = {"5": email(AGENT, "[t_work] Progress", "old", "<a@x>"), "6": email(AGENT, "Re: [t_work] Progress", "old", "<b@x>"), "7": email(AGENT, "[t_worker] Other", "old", "<c@x>")}
+    figure = WORKDIR / "figure.png"
+    _ = figure.write_bytes(PNG)
+    _ = mail.send(CONFIG, "t_work", "", "see the figure", "omnigent://w", [figure])
+    attached = [(part.get_filename(), part.get_content_type(), part.get_content()) for part in smtp_out[-1].iter_attachments()]
+    check(attached == [("figure.png", "image/png", PNG)] and smtp_out[-1].get_body(("plain",)).get_content() == "see the figure\n", "a file is attached to the email", attached)
     sent_id = mail.send(CONFIG, "t_work", "", "body text", "omnigent://w")
     message = smtp_out[-1]
     check(message["Subject"] == "Re: [t_work] Progress" and message["In-Reply-To"] == "<b@x>" and message["Message-ID"] == sent_id, "reply reuses the tag's last subject", message.items())

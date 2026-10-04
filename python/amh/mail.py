@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import imaplib
 import re
+import mimetypes
 import smtplib
 import time
 import subprocess
@@ -15,6 +16,7 @@ from dataclasses import dataclass
 from email import message_from_bytes, policy
 from email.message import EmailMessage
 from email.utils import make_msgid
+from collections.abc import Sequence
 from pathlib import Path
 
 from amh.config import Config
@@ -102,11 +104,21 @@ def deliver(config: Config, message: EmailMessage) -> str:
     return str(message["Message-ID"])
 
 
+def attach(message: EmailMessage, paths: Sequence[Path]) -> None:
+    """Attach files to an email, such as a figure the human asked to see."""
+    if sum(path.stat().st_size for path in paths) > ATTACHED_BYTES_MAX:
+        raise SystemExit(f"amh: the attachments exceed {ATTACHED_BYTES_MAX >> 20} MB in total; send a path instead")
+    for path in paths:
+        kind = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
+        message.add_attachment(path.read_bytes(), maintype=kind.split("/")[0], subtype=kind.split("/")[1], filename=path.name)
+
+
+ATTACHED_BYTES_MAX = 20 << 20
 WATCHER = "amh watcher"
 SENT_LOG = "amh-sent.txt"
 
 
-def send(config: Config, tag: str, subject: str, body: str, sender: str) -> str:
+def send(config: Config, tag: str, subject: str, body: str, sender: str, attachments: Sequence[Path] = ()) -> str:
     """Email the human on the tag's thread and return the new Message-ID.
 
     An empty `subject` reuses the subject of the newest email carrying the tag.
@@ -124,6 +136,7 @@ def send(config: Config, tag: str, subject: str, body: str, sender: str) -> str:
     last = thread[-1] if thread else Header("", "", "", "", "")
     message = compose(config, config.get("mail.human_address"), f"{'Re: ' if thread else ''}[{tag}] {title or (bare(last.subject) if thread else tag)}", body, last.message_id, last.references)
     message["X-AMH-From"] = sender
+    attach(message, attachments)
     sent = deliver(config, message)
     if sender != WATCHER:
         with (config.state_dir / SENT_LOG).open("a", encoding="utf-8") as record:

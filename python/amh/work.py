@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from amh import agents, mail, taskfile
@@ -29,8 +30,8 @@ def tell_manager(config: Config, task: Task, text: str, state: str) -> None:
     agents.send(config, task.fields["managerat"], envelope(task.address, label + text))
 
 
-def tell_human(config: Config, task: Task, subject: str, body: str, replaces: list[str]) -> None:
-    message_id = mail.send(config, task.tag, subject, body, task.address)
+def tell_human(config: Config, task: Task, subject: str, body: str, replaces: list[str], attachments: Sequence[Path] = ()) -> None:
+    message_id = mail.send(config, task.tag, subject, body, task.address, attachments) if attachments else mail.send(config, task.tag, subject, body, task.address)
     print(f"Email sent.\nMessage-ID: {message_id}")
     # 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
     try:

@@ -30,7 +30,7 @@ def tell_manager(config: Config, args: SimpleNamespace) -> None:
 
 def tell_human(config: Config, args: SimpleNamespace) -> None:
     body = Path(args.file).read_text(encoding="utf-8") if args.file else sys.stdin.read()
-    work.tell_human(config, taskfile.own_task(config, args.task_file), args.subject, body, args.replaces)
+    work.tell_human(config, taskfile.own_task(config, args.task_file), args.subject, body, args.replaces, [Path(path) for path in args.attach])
 
 
 def tell_agent(config: Config, args: SimpleNamespace) -> None:

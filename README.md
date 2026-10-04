@@ -63,6 +63,7 @@ modules
 - `agents` (Python): thin wrappers over the Rust agent functions
 - `mail`: send on the tag's thread (agent Gmail account), list/trash the human's unread (human mailbox via himalaya config), fetch unread mail from one sender
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
+    - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
 - `work`: what each action does; `problems`, `check`, `tree`, `rotate`
     - `rotate` of the main manager rewrites its address in `env.toml`
 - `watch`: loop every 5 s
