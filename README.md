@@ -88,6 +88,7 @@ modules
     - a stored email is read as Python's text mode read it: `\r\n` and `\r` become `\n`
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
     - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; left out of that list and of `mail unread`: item notices and watcher emails (`X-AMH-From: amh ...`), and emails sent outside amh (no `X-AMH-From`), such as a mail-compression job's summaries
+    - an email to the human that Gmail refuses (e.g. the account's daily sending limit, `550 5.4.5`) is kept in `outbox/` in the state folder; the watcher tries the outbox every 10 min, oldest first, and stops at the limit; `tell human` then says the email is queued, and nothing it replaces is trashed
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
     - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
     - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`

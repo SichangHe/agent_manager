@@ -378,6 +378,61 @@ pub fn new_id() -> String {
     format!("<{ns}.{}@gmail.com>", std::process::id())
 }
 
+/// The folder in the state folder holding emails to the human that could not be sent yet.
+pub const OUTBOX: &str = "outbox";
+
+/// Where the email with this Message-ID waits when it could not be sent.
+fn queued_path(state_dir: &Path, message_id: &str) -> PathBuf {
+    let name: String = message_id
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.')
+        .collect();
+    state_dir.join(OUTBOX).join(format!("{name}.eml"))
+}
+
+/// Whether the email with this Message-ID is waiting to be sent.
+pub fn is_queued(state_dir: &Path, message_id: &str) -> bool {
+    queued_path(state_dir, message_id).is_file()
+}
+
+/// Whether a send failure says the account's sending limit is reached, so trying more emails now is pointless. Pure.
+pub fn is_limit(error: &str) -> bool {
+    error.contains("5.4.5") || error.to_lowercase().contains("sending limit")
+}
+
+/// Send the queued emails, oldest first; returns one log line per email sent or refused. Stops at the sending limit.
+pub fn flush_outbox(settings: &BTreeMap<String, String>, state_dir: &Path) -> Vec<String> {
+    let entries = fs::read_dir(state_dir.join(OUTBOX)).into_iter().flatten();
+    let mut waiting: Vec<PathBuf> = entries
+        .filter_map(|entry| Some(entry.ok()?.path()))
+        .filter(|path| path.extension().is_some_and(|kind| kind == "eml"))
+        .collect();
+    waiting.sort();
+    let to = settings::get(settings, "mail.human_address");
+    let mut lines = Vec::new();
+    for (at, path) in waiting.iter().enumerate() {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let sent = fs::read(path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| deliver(settings, to, &raw));
+        match sent {
+            Ok(()) => {
+                let _ = fs::remove_file(path);
+                lines.push(format!("sent queued email {name}"));
+            }
+            Err(error) if is_limit(&error) => {
+                lines.push(format!(
+                    "{} queued email(s) still wait: {error}",
+                    waiting.len() - at
+                ));
+                break;
+            }
+            Err(error) => lines.push(format!("queued email {name} was refused: {error}")),
+        }
+    }
+    lines
+}
+
 /// Send built email bytes to one address through the agent account.
 pub fn deliver(settings: &BTreeMap<String, String>, to: &str, raw: &[u8]) -> Result<(), String> {
     let from = settings::get(settings, "mail.agent_address");
@@ -599,7 +654,14 @@ pub fn send(
     };
     let message_id = new_id();
     let raw = compose(&draft, &message_id)?;
-    deliver(settings, to, &raw)?;
+    if let Err(error) = deliver(settings, to, &raw) {
+        // A refused email is kept and sent again by the watcher, so nothing the human should read is lost.
+        let path = queued_path(state_dir, &message_id);
+        fs::create_dir_all(state_dir.join(OUTBOX))
+            .and_then(|()| fs::write(&path, &raw))
+            .map_err(|failure| format!("{error}; and it could not be queued: {failure}"))?;
+        eprintln!("amh: {error}; the email is queued and will be sent when Gmail allows");
+    }
     if sender != WATCHER {
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH);
         let line = format!("{} {tag}\n", epoch_s.unwrap_or_default().as_secs());
@@ -810,5 +872,15 @@ mod tests {
             unread_check_failed("mail search in INBOX failed: it's down"),
             "The email is sent; do not resend it. The check for your earlier unread emails failed: OSError(\"mail search in INBOX failed: it's down\")\n"
         );
+    }
+
+    #[test]
+    fn the_sending_limit_is_recognised() {
+        assert!(is_limit(
+            "the email was not sent: permanent error (550): 5.4.5 Daily user sending limit exceeded."
+        ));
+        assert!(!is_limit("the email was not sent: connection refused"));
+        let path = queued_path(Path::new("/state"), "<1791.42@gmail.com>");
+        assert_eq!(path, Path::new("/state/outbox/1791.42gmail.com.eml"));
     }
 }

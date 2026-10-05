@@ -22,6 +22,8 @@ use crate::{guest, omnigent, settings};
 // 🧑 "Why so slow ... Improve it"
 const MAIL_POLL: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(30);
+/// How often queued emails are tried again.
+const FLUSH_EVERY: Duration = Duration::from_secs(600);
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
 const AWAITING: &str = "amh-awaiting.txt";
 const TOLD_HUMAN: &str = "amh-told-human.txt";
@@ -581,6 +583,7 @@ pub fn run() -> u8 {
         reminded_s: BTreeMap::new(),
         last_nudge: None,
     };
+    let mut last_flush: Option<Instant> = None;
     log("watcher started");
     loop {
         let settings = match settings::load() {
@@ -602,6 +605,12 @@ pub fn run() -> u8 {
             scanned = answer_prompts(&settings, &store)
                 .and_then(|()| watcher.nudge(&settings, &store))
                 .and_then(|()| chase_answers(&settings, &store));
+        }
+        if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
+            last_flush = Some(Instant::now());
+            for line in mail::flush_outbox(&settings, &store.state_dir) {
+                log(&line);
+            }
         }
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));

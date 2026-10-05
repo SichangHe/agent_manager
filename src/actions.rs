@@ -70,7 +70,7 @@ fn notify(settings: &Settings, task: &Task, change: &str, items: &[String]) -> R
     let sender = format!("{} {}", mail::NOTICE_SENDER, task.address());
     let sent = mail::send(settings, &state_dir, task.tag(), "", &body, &sender, &[])
         .map_err(|error| format!("amh: {error}"))?;
-    if let Some((id, _)) = earlier {
+    if let Some((id, _)) = earlier.filter(|_| !mail::is_queued(&state_dir, &sent)) {
         // The new notice is sent; failing to trash the old one only leaves one more unread email.
         let _ = unread_ids(&[id]);
     }
@@ -98,6 +98,13 @@ fn tell_human(
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
+    if mail::is_queued(&settings::state_dir(), &message_id) {
+        // The emails it replaces stay until it is really sent, so the human loses nothing meanwhile.
+        say(&format!(
+            "Email NOT sent yet: Gmail refused it, see the line above. It is queued and the watcher will send it when Gmail allows. Do not send it again.\nMessage-ID: {message_id}\n"
+        ));
+        return Ok(());
+    }
     say(&format!("Email sent.\nMessage-ID: {message_id}\n"));
     say(&match mail::unread(settings, task.tag(), replaces) {
         Ok(unread) => mail::replace_reminder(&message_id, &unread),
