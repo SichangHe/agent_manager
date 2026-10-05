@@ -59,7 +59,6 @@ modules
         - a failed `agent view` is logged with `exit=1`
 - todo and task records
     - `src/tasks.rs`: the `Task` record and every change to it as pure functions: add, remove, reword, move an item; note; status; `show`; `check` of task files against the task list; the notice text for the human
-    - the notice email (`notify` in `src/actions.rs`): a task's earlier notice that the human has not read is folded into the new one and trashed, so at most one notice per task waits unread; the last notice per task is kept in `amh-notices.json`
     - `src/store.rs`: the work-log root on disk: the lock, loading and saving task files, the task list row, the caller's own task; shared by the actions, the watcher, and starting agents
 - `amh agent view WHO` (`src/view.rs`): the human's command-line view; attaches the caller's terminal to the agent's own tmux terminal that Omnigent runs (`--read-only` to only watch); a parked agent has none until a message wakes it
 - agents (`src/omnigent.rs`): every agent is an Omnigent session, reached as JSON over HTTP on the local server
@@ -89,6 +88,10 @@ modules
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
     - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; left out of that list and of `mail unread`: item notices and watcher emails (`X-AMH-From: amh ...`), and emails sent outside amh (no `X-AMH-From`), such as a mail-compression job's summaries
     - an email to the human that Gmail refuses (e.g. the account's daily sending limit, `550 5.4.5`) is kept in `outbox/` in the state folder; the watcher tries the outbox every 10 min, oldest first, and stops at the limit; `tell human` then says the email is queued, and nothing it replaces is trashed
+    - 🧑 "Make the emailing script combine emails into one. ... Merge those, which also requires caller interface to change and encourage batched calling of amh tell human"
+        - adding or finishing one of the human's items sends no email by itself; the change is noted in `amh-unreported.txt` (`EPOCH TAG CHANGE ITEM`) and listed under the text of that task's next `tell human`
+        - `amh tell human --add ITEM --done ITEM` records the item changes and reports them in the same email
+        - a change no email has carried for 30 min is emailed alone by the watcher, one email per task
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
     - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
     - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`

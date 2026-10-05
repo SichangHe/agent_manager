@@ -180,15 +180,67 @@ pub fn show(task: &Task) -> String {
     format!("{}\n{fields}{items}", task.name)
 }
 
-/// The email telling the human that their requests were created or deleted on a task's list, when any item is theirs.
-// 🧑 “Pending items originated from the human need emails, ones from agents do not.”
-pub fn human_notice(change: &str, items: &[String]) -> Option<String> {
-    let theirs: String = items
-        .iter()
-        .filter_map(|item| item.strip_prefix(HUMAN_MARK))
-        .map(|item| format!("- {item}\n"))
-        .collect();
-    (!theirs.is_empty()).then(|| format!("pending item {change}:\n{theirs}"))
+/// The record line of one change to a human item that the human has not been told yet: `EPOCH TAG CHANGE ITEM`.
+pub fn unreported_line(epoch_s: u64, tag: &str, change: &str, item: &str) -> String {
+    format!(
+        "{epoch_s} {tag} {change} {}\n",
+        item.split_whitespace().collect::<Vec<_>>().join(" ")
+    )
+}
+
+/// Split the record of unreported changes into those of `tag`, as the text to put in an email, and the record without them.
+// 🧑 "Make the emailing script combine emails into one. Currently agents send separate emails for each pending item creation/removal and separate from their messages. Merge those"
+pub fn take_unreported(record: &str, tag: &str) -> (String, String) {
+    let mut rest = String::new();
+    let mut changes: Vec<(&str, &str)> = Vec::new();
+    for line in record.lines() {
+        let mut parts = line.splitn(4, ' ');
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(_), Some(owner), Some(change), Some(item)) if owner == tag => {
+                changes.push((change, item))
+            }
+            _ => rest += &format!("{line}\n"),
+        }
+    }
+    let mut text = String::new();
+    for change in ["created", "deleted"] {
+        let items: String = changes
+            .iter()
+            .filter(|(kind, _)| *kind == change)
+            .map(|(_, item)| format!("- {item}\n"))
+            .collect();
+        if !items.is_empty() {
+            text += &format!("pending item {change}:\n{items}");
+        }
+    }
+    (text, rest)
+}
+
+/// The tags whose oldest unreported change is older than `after_s`, so the human should now be told without waiting for the agent's next email.
+pub fn overdue_unreported(record: &str, now_s: u64, after_s: u64) -> Vec<String> {
+    let mut tags: Vec<String> = Vec::new();
+    for line in record.lines() {
+        let mut parts = line.splitn(3, ' ');
+        let (Some(at), Some(tag)) = (
+            parts.next().and_then(|at| at.parse::<u64>().ok()),
+            parts.next(),
+        ) else {
+            continue;
+        };
+        if now_s.saturating_sub(at) > after_s && !tags.iter().any(|known| known == tag) {
+            tags.push(tag.to_owned());
+        }
+    }
+    tags
+}
+
+/// An email body with the item changes under it.
+pub fn with_changes(body: &str, changes: &str) -> String {
+    match (body.trim().is_empty(), changes.is_empty()) {
+        (_, true) => body.to_owned(),
+        (true, false) => changes.to_owned(),
+        (false, false) => format!("{}\n\n{changes}", body.trim_end()),
+    }
 }
 
 /// Every disagreement between the active task files and the task list.
@@ -325,20 +377,6 @@ mod tests {
     }
 
     #[test]
-    fn only_the_humans_items_are_announced() {
-        let items = ["🧑 ship it".to_owned(), "write the code".to_owned()];
-        assert_eq!(
-            human_notice("created", &items).as_deref(),
-            Some("pending item created:\n- ship it\n")
-        );
-        assert_eq!(
-            human_notice("deleted", &items[..1]).as_deref(),
-            Some("pending item deleted:\n- ship it\n")
-        );
-        assert_eq!(human_notice("deleted", &items[1..]), None);
-    }
-
-    #[test]
     fn a_task_is_shown_moved_from_and_noted() {
         let mut work = worker();
         work.items = vec!["do x".to_owned(), "🧑 do y".to_owned()];
@@ -443,5 +481,35 @@ mod tests {
                 "t_gone.md: listed as open work in TODO.md but it is done or not a task file",
             ]
         );
+    }
+
+    #[test]
+    fn item_changes_wait_and_go_out_together() {
+        let record = unreported_line(100, "t_work", "created", "ship  it")
+            + &unreported_line(160, "t_other", "created", "x")
+            + &unreported_line(200, "t_work", "deleted", "old one")
+            + &unreported_line(210, "t_work", "created", "second");
+        let (text, rest) = take_unreported(&record, "t_work");
+        assert_eq!(
+            text,
+            "pending item created:\n- ship it\n- second\npending item deleted:\n- old one\n"
+        );
+        assert_eq!(rest, "160 t_other created x\n");
+        assert_eq!(
+            take_unreported(&rest, "t_work"),
+            (String::new(), rest.clone())
+        );
+        assert_eq!(
+            overdue_unreported(&record, 2000, 1800),
+            ["t_work", "t_other"]
+        );
+        assert_eq!(overdue_unreported(&record, 1950, 1800), ["t_work"]);
+        assert!(overdue_unreported(&record, 300, 1800).is_empty());
+        assert_eq!(
+            with_changes("Report.\n", &text),
+            format!("Report.\n\n{text}")
+        );
+        assert_eq!(with_changes("Report.\n", ""), "Report.\n");
+        assert_eq!(with_changes(" \n", &text), text);
     }
 }

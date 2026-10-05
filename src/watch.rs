@@ -16,14 +16,16 @@ use crate::decide::{self, Chase, Nudge, Outcome, Plan, Source};
 use crate::mail::{self, Mailbox};
 use crate::store::Store;
 use crate::taskfile::{self, MARKER};
-use crate::tasks::Task;
-use crate::{guest, omnigent, settings};
+use crate::tasks::{self, Task};
+use crate::{actions, guest, omnigent, settings};
 
 // 🧑 "Why so slow ... Improve it"
 const MAIL_POLL: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(30);
 /// How often queued emails are tried again.
 const FLUSH_EVERY: Duration = Duration::from_secs(600);
+/// How long a change to the human's items waits for the agent's next email before it is emailed alone.
+const UNREPORTED_AFTER_S: u64 = 1800;
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
 const AWAITING: &str = "amh-awaiting.txt";
 const TOLD_HUMAN: &str = "amh-told-human.txt";
@@ -497,6 +499,22 @@ impl Watcher {
     }
 }
 
+/// Email the human the changes to their items that no email of the agent has carried for `UNREPORTED_AFTER_S`, one email per task.
+// 🧑 “Pending items originated from the human need emails, ones from agents do not.”
+fn report_item_changes(settings: &Settings, store: &Store) {
+    let record = fs::read_to_string(store.state_dir.join(actions::UNREPORTED)).unwrap_or_default();
+    for tag in tasks::overdue_unreported(&record, epoch_s() as u64, UNREPORTED_AFTER_S) {
+        let sender = format!("{} {tag}", mail::NOTICE_SENDER);
+        let sent = actions::take_unreported(store, &tag, false)
+            .and_then(|text| mail::send(settings, &store.state_dir, &tag, "", &text, &sender, &[]))
+            .and_then(|_| actions::take_unreported(store, &tag, true));
+        match sent {
+            Ok(_) => log(&format!("emailed the human the item changes of {tag}")),
+            Err(error) => log(&format!("item changes of {tag} were not emailed: {error}")),
+        }
+    }
+}
+
 /// Answer yes to permission prompts that agents wait on, and tell each agent's manager what was approved.
 // 🧑 "Sounds good, but should not be the default, which is no question any time at all"
 fn answer_prompts(settings: &Settings, store: &Store) -> Result<(), String> {
@@ -605,6 +623,9 @@ pub fn run() -> u8 {
             scanned = answer_prompts(&settings, &store)
                 .and_then(|()| watcher.nudge(&settings, &store))
                 .and_then(|()| chase_answers(&settings, &store));
+        }
+        if scanned.is_ok() {
+            report_item_changes(&settings, &store);
         }
         if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
             last_flush = Some(Instant::now());

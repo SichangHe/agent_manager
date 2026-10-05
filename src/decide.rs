@@ -14,7 +14,7 @@ pub const MAIL_SOURCE: &str = "(record and delegate manager_mail/";
 pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
-pub const ACCEPT: &str = "Immediately email the Human to acknowledge acceptance. Record every open item with `amh todo add --from-human`, quoting the human's words:";
+pub const ACCEPT: &str = "Immediately acknowledge acceptance to the Human and record every open item, in ONE call: `amh tell human --subject ... --add 'ITEM'` once per open item, quoting the human's words:";
 pub const ADD_REMINDER: &str = "\nAdd every still-open request to your open items.";
 
 /// Text in quotes as the watcher log shows it.

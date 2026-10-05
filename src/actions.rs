@@ -42,62 +42,84 @@ fn systemctl(args: &[&str]) -> Result<u8, String> {
         .unwrap_or(1))
 }
 
-/// Email the human about their items on a task's list.
-///
-/// A task's earlier notice that the human has not read yet is folded into the new one and trashed, so at most one notice per task waits unread.
+/// The record in the state folder of changes to the human's items that the human has not been told yet.
+pub const UNREPORTED: &str = "amh-unreported.txt";
+const HINT: &str = "The human is not emailed for this by itself: it goes out inside your next `amh tell human`, or alone after 30 minutes. `amh tell human --add ITEM --done ITEM` does both in one call.\n";
+
+/// Note changes to the human's items on a task, to be reported in that task's next email; returns the hint to print when any item was theirs.
+// 🧑 “Pending items originated from the human need emails, ones from agents do not.”
 // 🧑 "At all time, try to keep 1 unread email for the human from yourself."
-fn notify(settings: &Settings, task: &Task, change: &str, items: &[String]) -> Result<(), String> {
-    let Some(mut body) = tasks::human_notice(change, items) else {
-        return Ok(());
-    };
-    let state_dir = settings::state_dir();
-    let record = state_dir.join("amh-notices.json");
-    let mut notices: BTreeMap<String, (String, String)> = fs::read_to_string(&record)
-        .ok()
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .unwrap_or_default();
-    let unread_ids = |trash: &[String]| -> Result<Vec<String>, String> {
-        let unread = mail::unread(settings, task.tag(), trash)?;
-        Ok(unread.into_iter().map(|header| header.message_id).collect())
-    };
-    let earlier = notices
-        .get(task.tag())
-        .filter(|(id, _)| unread_ids(&[]).is_ok_and(|ids| ids.contains(id)))
-        .cloned();
-    if let Some((_, text)) = &earlier {
-        body = format!("{text}{body}");
+fn defer(
+    store: &Store,
+    task: &Task,
+    change: &str,
+    items: &[String],
+) -> Result<&'static str, String> {
+    let theirs: Vec<&str> = items
+        .iter()
+        .filter_map(|item| item.strip_prefix(crate::taskfile::HUMAN_MARK))
+        .collect();
+    if theirs.is_empty() {
+        return Ok("");
     }
-    let sender = format!("{} {}", mail::NOTICE_SENDER, task.address());
-    let sent = mail::send(settings, &state_dir, task.tag(), "", &body, &sender, &[])
-        .map_err(|error| format!("amh: {error}"))?;
-    if let Some((id, _)) = earlier.filter(|_| !mail::is_queued(&state_dir, &sent)) {
-        // The new notice is sent; failing to trash the old one only leaves one more unread email.
-        let _ = unread_ids(&[id]);
+    let now_s = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let lines: String = theirs
+        .iter()
+        .map(|item| tasks::unreported_line(now_s, task.tag(), change, item))
+        .collect();
+    let _lock = store.lock()?;
+    let mut record = fs::OpenOptions::new();
+    record
+        .create(true)
+        .append(true)
+        .open(store.state_dir.join(UNREPORTED))
+        .and_then(|mut record| record.write_all(lines.as_bytes()))
+        .map_err(|error| {
+            format!("amh: the item is saved, but noting it for the human failed: {error}")
+        })?;
+    Ok(HINT)
+}
+
+/// Take the unreported item changes of `tag` out of the record and return them as email text.
+pub fn take_unreported(store: &Store, tag: &str, remove: bool) -> Result<String, String> {
+    let _lock = store.lock()?;
+    let path = store.state_dir.join(UNREPORTED);
+    let (text, rest) = tasks::take_unreported(&fs::read_to_string(&path).unwrap_or_default(), tag);
+    if remove && !text.is_empty() {
+        fs::write(&path, rest)
+            .map_err(|error| format!("amh: cannot update {UNREPORTED}: {error}"))?;
     }
-    notices.insert(task.tag().to_owned(), (sent, body));
-    let _ = fs::write(&record, serde_json::to_string(&notices).unwrap_or_default());
-    Ok(())
+    Ok(text)
 }
 
 /// Email the human on the caller's thread, then say which earlier emails of the caller the human has not read.
+// 🧑 "Make the emailing script combine emails into one. ... Merge those, which also requires caller interface to change and encourage batched calling of amh tell human"
 fn tell_human(
     settings: &Settings,
+    store: &Store,
     task: &Task,
     subject: &str,
     body: &str,
     replaces: &[String],
     attachments: &[PathBuf],
 ) -> Result<(), String> {
+    // The changes to the human's items since this task's last email go out in this one, under the agent's own text.
+    let changes = take_unreported(store, task.tag(), false)?;
+    let body = tasks::with_changes(body, &changes);
     let sent = mail::send(
         settings,
-        &settings::state_dir(),
+        &store.state_dir,
         task.tag(),
         subject,
-        body,
+        &body,
         task.address(),
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
+    take_unreported(store, task.tag(), true)?;
     if mail::is_queued(&settings::state_dir(), &message_id) {
         // The emails it replaces stay until it is really sent, so the human loses nothing meanwhile.
         say(&format!(
@@ -195,10 +217,33 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     .map(|body| work::unix_lines(&body))
                     .map_err(|error| format!("amh: cannot read standard input: {error}"))?,
             };
-            let task = store.own(text("task_file"))?;
+            let lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let mut added = Vec::new();
+            for item in many("add") {
+                added.extend(tasks::add_item(&mut task, item, true)?);
+            }
+            for item in many("done") {
+                tasks::remove_item(&mut task, item, "reported done in an email to the human")?;
+            }
+            let done: Vec<String> = many("done").into_iter().map(str::to_owned).collect();
+            if !added.is_empty() || !done.is_empty() {
+                store.save(&task)?;
+            }
+            drop(lock);
+            defer(&store, &task, "created", &added)?;
+            defer(&store, &task, "deleted", &done)?;
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
-            tell_human(&settings, &task, need("subject"), &body, &replaces, &attach)?;
+            tell_human(
+                &settings,
+                &store,
+                &task,
+                need("subject"),
+                &body,
+                &replaces,
+                &attach,
+            )?;
             String::new()
         }
         ("tell", "agent") => {
@@ -233,13 +278,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 store.save(&task)?;
             }
             drop(lock);
-            notify(&settings, &task, "created", &new)?;
+            let hint = defer(&store, &task, "created", &new)?;
             let to = if action.0 == "task" {
                 format!(" to {}", task.name)
             } else {
                 String::new()
             };
-            format!("added {} open item(s){to}\n", new.len())
+            format!("added {} open item(s){to}\n{hint}", new.len())
         }
         ("todo", "done") => {
             let lock = store.lock()?;
@@ -247,8 +292,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             tasks::remove_item(&mut task, need("item"), need("evidence"))?;
             store.save(&task)?;
             drop(lock);
-            notify(&settings, &task, "deleted", &[need("item").to_owned()])?;
-            "removed 1 open item\n".to_owned()
+            let hint = defer(&store, &task, "deleted", &[need("item").to_owned()])?;
+            format!("removed 1 open item\n{hint}")
         }
         ("todo", "replace") => {
             let _lock = store.lock()?;
