@@ -121,7 +121,7 @@ pub fn command() -> Command {
             )
         )
         .subcommand(Command::new("mail").about("Look at the emails you sent the human.").subcommand_required(true).arg_required_else_help(true)
-            .subcommand(Command::new("unread").about("List your emails the human has not read yet.").long_about("List your emails the human has not read yet.\n\nTo drop one, send its replacement with `amh tell human --replaces MESSAGE_ID`.")
+            .subcommand(Command::new("unread").about("List the emails you sent through amh that the human has not read yet.").long_about("List your emails the human has not read yet.\n\nTo drop one, send its replacement with `amh tell human --replaces MESSAGE_ID`.")
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
             )
         )

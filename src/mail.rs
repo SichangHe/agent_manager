@@ -179,9 +179,11 @@ pub fn plan(tag: &str, subject: &str, found: &[Header]) -> Result<Plan, String> 
 }
 
 impl Header {
-    /// Whether this is an automatic "pending item created/deleted" email.
-    pub fn is_notice(&self) -> bool {
-        self.sender.starts_with(NOTICE_SENDER)
+    /// Whether an agent wrote this email and sent it through amh, so that agent can replace it.
+    ///
+    /// Not its own: the automatic "pending item created/deleted" notices and the watcher's emails (senders starting `amh `), and emails sent outside amh, such as the summaries of a mail-compression job, which carry no sender header.
+    pub fn is_own(&self) -> bool {
+        !self.sender.is_empty() && !self.sender.starts_with("amh ")
     }
 
     /// The email as the unread listings show it.
@@ -198,10 +200,11 @@ impl Header {
 /// What `tell human` prints after sending `message_id`, given the task's emails the human has not opened: nothing, or the request to replace the earlier ones with one email.
 // 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
 // 🧑 "this process should ignore emails about pending tasks being created and removed"
+// Emails the agent did not write, such as a mail-compression job's summaries, are left out too: it cannot merge text it never saw.
 pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
     let others: Vec<&Header> = unread
         .iter()
-        .filter(|header| header.message_id != message_id && !header.is_notice())
+        .filter(|header| header.message_id != message_id && header.is_own())
         .collect();
     if others.is_empty() {
         return String::new();
@@ -650,7 +653,7 @@ mod tests {
             message_id: message_id.to_owned(),
             references: references.to_owned(),
             date: "Mon".to_owned(),
-            sender: String::new(),
+            sender: "omnigent://s1".to_owned(),
         }
     }
 
@@ -786,10 +789,14 @@ mod tests {
     fn earlier_unread_emails_are_listed_for_replacement() {
         let mut notice = header("6", "[t_work] Earlier", "<notice@x>", "");
         notice.sender = "amh notice omnigent://s1".to_owned();
+        let mut outside = header("8", "[t_work] Summary", "<summary@mail.x>", "");
+        outside.sender = String::new();
+        assert!(!notice.is_own() && !outside.is_own());
         let unread = [
             header("4", "[t_work] Earlier", "<old@x>", ""),
             header("5", "[t_work] it's \"x\"", "<older@x>", ""),
             notice,
+            outside,
             header("7", "[t_work] Progress", "<sent@x>", ""),
         ];
         assert_eq!(unread[0].listed(), "<old@x> '[t_work] Earlier' Mon");
@@ -798,6 +805,7 @@ mod tests {
             "The human has 2 earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n  <old@x> '[t_work] Earlier' Mon\n  <older@x> '[t_work] it\\'s \"x\"' Mon\nDo this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --subject SAME_SUBJECT --file MERGED_FILE --replaces '<old@x>' --replaces '<older@x>' --replaces '<sent@x>'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n"
         );
         assert_eq!(replace_reminder("<sent@x>", &unread[2..]), "");
+        assert!(NOTICE_SENDER.starts_with("amh ") && WATCHER.starts_with("amh "));
         assert_eq!(
             unread_check_failed("mail search in INBOX failed: it's down"),
             "The email is sent; do not resend it. The check for your earlier unread emails failed: OSError(\"mail search in INBOX failed: it's down\")\n"

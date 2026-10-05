@@ -86,7 +86,7 @@ modules
     - the watcher holds one `Mailbox` across polls and logs in again only after a failure
     - a stored email is read as Python's text mode read it: `\r\n` and `\r` become `\n`
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
-    - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; item notices (`X-AMH-From: amh notice ...`) are left out of that list
+    - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; left out of that list and of `mail unread`: item notices and watcher emails (`X-AMH-From: amh ...`), and emails sent outside amh (no `X-AMH-From`), such as a mail-compression job's summaries
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
     - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
     - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`

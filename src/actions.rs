@@ -364,7 +364,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("mail", "unread") => {
             let task = store.own(text("task_file"))?;
             let unread = mail::unread(&settings, task.tag(), &[]).map_err(failed)?;
-            let theirs = unread.iter().filter(|header| !header.is_notice());
+            let theirs = unread.iter().filter(|header| header.is_own());
             theirs.map(|header| header.listed() + "\n").collect()
         }
         ("manager", "watchers") => {
