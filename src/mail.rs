@@ -19,6 +19,7 @@ use lettre::transport::smtp::authentication::Credentials;
 use lettre::{SmtpTransport, Transport};
 use mail_parser::{HeaderName, HeaderValue, Message, MessageParser, MimeHeaders, PartType};
 
+use crate::decide::quoted;
 use crate::settings;
 
 /// The sender name of the watcher's own emails, which are not recorded as an agent's answer.
@@ -95,14 +96,6 @@ pub struct Draft<'a> {
     pub references: &'a str,
     pub sender: &'a str,
     pub attachments: &'a [Attached],
-}
-
-/// Why an email to the human was not sent.
-pub enum SendError {
-    /// The request itself is wrong; trying again unchanged cannot work.
-    Refused(String),
-    /// The network or a file failed.
-    Failed(String),
 }
 
 /// Join text on one line with single spaces.
@@ -183,6 +176,57 @@ pub fn plan(tag: &str, subject: &str, found: &[Header]) -> Result<Plan, String> 
             references: String::new(),
         }),
     }
+}
+
+impl Header {
+    /// Whether this is an automatic "pending item created/deleted" email.
+    pub fn is_notice(&self) -> bool {
+        self.sender.starts_with(NOTICE_SENDER)
+    }
+
+    /// The email as the unread listings show it.
+    pub fn listed(&self) -> String {
+        format!(
+            "{} {} {}",
+            self.message_id,
+            quoted(&self.subject),
+            self.date
+        )
+    }
+}
+
+/// What `tell human` prints after sending `message_id`, given the task's emails the human has not opened: nothing, or the request to replace the earlier ones with one email.
+// 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
+// 🧑 "this process should ignore emails about pending tasks being created and removed"
+pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
+    let others: Vec<&Header> = unread
+        .iter()
+        .filter(|header| header.message_id != message_id && !header.is_notice())
+        .collect();
+    if others.is_empty() {
+        return String::new();
+    }
+    let listed: String = others
+        .iter()
+        .map(|header| format!("  {}\n", header.listed()))
+        .collect();
+    let flags: Vec<String> = others
+        .iter()
+        .map(|header| format!("--replaces '{}'", header.message_id))
+        .collect();
+    format!(
+        "The human has {} earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n{listed}Do this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --subject SAME_SUBJECT --file MERGED_FILE {} --replaces '{message_id}'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n",
+        others.len(),
+        flags.join(" ")
+    )
+}
+
+/// What `tell human` prints when the email is sent but the human's unread emails could not be listed.
+pub fn unread_check_failed(error: &str) -> String {
+    format!(
+        "The email is sent; do not resend it. The check for your earlier unread emails failed: OSError({})\n",
+        quoted(error)
+    )
 }
 
 /// The first header of that name as written, on one line; the parser's own lookup returns the last one.
@@ -493,10 +537,9 @@ fn uid_set(uids: impl IntoIterator<Item = u32>) -> String {
 }
 
 /// Read the files to attach, such as a figure the human asked to see; the type is guessed from the file name.
-fn attached(paths: &[PathBuf]) -> Result<Vec<Attached>, SendError> {
-    let cannot = |path: &Path, error: std::io::Error| {
-        SendError::Failed(format!("cannot read {}: {error}", path.display()))
-    };
+fn attached(paths: &[PathBuf]) -> Result<Vec<Attached>, String> {
+    let cannot =
+        |path: &Path, error: std::io::Error| format!("cannot read {}: {error}", path.display());
     let mut n_bytes = 0;
     for path in paths {
         n_bytes += fs::metadata(path)
@@ -504,10 +547,10 @@ fn attached(paths: &[PathBuf]) -> Result<Vec<Attached>, SendError> {
             .len();
     }
     if n_bytes > ATTACHED_BYTES_MAX {
-        return Err(SendError::Refused(format!(
+        return Err(format!(
             "the attachments exceed {} MB in total; send a path instead",
             ATTACHED_BYTES_MAX >> 20
-        )));
+        ));
     }
     let read = |path: &PathBuf| {
         Ok(Attached {
@@ -536,11 +579,10 @@ pub fn send(
     body: &str,
     sender: &str,
     attachments: &[PathBuf],
-) -> Result<String, SendError> {
+) -> Result<String, String> {
     let found = Mailbox::agent(settings)
-        .and_then(|mut mailbox| mailbox.search(ALL_MAIL, true, &thread_query(tag)))
-        .map_err(SendError::Failed)?;
-    let plan = plan(tag, subject, &found).map_err(SendError::Refused)?;
+        .and_then(|mut mailbox| mailbox.search(ALL_MAIL, true, &thread_query(tag)))?;
+    let plan = plan(tag, subject, &found)?;
     let to = settings::get(settings, "mail.human_address");
     let draft = Draft {
         from: settings::get(settings, "mail.agent_address"),
@@ -553,8 +595,8 @@ pub fn send(
         attachments: &attached(attachments)?,
     };
     let message_id = new_id();
-    let raw = compose(&draft, &message_id).map_err(SendError::Refused)?;
-    deliver(settings, to, &raw).map_err(SendError::Failed)?;
+    let raw = compose(&draft, &message_id)?;
+    deliver(settings, to, &raw)?;
     if sender != WATCHER {
         let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH);
         let line = format!("{} {tag}\n", epoch_s.unwrap_or_default().as_secs());
@@ -564,9 +606,9 @@ pub fn send(
             .open(state_dir.join(SENT_LOG))
             .and_then(|mut log| log.write_all(line.as_bytes()))
             .map_err(|error| {
-                SendError::Failed(format!(
+                format!(
                     "the email {message_id} is sent, but recording it in {SENT_LOG} failed: {error}"
-                ))
+                )
             })?;
     }
     Ok(message_id)
@@ -592,4 +634,173 @@ pub fn unread(
         moved.map_err(|error| format!("moving replaced mail to the trash failed: {error}"))?;
     }
     Ok(kept)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HUMAN: &str = "human@example.com";
+    const AGENT: &str = "agent@example.com";
+
+    fn header(uid: &str, subject: &str, message_id: &str, references: &str) -> Header {
+        Header {
+            uid: uid.to_owned(),
+            subject: subject.to_owned(),
+            message_id: message_id.to_owned(),
+            references: references.to_owned(),
+            date: "Mon".to_owned(),
+            sender: String::new(),
+        }
+    }
+
+    fn planned(subject: &str, reply_to: &str, references: &str) -> Result<Plan, String> {
+        Ok(Plan {
+            subject: subject.to_owned(),
+            reply_to: reply_to.to_owned(),
+            references: references.to_owned(),
+        })
+    }
+
+    #[test]
+    fn an_email_joins_the_thread_of_its_tag_and_title() {
+        let mut found = vec![
+            header("5", "[t_work] Progress", "<a@x>", ""),
+            header("6", "Re: [t_work] Progress", "<b@x>", "<a@x>"),
+            header("7", "[t_worker] Other", "<c@x>", ""),
+        ];
+        assert_eq!(
+            plan("t_work", "", &found),
+            planned("Re: [t_work] Progress", "<b@x>", "<a@x>")
+        );
+        assert_eq!(
+            plan("t_work", "Re: [t_work] New topic", &found),
+            planned("[t_work] New topic", "", "")
+        );
+        assert_eq!(plan("fresh", "", &found), planned("[fresh] fresh", "", ""));
+        assert_eq!(
+            plan("t_work", &"s".repeat(60), &found),
+            Err("a new subject must be under 60 characters".to_owned())
+        );
+        let long =
+            "Re: [t_work] a subject the human's thread already has, longer than sixty characters";
+        found.push(header("8", long, "<d@x>", ""));
+        assert_eq!(plan("t_work", long, &found), planned(long, "<d@x>", ""));
+        assert_eq!(tag_of("Re: Fwd: [a_b-1] x [y]"), Some("a_b-1"));
+        assert_eq!((tag_of("x [a]"), tag_of(" [a]")), (None, None));
+        assert_eq!(bare("Re: [a] RE: [b] Title [c] "), "Title [c]");
+    }
+
+    #[test]
+    fn a_built_email_parses_back() {
+        let png = [b"\x89PNG\r\n\x1a\n".as_slice(), &[0; 40]].concat();
+        let figure = [Attached {
+            name: "figure.png".to_owned(),
+            kind: "image/png".to_owned(),
+            data: png.clone(),
+        }];
+        let mut draft = Draft {
+            from: AGENT,
+            to: HUMAN,
+            subject: "Re: [t_work] Progrès",
+            body: "see the figure",
+            reply_to: "<b@x>",
+            references: "<a@x>",
+            sender: "omnigent://w",
+            attachments: &figure,
+        };
+        let raw = compose(&draft, "<new@x>").unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.contains("To: human@example.com\r\n")
+                && text.contains("X-AMH-From: omnigent://w\r\n")
+        );
+        let mail = parse(&raw);
+        assert_eq!(
+            [
+                &mail.sender,
+                &mail.authentication,
+                &mail.message_id,
+                &mail.in_reply_to,
+                &mail.references,
+                &mail.subject,
+                &mail.body
+            ],
+            [
+                AGENT,
+                "",
+                "<new@x>",
+                "<b@x>",
+                "<a@x> <b@x>",
+                "Re: [t_work] Progrès",
+                "see the figure\r\n"
+            ]
+        );
+        let images: Vec<_> = mail
+            .images
+            .iter()
+            .map(|image| (image.name.as_str(), image.kind.as_str(), &image.data))
+            .collect();
+        assert_eq!(images, [("figure.png", "image/png", &png)]);
+        (
+            draft.subject,
+            draft.body,
+            draft.reply_to,
+            draft.sender,
+            draft.attachments,
+        ) = ("[t_work] New", "body text\n", "", "", &[]);
+        let raw = compose(&draft, "<new@x>").unwrap();
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            !text.contains("In-Reply-To")
+                && !text.contains("References")
+                && !text.contains("X-AMH-From")
+        );
+        assert_eq!(parse(&raw).body, "body text\r\n");
+    }
+
+    #[test]
+    fn a_received_email_is_decoded_and_its_first_header_counts() {
+        let odd = "From: =?utf-8?b?5a6i?= <G@Example.org>\r\nAuthentication-Results: mx; spf=pass\r\n smtp.mailfrom=g@example.org\r\nAuthentication-Results: forged\r\nSubject: =?utf-8?q?caf=C3=A9?=\r\n  twice\r\nContent-Type: text/html; charset=iso-8859-1\r\nContent-Transfer-Encoding: quoted-printable\r\n\r\n<p>=E9</p>\r\n";
+        let mail = parse(odd.as_bytes());
+        assert_eq!(
+            [
+                &mail.sender,
+                &mail.authentication,
+                &mail.message_id,
+                &mail.subject,
+                &mail.body
+            ],
+            [
+                "G@Example.org",
+                "mx; spf=pass smtp.mailfrom=g@example.org",
+                "",
+                "café twice",
+                "<p>é</p>\r\n"
+            ]
+        );
+        assert!(mail.images.is_empty());
+    }
+
+    #[test]
+    fn earlier_unread_emails_are_listed_for_replacement() {
+        let mut notice = header("6", "[t_work] Earlier", "<notice@x>", "");
+        notice.sender = "amh notice omnigent://s1".to_owned();
+        let unread = [
+            header("4", "[t_work] Earlier", "<old@x>", ""),
+            header("5", "[t_work] it's \"x\"", "<older@x>", ""),
+            notice,
+            header("7", "[t_work] Progress", "<sent@x>", ""),
+        ];
+        assert_eq!(unread[0].listed(), "<old@x> '[t_work] Earlier' Mon");
+        assert_eq!(
+            replace_reminder("<sent@x>", &unread),
+            "The human has 2 earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n  <old@x> '[t_work] Earlier' Mon\n  <older@x> '[t_work] it\\'s \"x\"' Mon\nDo this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --subject SAME_SUBJECT --file MERGED_FILE --replaces '<old@x>' --replaces '<older@x>' --replaces '<sent@x>'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n"
+        );
+        assert_eq!(replace_reminder("<sent@x>", &unread[2..]), "");
+        assert_eq!(
+            unread_check_failed("mail search in INBOX failed: it's down"),
+            "The email is sent; do not resend it. The check for your earlier unread emails failed: OSError(\"mail search in INBOX failed: it's down\")\n"
+        );
+    }
 }

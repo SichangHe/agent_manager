@@ -13,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::agents::{self, NewTask};
 use crate::decide::{self, Chase, Nudge, Outcome, Plan, Source};
-use crate::mail::{self, Mailbox, SendError};
+use crate::mail::{self, Mailbox};
 use crate::store::Store;
 use crate::taskfile::{self, MARKER};
 use crate::tasks::Task;
@@ -138,7 +138,7 @@ fn tell_human_once(settings: &Settings, store: &Store, task: &Task, key: &str, t
                 ));
             }
         }
-        Err(SendError::Refused(error) | SendError::Failed(error)) => log(&format!(
+        Err(error) => log(&format!(
             "email to the human about {} was not sent: {error}",
             task.name
         )),
@@ -477,7 +477,7 @@ impl Watcher {
                         mail::WATCHER,
                         &[],
                     );
-                    if let Err(SendError::Refused(error) | SendError::Failed(error)) = sent {
+                    if let Err(error) = sent {
                         log(&format!("failure email for {task} was not sent: {error}"));
                         // Not remembered, so the problem is reported again once email works.
                         now.remove(&key);

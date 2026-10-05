@@ -1,10 +1,10 @@
-//! The agents of tasks, end to end: start one on a task, and find the ones in trouble.
+//! The agents of tasks, end to end: start one on a task, find the ones in trouble, close a task, replace a manager.
 //!
 //! The decisions and texts are the pure functions of `work`; this module does the input and output around them.
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Read;
+use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crate::store::Store;
 use crate::tasks::Task;
 use crate::work::{self, Problem};
-use crate::{omnigent, settings};
+use crate::{mail, omnigent, settings, taskfile};
 
 const GUIDE_WAIT: Duration = Duration::from_secs(30);
 const PROMPT_WAIT: Duration = Duration::from_secs(90);
@@ -168,6 +168,105 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
         thread::sleep(Duration::from_secs(1));
     }
     Ok(address)
+}
+
+/// Where the agent of `who` runs: the address a task file records; an address is passed through.
+pub fn address_of(store: &Store, who: &str) -> Result<String, String> {
+    if who.ends_with(".md") {
+        Ok(store.load(who)?.address().to_owned())
+    } else {
+        Ok(who.to_owned())
+    }
+}
+
+/// Mark a task done, move it to `previous`, tell the human, stop its agent last, and return the agent's address.
+///
+/// `own` means the agent closes itself: its manager is told, and stopping the session ends the caller.
+pub fn close_task(
+    settings: &Settings,
+    store: &Store,
+    name: &str,
+    agent_gone: bool,
+    email: bool,
+    own: bool,
+) -> Result<String, String> {
+    let task = {
+        let _lock = store.lock()?;
+        let mut task = store.load(name)?;
+        work::close(&mut task)?;
+        store.save(&task)?;
+        store.place(&task)?;
+        task
+    };
+    let at = task.address();
+    // 🧑 "When closing an agent, use the last email chain the agent used to send an automatic email ‘Closed xx:n’ with the agent’s window."
+    if email {
+        let body = format!("Closed {at}\n");
+        mail::send(settings, &store.state_dir, task.tag(), "", &body, at, &[])
+            .map_err(|error| format!("amh: {error}"))?;
+    }
+    // 🧑 "Agents should be able to close themselves. Have a command in amh for that"
+    if own {
+        let _ = writeln!(io::stdout(), "closed {name}; stopping your own session now");
+        let manager = task.field("managerat").unwrap_or_default();
+        let _ = omnigent::send(settings, manager, &work::self_closed(&task));
+    }
+    match omnigent::stop(settings, at) {
+        Err(error) if !agent_gone => Err(format!(
+            "amh: {name} is marked done, but its agent was not stopped: {error}"
+        )),
+        _ => Ok(at.to_owned()),
+    }
+}
+
+/// Replace a manager with a fresh agent that takes over its task file and its reports; returns the new agent's address.
+// 🧑 "Make it s.t. rotation works for Omnigent overall"
+pub fn rotate(
+    settings: &Settings,
+    store: &Store,
+    name: &str,
+    tool: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<String, String> {
+    let agent = |error: String| format!("amh: {error}");
+    let old = store.load(name)?.address().to_owned();
+    let Some(id) = old.strip_prefix(omnigent::PREFIX) else {
+        return Err("amh: only Omnigent managers can be rotated".to_owned());
+    };
+    let path = format!("/v1/sessions/{id}?include_items=false");
+    let session = omnigent::api(settings, "GET", &path, None).map_err(agent)?;
+    let is_main = old == settings::get(settings, "main_manager");
+    let [tool, model, effort, workdir] = work::relaunch(&session, tool, model, effort)?;
+    let root = store.root.display().to_string();
+    let (guides, request, record) = work::handover(name, &old, &root, is_main);
+    let start = Start {
+        name,
+        fields: &[],
+        tool: &tool,
+        model: &model,
+        effort: &effort,
+        workdir: &workdir,
+        guides: &guides,
+        request: &request,
+        record: &record,
+    };
+    let new = start_agent(settings, store, &start)?;
+    {
+        let _lock = store.lock()?;
+        for report in work::repointed(store.active()?, &old, &new) {
+            store.save(&report)?;
+        }
+        if is_main {
+            let env = store.state_dir.join("env.toml");
+            let failed =
+                |error: io::Error| format!("amh: cannot rewrite {}: {error}", env.display());
+            let text = fs::read_to_string(&env).map_err(failed)?;
+            taskfile::write(&env, &text.replace(&old, &new)).map_err(failed)?;
+        }
+    }
+    omnigent::stop(settings, &old).map_err(agent)?;
+    Ok(new)
 }
 
 /// A value the caller gave; an empty one counts as not given.

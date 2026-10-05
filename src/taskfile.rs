@@ -213,3 +213,101 @@ pub fn write(path: &Path, text: &str) -> std::io::Result<()> {
     fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
     fs::rename(&temp, path)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn owned(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|&text| text.to_owned()).collect()
+    }
+
+    #[test]
+    fn tricky_values_round_trip() {
+        let fields: Vec<(String, String)> = [
+            ("status", "running"),
+            ("runat", "h:1"),
+            ("blocked_on", "a: b"),
+        ]
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .into();
+        let items = owned(&[
+            "🧑 fix: the `a: b` case",
+            "- dash",
+            "true",
+            "yes",
+            "it's #1",
+            "ends:",
+            "plain words",
+            "'quoted'",
+            "\"double\"",
+            " # x",
+        ]);
+        let text = render(&fields, &items, "body\n");
+        let again = parse("x.md", &text).unwrap();
+        assert_eq!(again, (fields.clone(), items, "body\n".to_owned()));
+        assert_eq!(render(&again.0, &again.1, &again.2), text);
+        assert!(render(&fields, &[], "").contains("pending_task_items: []\n"));
+        let quoted = "---\nstatus: \"running\"\nrunat: 'a''b'\npending_task_items: []\n---\n";
+        let want = [("status", "running"), ("runat", "a'b")]
+            .map(|(key, value)| (key.to_owned(), value.to_owned()));
+        assert_eq!(parse("x.md", quoted).unwrap().0, want);
+        for bad in [
+            "no frontmatter",
+            "---\nstatus: running\n---\n",
+            "---\nstatus: running\nrunat: x\n  stray\n---\n",
+        ] {
+            assert!(parse("x.md", bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn pending_blocks_end_at_a_blank_line_and_skip_code() {
+        let body = "intro\n(pending)\nfirst a\nfirst b\n\n```\n(pending)\nin code\n```\n  (pending)  \nsecond\n(pending)\n\n(pending)\nlast";
+        let want = [
+            (1, owned(&["first a", "first b"])),
+            (9, owned(&["second"])),
+            (11, vec![]),
+            (13, owned(&["last"])),
+        ];
+        assert_eq!(pending_blocks(body), want);
+        assert_eq!(pending_blocks("text (pending) inline\n"), []);
+    }
+
+    #[test]
+    fn items_carry_exactly_one_mark() {
+        assert_eq!(mark("write   the\n code", false).unwrap(), "write the code");
+        assert_eq!(mark("🧑 🧑 ship it", true).unwrap(), "🧑 ship it");
+        assert_eq!(mark("ship it", true).unwrap(), "🧑 ship it");
+        assert_eq!(mark(" 🧑 ", true), Err("amh: the item is empty".to_owned()));
+    }
+
+    #[test]
+    fn a_row_moves_to_the_top_of_its_section() {
+        let list =
+            "current:\n\nt_a.md x\n\nhuman pending:\n\nlow priority:\n\nprevious:\nt_old.md y\n";
+        let at = "omnigent://s1";
+        let listed = placed(list, "t_work.md", at, "current:").unwrap().unwrap();
+        assert_eq!(
+            listed,
+            "current:\n\nt_work.md omnigent://s1\nt_a.md x\n\nhuman pending:\n\nlow priority:\n\nprevious:\nt_old.md y\n"
+        );
+        assert_eq!(placed(&listed, "t_work.md", at, "current:"), Ok(None));
+        let waiting = placed(&listed, "t_work.md", at, "human pending:")
+            .unwrap()
+            .unwrap();
+        assert!(waiting.contains("human pending:\n\nt_work.md omnigent://s1\nlow priority:"));
+        // A closed task tops `previous`, and a changed address replaces the row.
+        let closed = placed(&waiting, "t_work.md", "omnigent://s2", "previous:")
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            closed,
+            "current:\n\nt_a.md x\n\nhuman pending:\n\nlow priority:\n\nprevious:\nt_work.md omnigent://s2\nt_old.md y\n"
+        );
+        assert_eq!(
+            placed("current:\n", "t_work.md", at, "previous:"),
+            Err("amh: TODO.md has no `previous:` section".to_owned())
+        );
+    }
+}

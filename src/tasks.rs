@@ -264,3 +264,184 @@ pub fn check(list: &str, active: &[Task]) -> Vec<String> {
     }
     findings
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::work::tests::task;
+
+    const NO_ITEM: &str = "no such open item";
+
+    fn worker() -> Task {
+        let fields = [
+            ("version", "v1.0.0"),
+            ("status", "running"),
+            ("managerat", "omnigent://main"),
+            ("runat", "omnigent://s1"),
+        ];
+        task("t_work.md", &fields, &[], "request\n")
+    }
+
+    #[test]
+    fn items_are_added_reworded_and_removed() {
+        let mut work = worker();
+        let added = add_item(&mut work, "write   the\n code", false);
+        assert_eq!(added, Ok(Some("write the code".to_owned())));
+        assert_eq!(add_item(&mut work, "write the code", false), Ok(None));
+        let theirs = add_item(&mut work, "🧑 ship it", true).unwrap();
+        assert_eq!(theirs.as_deref(), Some("🧑 ship it"));
+        assert_eq!(work.items, ["write the code", "🧑 ship it"]);
+        assert!(
+            add_item(&mut work, " 🧑 ", true)
+                .unwrap_err()
+                .contains("empty")
+        );
+        assert_eq!(
+            replace_item(&mut work, "🧑 ship it", "ship it today"),
+            Ok(())
+        );
+        assert_eq!(work.items, ["write the code", "🧑 ship it today"]);
+        assert!(
+            replace_item(&mut work, "absent", "x")
+                .unwrap_err()
+                .contains(NO_ITEM)
+        );
+        assert!(
+            remove_item(&mut work, "absent", "e")
+                .unwrap_err()
+                .contains(NO_ITEM)
+        );
+        assert_eq!(
+            remove_item(&mut work, "write the code", "tests\npass"),
+            Ok(())
+        );
+        assert_eq!(work.items, ["🧑 ship it today"]);
+        assert_eq!(work.body, "request\n\n(removed open item: tests pass)\n");
+        let mut done = task("t_done.md", &[("status", "done"), ("runat", "x")], &[], "");
+        assert_eq!(
+            add_item(&mut done, "x", false),
+            Err("amh: t_done.md is done; start a new task instead".to_owned())
+        );
+    }
+
+    #[test]
+    fn only_the_humans_items_are_announced() {
+        let items = ["🧑 ship it".to_owned(), "write the code".to_owned()];
+        assert_eq!(
+            human_notice("created", &items).as_deref(),
+            Some("pending item created:\n- ship it\n")
+        );
+        assert_eq!(
+            human_notice("deleted", &items[..1]).as_deref(),
+            Some("pending item deleted:\n- ship it\n")
+        );
+        assert_eq!(human_notice("deleted", &items[1..]), None);
+    }
+
+    #[test]
+    fn a_task_is_shown_moved_from_and_noted() {
+        let mut work = worker();
+        work.items = vec!["do x".to_owned(), "🧑 do y".to_owned()];
+        assert_eq!(
+            show(&work),
+            "t_work.md\n  version: v1.0.0\n  status: running\n  managerat: omnigent://main\n  runat: omnigent://s1\n  - do x\n  - 🧑 do y\n"
+        );
+        let mut sub = task(
+            "t_sub.md",
+            &[("status", "long_running"), ("runat", "s2")],
+            &["do x"],
+            "",
+        );
+        assert_eq!(move_item(&mut work, &mut sub, "do x"), Ok(()));
+        assert_eq!(
+            (work.items.as_slice(), sub.items.as_slice()),
+            (&["🧑 do y".to_owned()][..], &["do x".to_owned()][..])
+        );
+        assert!(
+            move_item(&mut work, &mut sub, "absent")
+                .unwrap_err()
+                .contains(NO_ITEM)
+        );
+        let mut same = sub.clone();
+        assert!(
+            move_item(&mut sub, &mut same, "do x")
+                .unwrap_err()
+                .contains("same task")
+        );
+        add_note(&mut sub, "checked\n twice");
+        assert_eq!(sub.body, "\n\n(checked twice)\n");
+    }
+
+    #[test]
+    fn status_decides_the_section() {
+        let mut work = worker();
+        assert_eq!(set_status(&mut work, "blocked", Some("human")), Ok(()));
+        assert_eq!(
+            (work.field("blocked_on"), work.section()),
+            (Some("human"), "human pending:")
+        );
+        assert_eq!(set_status(&mut work, "blocked", Some("t_sub.md")), Ok(()));
+        assert_eq!(work.section(), "current:");
+        assert!(
+            set_status(&mut work, "blocked", None)
+                .unwrap_err()
+                .contains("needs --on")
+        );
+        assert!(
+            set_status(&mut work, "running", Some("x"))
+                .unwrap_err()
+                .contains("needs --on")
+        );
+        assert_eq!(set_status(&mut work, "running", None), Ok(()));
+        assert_eq!((work.field("blocked_on"), work.status()), (None, "running"));
+        assert_eq!(set_status(&mut work, "long_running", Some("human")), Ok(()));
+        assert_eq!(
+            (work.field("blocked_on"), work.section()),
+            (Some("human"), "current:")
+        );
+    }
+
+    #[test]
+    fn check_reports_each_disagreement() {
+        let sub = task(
+            "t_sub.md",
+            &[("status", "long_running"), ("runat", "omnigent://s2")],
+            &[],
+            "",
+        );
+        let twin = task(
+            "t_twin.md",
+            &[("status", "running"), ("runat", "omnigent://s2")],
+            &[],
+            "",
+        );
+        let waiting = task(
+            "t_wait.md",
+            &[("status", "blocked"), ("runat", "retired")],
+            &[],
+            "",
+        );
+        let active = [sub, twin, waiting, worker()];
+        let list = "current:\nt_work.md omnigent://s1\nt_sub.md omnigent://s2\nt_twin.md omnigent://s2\n\nprevious:\nt_gone.md x\n";
+        assert_eq!(
+            check(list, &active),
+            ["omnigent://s2: several active tasks run there: t_sub.md, t_twin.md"]
+        );
+        let list = "current:\nt_work.md omnigent://old\nt_sub.md omnigent://s2\nt_gone.md x\n\nprevious:\nt_sub.md x\n";
+        assert_eq!(
+            check(
+                list,
+                &active[..1]
+                    .iter()
+                    .chain(&active[3..])
+                    .cloned()
+                    .collect::<Vec<_>>()
+            ),
+            [
+                "t_sub.md: 2 rows in TODO.md, want 1",
+                "t_work.md: TODO.md has it under `current:` at omnigent://old, the task file says `current:` at omnigent://s1",
+                "t_gone.md: listed as open work in TODO.md but it is done or not a task file",
+            ]
+        );
+    }
+}

@@ -1,4 +1,6 @@
 //! The command-line tree of `amh`: every group, action, option, and help text.
+// 🧑 "Consolidate the manager helpers. Make them into one command `amh` ... Make the subcommands nested and with sane names ... anyone can start from the root --help page and work their way naturally"
+// 🧑 "Don't keep calling the old helper commands. Integrate them into a single program. Later we will rewrite it in Rust."
 
 use clap::{Arg, ArgAction, Command};
 
