@@ -180,58 +180,22 @@ pub fn show(task: &Task) -> String {
     format!("{}\n{fields}{items}", task.name)
 }
 
-/// The record line of one change to a human item that the human has not been told yet: `EPOCH TAG CHANGE ITEM`.
-pub fn unreported_line(epoch_s: u64, tag: &str, change: &str, item: &str) -> String {
-    format!(
-        "{epoch_s} {tag} {change} {}\n",
-        item.split_whitespace().collect::<Vec<_>>().join(" ")
-    )
-}
-
-/// Split the record of unreported changes into those of `tag`, as the text to put in an email, and the record without them.
-// 🧑 "Make the emailing script combine emails into one. Currently agents send separate emails for each pending item creation/removal and separate from their messages. Merge those"
-pub fn take_unreported(record: &str, tag: &str) -> (String, String) {
-    let mut rest = String::new();
-    let mut changes: Vec<(&str, &str)> = Vec::new();
-    for line in record.lines() {
-        let mut parts = line.splitn(4, ' ');
-        match (parts.next(), parts.next(), parts.next(), parts.next()) {
-            (Some(_), Some(owner), Some(change), Some(item)) if owner == tag => {
-                changes.push((change, item))
-            }
-            _ => rest += &format!("{line}\n"),
-        }
-    }
+/// The email text listing the human's items that were created and deleted in one call; empty when none is theirs.
+// 🧑 “Pending items originated from the human need emails, ones from agents do not.”
+// 🧑 "when we make agents add/remove pending items we urge them to do multiple at a time and also attach any other things to be emailed to the human. I don't want any additional latency from debounce"
+pub fn changes_text(created: &[String], deleted: &[String]) -> String {
     let mut text = String::new();
-    for change in ["created", "deleted"] {
-        let items: String = changes
+    for (change, items) in [("created", created), ("deleted", deleted)] {
+        let theirs: String = items
             .iter()
-            .filter(|(kind, _)| *kind == change)
-            .map(|(_, item)| format!("- {item}\n"))
+            .filter_map(|item| item.strip_prefix(HUMAN_MARK))
+            .map(|item| format!("- {item}\n"))
             .collect();
-        if !items.is_empty() {
-            text += &format!("pending item {change}:\n{items}");
+        if !theirs.is_empty() {
+            text += &format!("pending item {change}:\n{theirs}");
         }
     }
-    (text, rest)
-}
-
-/// The tags whose oldest unreported change is older than `after_s`, so the human should now be told without waiting for the agent's next email.
-pub fn overdue_unreported(record: &str, now_s: u64, after_s: u64) -> Vec<String> {
-    let mut tags: Vec<String> = Vec::new();
-    for line in record.lines() {
-        let mut parts = line.splitn(3, ' ');
-        let (Some(at), Some(tag)) = (
-            parts.next().and_then(|at| at.parse::<u64>().ok()),
-            parts.next(),
-        ) else {
-            continue;
-        };
-        if now_s.saturating_sub(at) > after_s && !tags.iter().any(|known| known == tag) {
-            tags.push(tag.to_owned());
-        }
-    }
-    tags
+    text
 }
 
 /// An email body with the item changes under it.
@@ -484,27 +448,19 @@ mod tests {
     }
 
     #[test]
-    fn item_changes_wait_and_go_out_together() {
-        let record = unreported_line(100, "t_work", "created", "ship  it")
-            + &unreported_line(160, "t_other", "created", "x")
-            + &unreported_line(200, "t_work", "deleted", "old one")
-            + &unreported_line(210, "t_work", "created", "second");
-        let (text, rest) = take_unreported(&record, "t_work");
+    fn the_humans_item_changes_of_one_call_make_one_text() {
+        let created = [
+            "🧑 ship it".to_owned(),
+            "write the code".to_owned(),
+            "🧑 second".to_owned(),
+        ];
+        let deleted = ["🧑 old one".to_owned()];
+        let text = changes_text(&created, &deleted);
         assert_eq!(
             text,
             "pending item created:\n- ship it\n- second\npending item deleted:\n- old one\n"
         );
-        assert_eq!(rest, "160 t_other created x\n");
-        assert_eq!(
-            take_unreported(&rest, "t_work"),
-            (String::new(), rest.clone())
-        );
-        assert_eq!(
-            overdue_unreported(&record, 2000, 1800),
-            ["t_work", "t_other"]
-        );
-        assert_eq!(overdue_unreported(&record, 1950, 1800), ["t_work"]);
-        assert!(overdue_unreported(&record, 300, 1800).is_empty());
+        assert_eq!(changes_text(&created[1..2], &[]), "");
         assert_eq!(
             with_changes("Report.\n", &text),
             format!("Report.\n\n{text}")

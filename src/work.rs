@@ -367,6 +367,23 @@ pub fn worktree(repo: &str, dirty: &str) -> String {
     }
 }
 
+/// What the human added at the end of a task file in the editor: `None` when nothing changed; refused when anything else was changed.
+// 🧑 "some sort of shortcut that opens the editor with a copy of the task file and pushes the appended stuff on close, just like what things like cron do"
+// 🧑 "Should be append-only. If the edit changed other things, offer to reopen the file and ask for fix"
+pub fn appended(before: &str, after: &str) -> Result<Option<String>, String> {
+    let (kept, edited) = (before.trim_end(), after.trim_end());
+    match edited.strip_prefix(kept) {
+        Some("") => Ok(None),
+        Some(added) if added.starts_with('\n') || kept.is_empty() => {
+            Ok(Some(format!("{}\n", added.trim_matches('\n'))))
+        }
+        _ => Err(
+            "the text that was already there has changed; only adding at the end is taken"
+                .to_owned(),
+        ),
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -755,5 +772,21 @@ pub mod tests {
     fn worktree_names_each_repository() {
         assert_eq!(worktree("/r", ""), "/r: clean\n");
         assert_eq!(worktree("/r", " M a.md\n?? b\n"), "/r:\n M a.md\n?? b\n\n");
+    }
+
+    #[test]
+    fn only_text_added_at_the_end_of_a_task_file_is_taken() {
+        let before = "---\nstatus: running\n---\nbody\n";
+        assert_eq!(appended(before, before), Ok(None));
+        assert_eq!(
+            appended(before, "---\nstatus: running\n---\nbody\n\n\n"),
+            Ok(None)
+        );
+        assert_eq!(
+            appended(before, &format!("{before}\nPlease also do X.\n\nAnd Y.\n")),
+            Ok(Some("Please also do X.\n\nAnd Y.\n".to_owned()))
+        );
+        assert!(appended(before, "---\nstatus: done\n---\nbody\nnew\n").is_err());
+        assert!(appended(before, "---\nstatus: running\n---\nbody and more\n").is_err());
     }
 }

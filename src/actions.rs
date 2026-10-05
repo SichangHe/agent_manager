@@ -14,7 +14,7 @@ use crate::agents::{self, NewTask};
 use crate::mail::{self, Attached, Draft};
 use crate::store::Store;
 use crate::tasks::{self, Task};
-use crate::{guest, omnigent, settings, view, watch, work};
+use crate::{decide, guest, omnigent, settings, taskfile, view, watch, work};
 
 const UNIT: &str = "amh-watch.service";
 
@@ -42,84 +42,55 @@ fn systemctl(args: &[&str]) -> Result<u8, String> {
         .unwrap_or(1))
 }
 
-/// The record in the state folder of changes to the human's items that the human has not been told yet.
-pub const UNREPORTED: &str = "amh-unreported.txt";
-const HINT: &str = "The human is not emailed for this by itself: it goes out inside your next `amh tell human`, or alone after 30 minutes. `amh tell human --add ITEM --done ITEM` does both in one call.\n";
+const BATCH_HINT: &str = "This emailed the human by itself. Next time batch: give several items in one call, and when you also have something to tell the human, send it all in one email with `amh tell human --add ITEM --done ITEM`.\n";
 
-/// Note changes to the human's items on a task, to be reported in that task's next email; returns the hint to print when any item was theirs.
+/// Email the human at once about the changes one call made to their items on a task; returns the hint to print when an email went out.
 // 🧑 “Pending items originated from the human need emails, ones from agents do not.”
-// 🧑 "At all time, try to keep 1 unread email for the human from yourself."
-fn defer(
+fn report_items(
+    settings: &Settings,
     store: &Store,
     task: &Task,
-    change: &str,
-    items: &[String],
+    created: &[String],
+    deleted: &[String],
 ) -> Result<&'static str, String> {
-    let theirs: Vec<&str> = items
-        .iter()
-        .filter_map(|item| item.strip_prefix(crate::taskfile::HUMAN_MARK))
-        .collect();
-    if theirs.is_empty() {
+    let text = tasks::changes_text(created, deleted);
+    if text.is_empty() {
         return Ok("");
     }
-    let now_s = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    let lines: String = theirs
-        .iter()
-        .map(|item| tasks::unreported_line(now_s, task.tag(), change, item))
-        .collect();
-    let _lock = store.lock()?;
-    let mut record = fs::OpenOptions::new();
-    record
-        .create(true)
-        .append(true)
-        .open(store.state_dir.join(UNREPORTED))
-        .and_then(|mut record| record.write_all(lines.as_bytes()))
-        .map_err(|error| {
-            format!("amh: the item is saved, but noting it for the human failed: {error}")
-        })?;
-    Ok(HINT)
-}
-
-/// Take the unreported item changes of `tag` out of the record and return them as email text.
-pub fn take_unreported(store: &Store, tag: &str, remove: bool) -> Result<String, String> {
-    let _lock = store.lock()?;
-    let path = store.state_dir.join(UNREPORTED);
-    let (text, rest) = tasks::take_unreported(&fs::read_to_string(&path).unwrap_or_default(), tag);
-    if remove && !text.is_empty() {
-        fs::write(&path, rest)
-            .map_err(|error| format!("amh: cannot update {UNREPORTED}: {error}"))?;
-    }
-    Ok(text)
+    let sender = format!("{} {}", mail::NOTICE_SENDER, task.address());
+    mail::send(
+        settings,
+        &store.state_dir,
+        task.tag(),
+        "",
+        &text,
+        &sender,
+        &[],
+    )
+    .map_err(|error| format!("amh: the items are saved, but {error}"))?;
+    Ok(BATCH_HINT)
 }
 
 /// Email the human on the caller's thread, then say which earlier emails of the caller the human has not read.
 // 🧑 "Make the emailing script combine emails into one. ... Merge those, which also requires caller interface to change and encourage batched calling of amh tell human"
 fn tell_human(
     settings: &Settings,
-    store: &Store,
     task: &Task,
     subject: &str,
     body: &str,
     replaces: &[String],
     attachments: &[PathBuf],
 ) -> Result<(), String> {
-    // The changes to the human's items since this task's last email go out in this one, under the agent's own text.
-    let changes = take_unreported(store, task.tag(), false)?;
-    let body = tasks::with_changes(body, &changes);
     let sent = mail::send(
         settings,
-        &store.state_dir,
+        &settings::state_dir(),
         task.tag(),
         subject,
-        &body,
+        body,
         task.address(),
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
-    take_unreported(store, task.tag(), true)?;
     if mail::is_queued(&settings::state_dir(), &message_id) {
         // The emails it replaces stay until it is really sent, so the human loses nothing meanwhile.
         say(&format!(
@@ -133,6 +104,85 @@ fn tell_human(
         Err(error) => mail::unread_check_failed(&error),
     });
     Ok(())
+}
+
+/// Let the human add to a task file in their editor and queue what they added for the task's agent, as a stored email is queued.
+fn edit_task(settings: &Settings, store: &Store, name: &str) -> Result<String, String> {
+    let before = store.load(name)?.render();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let copy = std::env::temp_dir().join(format!("amh-edit-{}-{name}", now.as_nanos()));
+    fs::write(&copy, &before)
+        .map_err(|error| format!("amh: cannot write {}: {error}", copy.display()))?;
+    let editor = ["VISUAL", "EDITOR"]
+        .iter()
+        .find_map(|name| std::env::var(name).ok().filter(|set| !set.is_empty()))
+        .unwrap_or_else(|| "vi".to_owned());
+    let added = loop {
+        let command = format!("{editor} \"$1\"");
+        let edited = Command::new("sh")
+            .args(["-c", &command, "sh"])
+            .arg(&copy)
+            .status();
+        if !edited
+            .map_err(|error| format!("amh: cannot run {editor}: {error}"))?
+            .success()
+        {
+            let _ = fs::remove_file(&copy);
+            return Err(format!(
+                "amh: {editor} did not exit cleanly; nothing was taken"
+            ));
+        }
+        let after = fs::read_to_string(&copy)
+            .map_err(|error| format!("amh: cannot read {}: {error}", copy.display()))?;
+        match work::appended(&before, &after) {
+            Ok(added) => break added,
+            Err(problem) => {
+                say(&format!(
+                    "amh: {problem}. Reopen the copy to fix it? [Y/n] "
+                ));
+                let mut answer = String::new();
+                let _ = io::stdin().read_line(&mut answer);
+                if answer.trim().to_lowercase().starts_with('n') {
+                    let _ = fs::remove_file(&copy);
+                    return Err("amh: nothing was taken".to_owned());
+                }
+            }
+        }
+    };
+    let _ = fs::remove_file(&copy);
+    let Some(added) = added else {
+        return Ok("nothing was added\n".to_owned());
+    };
+    let prefix = match settings::get(settings, "mail.stored_prefix") {
+        "" => "mail",
+        prefix => prefix,
+    };
+    let mail_name = format!("{prefix}-edit-{}.txt", now.as_secs());
+    let tag = name.strip_suffix(".md").unwrap_or(name);
+    let _lock = store.lock()?;
+    let _ = fs::create_dir_all(store.root.join("manager_mail"));
+    let stored = store.root.join("manager_mail").join(&mail_name);
+    fs::write(
+        &stored,
+        decide::stored_mail(
+            &format!("[{tag}] added to the task file in the editor"),
+            &added,
+        ),
+    )
+    .map_err(|error| format!("amh: cannot store what you added: {error}"))?;
+    // The file may have changed while the editor was open, so the block is appended to its current text.
+    let current = fs::read_to_string(store.root.join(name))
+        .map_err(|error| format!("amh: cannot read {name}: {error}"))?;
+    taskfile::write(
+        &store.root.join(name),
+        &decide::queued(&current, &mail_name),
+    )
+    .map_err(|error| format!("amh: cannot write {name}: {error}"))?;
+    Ok(format!(
+        "queued for the agent of {name}; the watcher delivers it within seconds\n"
+    ))
 }
 
 /// Email an answer to the guest alone, on the thread of the stored guest email `mail_name`; returns what to print.
@@ -231,19 +281,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 store.save(&task)?;
             }
             drop(lock);
-            defer(&store, &task, "created", &added)?;
-            defer(&store, &task, "deleted", &done)?;
+            // The item changes made by this same call go out in this email, under the agent's own text.
+            let body = tasks::with_changes(&body, &tasks::changes_text(&added, &done));
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
-            tell_human(
-                &settings,
-                &store,
-                &task,
-                need("subject"),
-                &body,
-                &replaces,
-                &attach,
-            )?;
+            tell_human(&settings, &task, need("subject"), &body, &replaces, &attach)?;
             String::new()
         }
         ("tell", "agent") => {
@@ -271,14 +313,15 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 "task" => store.load(need("task"))?,
                 _ => store.own(text("task_file"))?,
             };
-            let new: Vec<String> = tasks::add_item(&mut task, need("item"), flag("from_human"))?
-                .into_iter()
-                .collect();
+            let mut new: Vec<String> = Vec::new();
+            for item in many("item") {
+                new.extend(tasks::add_item(&mut task, item, flag("from_human"))?);
+            }
             if !new.is_empty() {
                 store.save(&task)?;
             }
             drop(lock);
-            let hint = defer(&store, &task, "created", &new)?;
+            let hint = report_items(&settings, &store, &task, &new, &[])?;
             let to = if action.0 == "task" {
                 format!(" to {}", task.name)
             } else {
@@ -289,11 +332,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("todo", "done") => {
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
-            tasks::remove_item(&mut task, need("item"), need("evidence"))?;
+            let done: Vec<String> = many("item").into_iter().map(str::to_owned).collect();
+            for item in &done {
+                tasks::remove_item(&mut task, item, need("evidence"))?;
+            }
             store.save(&task)?;
             drop(lock);
-            let hint = defer(&store, &task, "deleted", &[need("item").to_owned()])?;
-            format!("removed 1 open item\n{hint}")
+            let hint = report_items(&settings, &store, &task, &[], &done)?;
+            format!("removed {} open item(s)\n{hint}", done.len())
         }
         ("todo", "replace") => {
             let _lock = store.lock()?;
@@ -347,6 +393,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             )?;
             format!("closed {name} at {at}\n")
         }
+        ("task", "edit") => edit_task(&settings, &store, need("task"))?,
         ("task", "note") => {
             let _lock = store.lock()?;
             let mut task = store.load(need("task"))?;

@@ -88,10 +88,13 @@ modules
     - `compose` + `deliver` build and send every outgoing email, to the human and to the guest
     - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; left out of that list and of `mail unread`: item notices and watcher emails (`X-AMH-From: amh ...`), and emails sent outside amh (no `X-AMH-From`), such as a mail-compression job's summaries
     - an email to the human that Gmail refuses (e.g. the account's daily sending limit, `550 5.4.5`) is kept in `outbox/` in the state folder; the watcher tries the outbox every 10 min, oldest first, and stops at the limit; `tell human` then says the email is queued, and nothing it replaces is trashed
-    - 🧑 "Make the emailing script combine emails into one. ... Merge those, which also requires caller interface to change and encourage batched calling of amh tell human"
-        - adding or finishing one of the human's items sends no email by itself; the change is noted in `amh-unreported.txt` (`EPOCH TAG CHANGE ITEM`) and listed under the text of that task's next `tell human`
-        - `amh tell human --add ITEM --done ITEM` records the item changes and reports them in the same email
-        - a change no email has carried for 30 min is emailed alone by the watcher, one email per task
+    - 🧑 "when we make agents add/remove pending items we urge them to do multiple at a time and also attach any other things to be emailed to the human. I don't want any additional latency from debounce"
+        - `todo add`, `todo done`, `task give` take several items per call; a call that changes the human's items emails them at once, one email per call, and then prints a hint to batch
+        - `amh tell human --add ITEM --done ITEM` records the item changes and lists them under the message in the same email, sent at once
+        - nothing waits: no record of unreported changes, no later digest
+- `amh task edit TASK.md` (the human): opens `$VISUAL`/`$EDITOR`/`vi` on a copy of the task file, like `crontab -e`
+    - 🧑 "Should be append-only. If the edit changed other things, offer to reopen the file and ask for fix"
+    - what was added at the end is stored as `manager_mail/PREFIX-edit-EPOCH.txt` and queued with a `(pending)` block, so it reaches the agent exactly like an email from the human
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
     - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
     - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`
