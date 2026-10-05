@@ -225,8 +225,32 @@ pub fn approve_prompts(settings: &Settings, address: &str) -> Result<Vec<String>
 }
 
 /// Stop an agent by ending its session.
+///
+/// Omnigent refuses to stop a session whose terminal has already vanished; such a session runs nothing, so that counts as stopped.
 pub fn stop(settings: &Settings, address: &str) -> Result<(), String> {
-    post_event(settings, address, "stop_session", json!({})).map(|_| ())
+    let Err(refusal) = post_event(settings, address, "stop_session", json!({})) else {
+        return Ok(());
+    };
+    let resources = api(
+        settings,
+        "GET",
+        &format!("/v1/sessions/{}/resources", session(address)?),
+        None,
+    )
+    .map_err(|_| refusal.clone())?;
+    if has_running_terminal(&resources) {
+        Err(refusal)
+    } else {
+        Ok(())
+    }
+}
+
+/// Whether a session's resource list holds a terminal that still runs. Pure.
+pub fn has_running_terminal(resources: &Value) -> bool {
+    let listed = resources["data"].as_array().into_iter().flatten();
+    listed
+        .into_iter()
+        .any(|resource| resource["type"] == "terminal" && resource["metadata"]["running"] == true)
 }
 
 /// The command-line arguments that make a tool run with no sandbox and no permission prompts.
@@ -390,4 +414,24 @@ pub fn launch_default(
     } else {
         (model, effort)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_session_without_a_running_terminal_runs_nothing() {
+        let terminal =
+            |running: bool| json!({"type": "terminal", "metadata": {"running": running}});
+        let environment = json!({"type": "environment", "metadata": {}});
+        assert!(has_running_terminal(
+            &json!({"data": [environment, terminal(true)]})
+        ));
+        assert!(!has_running_terminal(
+            &json!({"data": [environment, terminal(false)]})
+        ));
+        assert!(!has_running_terminal(&json!({"data": []})));
+        assert!(!has_running_terminal(&Value::Null));
+    }
 }

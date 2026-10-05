@@ -69,6 +69,7 @@ modules
     - `launch`: needs exactly one `TOOL-native-ui` agent and one online host; every tool runs with no sandbox and no permission prompts; waits up to 90 s for the runner
     - `approve_prompts`: answers yes to permission prompts a session waits on; the watcher calls it once a minute for `stuck` agents and tells the manager; other kinds of prompt stay `stuck` and are reported
         - 🧑 "Sounds good, but should not be the default, which is no question any time at all"
+    - `stop`: when Omnigent refuses because the session's terminal has already vanished (no running terminal in its resources), that counts as stopped
     - `stop`, `saw_message` (did the session's history take the message), `own_address` (the caller's session variable), `launch_default` (model and effort per tool, `[launch.TOOL]` in `config.toml`)
 - action log (`src/log.rs`): every `amh` run appends one line to `amh-actions.log` in the state folder: time, caller (Omnigent session, else tmux pane, else user), exit status, and the parsed command line; `agent view` and `manager watch` also get a line when they start
 - the agents of tasks
