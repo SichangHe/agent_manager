@@ -273,10 +273,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
             for item in many("add") {
                 added.extend(tasks::add_item(&mut task, item, true)?);
             }
+            let mut done = Vec::new();
             for item in many("done") {
-                tasks::remove_item(&mut task, item, "")?;
+                done.push(tasks::remove_item(&mut task, item, "")?);
             }
-            let done: Vec<String> = many("done").into_iter().map(str::to_owned).collect();
             if !added.is_empty() || !done.is_empty() {
                 store.save(&task)?;
             }
@@ -332,9 +332,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("todo", "done") => {
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
-            let done: Vec<String> = many("item").into_iter().map(str::to_owned).collect();
-            for item in &done {
-                tasks::remove_item(&mut task, item, need("evidence"))?;
+            let mut done = Vec::new();
+            for item in many("item") {
+                done.push(tasks::remove_item(&mut task, item, need("evidence"))?);
             }
             store.save(&task)?;
             drop(lock);

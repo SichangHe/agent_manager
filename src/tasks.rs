@@ -99,32 +99,36 @@ pub fn removal_note(item: &str, evidence: &str) -> String {
     }
 }
 
-/// Remove one finished or cancelled item, leaving a one-line record in the body.
-pub fn remove_item(task: &mut Task, item: &str, evidence: &str) -> Result<(), String> {
-    let at = task
-        .items
-        .iter()
-        .position(|open| open == item)
-        .ok_or_else(|| {
-            format!(
-                "amh: {} has no such open item; copy it exactly from `amh todo list`",
-                task.name
-            )
-        })?;
-    task.items.remove(at);
+/// Where the open item `given` is: its exact text, or the same text with or without the leading human mark.
+fn position(task: &Task, given: &str) -> Option<usize> {
+    let bare = |item: &str| {
+        item.strip_prefix(HUMAN_MARK)
+            .unwrap_or(item)
+            .trim()
+            .to_owned()
+    };
+    let exact = task.items.iter().position(|open| open == given);
+    exact.or_else(|| task.items.iter().position(|open| bare(open) == bare(given)))
+}
+
+/// Remove one finished or cancelled item, leaving a one-line record in the body; returns the item as it was stored.
+pub fn remove_item(task: &mut Task, item: &str, evidence: &str) -> Result<String, String> {
+    let at = position(task, item).ok_or_else(|| {
+        format!(
+            "amh: {} has no such open item; copy it from `amh todo list`",
+            task.name
+        )
+    })?;
+    let stored = task.items.remove(at);
     // 🧑 "Should quote the item itself automatically instead."
-    task.note(&removal_note(item, evidence));
-    Ok(())
+    task.note(&removal_note(&stored, evidence));
+    Ok(stored)
 }
 
 /// Reword one open item, keeping its authorship mark.
 pub fn replace_item(task: &mut Task, old: &str, new: &str) -> Result<(), String> {
-    let at = task
-        .items
-        .iter()
-        .position(|open| open == old)
-        .ok_or("amh: no such open item; copy it exactly from `amh todo list`")?;
-    task.items[at] = taskfile::mark(new, old.starts_with(HUMAN_MARK))?;
+    let at = position(task, old).ok_or("amh: no such open item; copy it from `amh todo list`")?;
+    task.items[at] = taskfile::mark(new, task.items[at].starts_with(HUMAN_MARK))?;
     Ok(())
 }
 
@@ -339,8 +343,8 @@ mod tests {
                 .contains(NO_ITEM)
         );
         assert_eq!(
-            remove_item(&mut work, "write the code", "tests\npass"),
-            Ok(())
+            remove_item(&mut work, "write the code", "tests\npass").as_deref(),
+            Ok("write the code")
         );
         assert_eq!(work.items, ["🧑 ship it today"]);
         assert_eq!(
@@ -488,5 +492,20 @@ mod tests {
         );
         assert_eq!(with_changes("Report.\n", ""), "Report.\n");
         assert_eq!(with_changes(" \n", &text), text);
+    }
+
+    #[test]
+    fn an_item_is_found_with_or_without_its_human_mark() {
+        let mut work = Task::parse("t.md", "---\nstatus: running\nrunat: omnigent://a\npending_task_items:\n  - 🧑 ship it\n  - write code\n---\n").unwrap();
+        assert_eq!(
+            remove_item(&mut work, "ship it", "").as_deref(),
+            Ok("🧑 ship it")
+        );
+        assert!(work.body.ends_with("(removed open item: 🧑 ship it)\n"));
+        assert_eq!(
+            remove_item(&mut work, "🧑 write code", "").as_deref(),
+            Ok("write code")
+        );
+        assert!(remove_item(&mut work, "ship", "").is_err());
     }
 }
