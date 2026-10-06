@@ -40,6 +40,7 @@ modules
     - 🧑 "Separate config file, which should live in .config or something and get committed, and env, which should be in local state or something and include things like where the work_logs is"
     - `config.toml` in the config folder (`$AMH_CFG_DIR`, else `$XDG_CONFIG_HOME/amh`, else `~/.config/amh`): same on every machine, committed; optional
         - `[launch.TOOL]` `model`, `effort`, `manager_model`, `manager_effort`
+        - `[compress]` `task` (who is told to compress the human's mailbox; unset = off), `unread_over` (default 16), `unread_urgent` (default 30)
     - `env.toml` in the state folder (`$AMH_STATE_DIR`, else `$XDG_STATE_HOME/amh`, else `~/.local/state/amh`): this machine only, never committed; required
         - `work_logs`, `main_manager`, `[omnigent] url token`, `[mail] agent_address agent_password human_address human_mailbox_config stored_prefix`, `[guest] address name workdir stored_prefix`
     - both files flatten to dotted keys (`mail.agent_address`); `env.toml` wins
@@ -127,6 +128,11 @@ modules
             - no email from that task within 15 min -> the agent is reminded; within 30 min -> its manager is told and the human is emailed
             - human notices are sent once per message and outcome, keys in `amh-told-human.txt`
     - nudges: idle agent with open items is reminded at most every 30 min
+    - mailbox compression notice, every 5 min
+        - 🧑 "do a dedicated agent “human manager” who directly gets notification to compress the mailbox and does it"
+        - counts the unread emails from the agent account in the human's inbox, without the item notices (read-only)
+        - more than `unread_over`: the `compress.task` agent is messaged with the count and the count per task tag; again hourly while it stays above, and at once when it reaches `unread_urgent`
+        - `amh-compress.txt` holds the last notice (`EPOCH COUNT`); it is removed when the count is back at or under the threshold
     - agent problems (`missing`, `error`, `stuck`): each is reported once, naming the task file, tool, address, manager, and the harness error
         - to the task's manager; for `error` and `stuck` also by email to the human on the task's thread
         - mail for a `missing` or `stuck` agent goes to its manager instead

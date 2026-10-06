@@ -24,6 +24,10 @@ const MAIL_POLL: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(30);
 /// How often queued emails are tried again.
 const FLUSH_EVERY: Duration = Duration::from_secs(600);
+/// How often the human's unread agent emails are counted.
+const COMPRESS_EVERY: Duration = Duration::from_secs(300);
+/// The record in the state folder of the last notice to compress: `EPOCH COUNT`.
+const COMPRESSED: &str = "amh-compress.txt";
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
 const AWAITING: &str = "amh-awaiting.txt";
 const TOLD_HUMAN: &str = "amh-told-human.txt";
@@ -572,6 +576,62 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
     rewrite(store, AWAITING, &rows)
 }
 
+/// Tell the task named by `compress.task` to compress the human's mailbox when too many agent emails wait unread there.
+fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> {
+    let name = settings::get(settings, "compress.task");
+    if name.is_empty() {
+        return Ok(());
+    }
+    let number =
+        |key: &str, default: usize| settings::get(settings, key).parse().unwrap_or(default);
+    let (over, urgent) = (
+        number("compress.unread_over", 16),
+        number("compress.unread_urgent", 30),
+    );
+    let unread = mail::unread_all(settings)?;
+    let counted: Vec<&mail::Header> = unread
+        .iter()
+        .filter(|header| decide::countable(&header.sender))
+        .collect();
+    let path = store.state_dir.join(COMPRESSED);
+    let noted = fs::read_to_string(&path).unwrap_or_default();
+    let mut parts = noted.split_whitespace().map(str::parse::<u64>);
+    let last = match (parts.next(), parts.next()) {
+        (Some(Ok(at)), Some(Ok(count))) => Some((at, count as usize)),
+        _ => None,
+    };
+    let now_s = epoch_s() as u64;
+    if counted.len() <= over {
+        // Below the threshold the record goes, so the next pile-up is noticed at once.
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    if !decide::compress_due(counted.len(), over, urgent, last, now_s) {
+        return Ok(());
+    }
+    let tags: Vec<String> = counted
+        .iter()
+        .map(|header| {
+            mail::tag_of(&header.subject)
+                .unwrap_or("(no tag)")
+                .to_owned()
+        })
+        .collect();
+    let task = store.load(name)?;
+    omnigent::send(
+        settings,
+        task.address(),
+        &decide::compress_text(counted.len(), over, &tags),
+    )?;
+    fs::write(&path, format!("{now_s} {}\n", counted.len()))
+        .map_err(|error| format!("cannot write {COMPRESSED}: {error}"))?;
+    log(&format!(
+        "told {name} to compress the mailbox: {} unread",
+        counted.len()
+    ));
+    Ok(())
+}
+
 /// Loop forever; the service manager restarts the process if it dies. Returns the exit status when the settings cannot be read.
 pub fn run() -> u8 {
     let mut watcher = Watcher {
@@ -584,6 +644,7 @@ pub fn run() -> u8 {
         last_nudge: None,
     };
     let mut last_flush: Option<Instant> = None;
+    let mut last_compress: Option<Instant> = None;
     log("watcher started");
     loop {
         let settings = match settings::load() {
@@ -605,6 +666,12 @@ pub fn run() -> u8 {
             scanned = answer_prompts(&settings, &store)
                 .and_then(|()| watcher.nudge(&settings, &store))
                 .and_then(|()| chase_answers(&settings, &store));
+        }
+        if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
+            last_compress = Some(Instant::now());
+            if let Err(error) = notify_compression(&settings, &store) {
+                log(&format!("mailbox compression check failed: {error}"));
+            }
         }
         if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
             last_flush = Some(Instant::now());

@@ -197,6 +197,12 @@ impl Header {
     }
 }
 
+/// Every unread email from the agent account in the human's inbox, oldest first.
+pub fn unread_all(settings: &BTreeMap<String, String>) -> Result<Vec<Header>, String> {
+    let agent = settings::get(settings, "mail.agent_address");
+    Mailbox::human(settings)?.search("INBOX", true, &format!("UNSEEN FROM \"{agent}\""))
+}
+
 /// What `tell human` prints after sending `message_id`, given the task's emails the human has not opened: nothing, or the request to replace the earlier ones with one email.
 // 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
 // 🧑 "this process should ignore emails about pending tasks being created and removed"

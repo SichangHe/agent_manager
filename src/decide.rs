@@ -528,6 +528,55 @@ pub fn approved_text(task: &Task, approved: &[String]) -> String {
     )
 }
 
+/// What the watcher knows about the last notice to compress the mailbox: when it was sent and the unread count then.
+pub type Compressed = Option<(u64, usize)>;
+
+/// Whether to tell the human manager now to compress the human's mailbox, given the unread agent emails that count.
+// 🧑 "do a dedicated agent “human manager” who directly gets notification to compress the mailbox and does it"
+// 🧑 "Automatic manager-mail cleanup is triggered only by unread manager mail, never by total retained Inbox thread count."
+// Hourly while more than `over` are unread; at once when the count reaches `urgent` after a notice sent below it.
+pub fn compress_due(
+    count: usize,
+    over: usize,
+    urgent: usize,
+    last: Compressed,
+    now_s: u64,
+) -> bool {
+    match last {
+        _ if count <= over => false,
+        None => true,
+        Some((at, counted)) => {
+            now_s.saturating_sub(at) >= 3600 || (count >= urgent && counted < urgent)
+        }
+    }
+}
+
+/// The emails that count toward compression: not the "pending item created/deleted" notices.
+// 🧑 "Pending-item created emails, and pending-item removed or deleted emails, are not countable manager mail."
+pub fn countable(sender: &str) -> bool {
+    !sender.starts_with(crate::mail::NOTICE_SENDER)
+}
+
+/// The notice to the human manager: how many emails wait unread, and how many per task tag, most first.
+pub fn compress_text(count: usize, over: usize, tags: &[String]) -> String {
+    let mut per_tag: Vec<(usize, &str)> = Vec::new();
+    for tag in tags {
+        match per_tag.iter_mut().find(|(_, known)| known == tag) {
+            Some(found) => found.0 += 1,
+            None => per_tag.push((1, tag)),
+        }
+    }
+    per_tag.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(b.1)));
+    let listed: Vec<String> = per_tag
+        .iter()
+        .map(|(n, tag)| format!("{tag} {n}"))
+        .collect();
+    format!(
+        "Mailbox compression is due: the human has {count} unread emails from agents, more than {over}; the pending-item notices are not counted. Compress the mailbox now. Unread per task tag: {}.",
+        listed.join(", ")
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +1000,24 @@ mod tests {
                 &["Allow Bash: ls".to_owned(), "Allow Edit: x".to_owned()]
             ),
             "The agent of t_sub.md waited on a permission prompt; the watcher answered yes: Allow Bash: ls | Allow Edit: x"
+        );
+    }
+
+    #[test]
+    fn the_human_manager_is_told_to_compress_when_unread_mail_piles_up() {
+        assert!(!compress_due(16, 16, 30, None, 0));
+        assert!(compress_due(17, 16, 30, None, 0));
+        assert!(!compress_due(20, 16, 30, Some((100, 17)), 1000));
+        assert!(compress_due(20, 16, 30, Some((100, 17)), 3700));
+        assert!(compress_due(30, 16, 30, Some((100, 17)), 200));
+        assert!(!compress_due(35, 16, 30, Some((100, 30)), 200));
+        assert!(
+            countable("omnigent://a") && countable("") && !countable("amh notice omnigent://a")
+        );
+        let tags = ["b", "a", "b", "(no tag)"].map(str::to_owned);
+        assert_eq!(
+            compress_text(18, 16, &tags),
+            "Mailbox compression is due: the human has 18 unread emails from agents, more than 16; the pending-item notices are not counted. Compress the mailbox now. Unread per task tag: b 2, (no tag) 1, a 1."
         );
     }
 }
