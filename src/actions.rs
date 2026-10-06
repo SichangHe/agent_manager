@@ -274,7 +274,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 added.extend(tasks::add_item(&mut task, item, true)?);
             }
             for item in many("done") {
-                tasks::remove_item(&mut task, item, "reported done in an email to the human")?;
+                tasks::remove_item(&mut task, item, "")?;
             }
             let done: Vec<String> = many("done").into_iter().map(str::to_owned).collect();
             if !added.is_empty() || !done.is_empty() {

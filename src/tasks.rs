@@ -89,6 +89,14 @@ pub fn add_item(task: &mut Task, item: &str, from_human: bool) -> Result<Option<
     Ok(Some(marked))
 }
 
+/// The record left in a task file when an open item is removed: the item itself, then how it is known to be finished when that was said.
+pub fn removal_note(item: &str, evidence: &str) -> String {
+    match evidence.trim() {
+        "" => format!("removed open item: {item}"),
+        evidence => format!("removed open item: {item}; evidence: {evidence}"),
+    }
+}
+
 /// Remove one finished or cancelled item, leaving a one-line record in the body.
 pub fn remove_item(task: &mut Task, item: &str, evidence: &str) -> Result<(), String> {
     let at = task
@@ -102,7 +110,8 @@ pub fn remove_item(task: &mut Task, item: &str, evidence: &str) -> Result<(), St
             )
         })?;
     task.items.remove(at);
-    task.note(&format!("removed open item: {evidence}"));
+    // 🧑 "Should quote the item itself automatically instead."
+    task.note(&removal_note(item, evidence));
     Ok(())
 }
 
@@ -332,7 +341,14 @@ mod tests {
             Ok(())
         );
         assert_eq!(work.items, ["🧑 ship it today"]);
-        assert_eq!(work.body, "request\n\n(removed open item: tests pass)\n");
+        assert_eq!(
+            work.body,
+            "request\n\n(removed open item: write the code; evidence: tests pass)\n"
+        );
+        assert_eq!(
+            removal_note("🧑 ship it", " "),
+            "removed open item: 🧑 ship it"
+        );
         let mut done = task("t_done.md", &[("status", "done"), ("runat", "x")], &[], "");
         assert_eq!(
             add_item(&mut done, "x", false),
