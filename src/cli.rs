@@ -79,7 +79,7 @@ pub fn command() -> Command {
             .subcommand(Command::new("status").about("Set a task's status.")
                 .arg(Arg::new("task").required(true).value_name("TASK.md"))
                 .arg(Arg::new("status").required(true).value_parser(["running", "long_running", "blocked"]))
-                .arg(Arg::new("on").long("on").value_name("WHAT").help("what a blocked task waits for: `human`, or another task file"))
+                .arg(Arg::new("on").long("on").value_name("WHAT").help("the thing a blocked task waits for, never just who: e.g. `human reviewing docs/plan.md`, `human answering the 3 questions in my email of Oct 5 14:02`, or another task file such as `other_task.md`; start it with `human` when the human must act"))
             )
             .subcommand(Command::new("edit").about("The human: open a task file in your editor; what you add at the end goes to its agent as your request.").long_about("The human: open a task file in your editor; what you add at the end goes to its agent as your request.\n\nWorks like `crontab -e`: you edit a copy, and on close the text you added at the end is delivered to the task's agent as if you had emailed it. Changing anything else is refused, and you are offered to reopen the copy. The editor is $VISUAL, else $EDITOR, else vi.")
                 .arg(Arg::new("task").required(true).value_name("TASK.md"))

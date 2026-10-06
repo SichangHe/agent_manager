@@ -54,11 +54,13 @@ impl Task {
 
     /// The task-list section the task belongs in.
     // 🧑 "None of the currently listed as human pending tasks is actually pending on the human."
+    // 🧑 "Should be something they are blocked on, not someone, e.g. human reviewing a file."
+    // So a blocker that starts with `human` and then says what the human is to do counts as waiting on the human.
     pub fn section(&self) -> &'static str {
         let waits_on_human = self.status() == "blocked"
             && self
                 .field("blocked_on")
-                .is_some_and(|on| on.to_lowercase() == "human");
+                .is_some_and(|on| on.to_lowercase().starts_with("human"));
         match self.status() {
             "done" => "previous:",
             _ if waits_on_human => "human pending:",
@@ -393,10 +395,13 @@ mod tests {
     #[test]
     fn status_decides_the_section() {
         let mut work = worker();
-        assert_eq!(set_status(&mut work, "blocked", Some("human")), Ok(()));
+        assert_eq!(
+            set_status(&mut work, "blocked", Some("human  reviewing docs/plan.md")),
+            Ok(())
+        );
         assert_eq!(
             (work.field("blocked_on"), work.section()),
-            (Some("human"), "human pending:")
+            (Some("human reviewing docs/plan.md"), "human pending:")
         );
         assert_eq!(set_status(&mut work, "blocked", Some("t_sub.md")), Ok(()));
         assert_eq!(work.section(), "current:");
