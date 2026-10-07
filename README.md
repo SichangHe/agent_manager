@@ -60,6 +60,7 @@ modules
         - a failed `agent view` is logged with `exit=1`
 - todo and task records
     - request stages, ownership, dependencies and events: `docs/request-lifecycle.md`
+    - entries without task files: `docs/task-list-entries.md`
     - scheduled commands and standing agents: `docs/scheduled-jobs.md`
     - `src/tasks.rs`: the `Task` record and every change to it as pure functions: add, remove, reword, move an item; note; status; `show`; `check` of task files against the task list; the notice text for the human
     - `src/store.rs`: the work-log root on disk: the lock, loading and saving task files, the task list row, the caller's own task; shared by the actions, the watcher, and starting agents

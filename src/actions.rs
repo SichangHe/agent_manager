@@ -205,6 +205,8 @@ fn tell_human(
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
+    mail::replace_queued(&settings::state_dir(), &message_id, replaces)
+        .map_err(|error| format!("amh: {error}"))?;
     if mail::is_queued(&settings::state_dir(), &message_id) {
         // The emails it replaces stay until it is really sent, so the human loses nothing meanwhile.
         say(&format!(
@@ -576,16 +578,26 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 (_, true) => "done",
                 _ => "",
             };
-            let (manager, message) = work::manager_message(&task, need("text"), state)?;
+            let body = match (text("text"), text("file")) {
+                (Some(message), None) => message.to_owned(),
+                (None, Some(file)) => read(file)?,
+                (None, None) => io::read_to_string(io::stdin())
+                    .map(|body| work::unix_lines(&body))
+                    .map_err(|error| format!("amh: cannot read standard input: {error}"))?,
+                _ => return Err("amh: give TEXT or --file, not both".to_owned()),
+            };
+            let (manager, message) = work::manager_message(&task, &body, state)?;
             omnigent::send(&settings, manager, &message).map_err(failed)?;
             "message sent to your manager; do not send it again\n".to_owned()
         }
         ("tell", "human") => {
-            let body = match text("file") {
-                Some(file) => read(file)?,
-                None => io::read_to_string(io::stdin())
+            let body = match (text("text"), text("file")) {
+                (Some(message), None) => message.to_owned(),
+                (None, Some(file)) => read(file)?,
+                (None, None) => io::read_to_string(io::stdin())
                     .map(|body| work::unix_lines(&body))
                     .map_err(|error| format!("amh: cannot read standard input: {error}"))?,
+                _ => return Err("amh: give TEXT or --file, not both".to_owned()),
             };
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
@@ -623,6 +635,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let message = match (text("text"), text("file")) {
                 (Some(text), None) => text.to_owned(),
                 (None, Some(file)) => read(file)?,
+                (None, None) => io::read_to_string(io::stdin())
+                    .map(|body| work::unix_lines(&body))
+                    .map_err(|error| format!("amh: cannot read standard input: {error}"))?,
                 _ => return Err("amh: give the message as TEXT or as --file, not both".to_owned()),
             };
             let to = agents::address_of(&store, need("who"))?;
@@ -886,6 +901,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
             tasks::pin(&mut task, need("under"))?;
             store.save(&task)?;
             store.place(&task)?;
+            String::new()
+        }
+        ("task", "list-add") => {
+            let _lock = store.lock()?;
+            store.list_add(need("entry"), need("under"))?;
             String::new()
         }
         ("task", "check") => {

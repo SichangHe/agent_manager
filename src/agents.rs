@@ -75,7 +75,7 @@ pub fn has_live_agent(settings: &Settings, task: &Task) -> bool {
         return false;
     }
     match omnigent::status(settings, task.address()).0 {
-        "running" | "stuck" => true,
+        "running" | "stuck" | "paused" => true,
         "ready" => task.field("agent_stopped") != Some("true"),
         _ => false,
     }
@@ -133,6 +133,17 @@ fn shown(args: &[&str]) -> Result<(String, String), String> {
 
 /// Launch an agent for a task, record where it runs in the task file, give it its first prompt, and return its address.
 pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<String, String> {
+    if store.contains(start.name)? {
+        let existing = store.load(start.name)?;
+        if omnigent::status(settings, existing.address()).0 == "paused"
+            && existing.field("tool") == Some(start.tool)
+        {
+            return Err(format!(
+                "amh: {} is paused for its provider session quota; keep its goals until reset",
+                start.name
+            ));
+        }
+    }
     let agent = |error: String| format!("amh: {error}");
     let commands = [vec![]]
         .into_iter()
@@ -292,7 +303,9 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     }
     if store.contains(new.name)? {
         let old = store.load(new.name)?;
-        if has_live_agent(settings, &old) {
+        let migrating = given(new.tool).is_some_and(|tool| old.field("tool") != Some(tool))
+            && omnigent::status(settings, old.address()).0 == "paused";
+        if !migrating && has_live_agent(settings, &old) {
             return Err(format!(
                 "amh: {} already has a live agent at {}; message it, or stop it first",
                 new.name,

@@ -401,6 +401,44 @@ pub fn is_queued(state_dir: &Path, message_id: &str) -> bool {
     queued_path(state_dir, message_id).is_file()
 }
 
+/// Keep superseded queued mail until its replacement is sent, including a later retry.
+// 🧑 "a replacement ... was sent with --replaces. ... check that the blocked message is no longer in the retry queue."
+pub fn replace_queued(
+    state_dir: &Path,
+    message_id: &str,
+    replaces: &[String],
+) -> Result<(), String> {
+    let path = queued_path(state_dir, message_id);
+    if path.is_file() {
+        if !replaces.is_empty() {
+            let raw = serde_json::to_vec(replaces).map_err(|error| error.to_string())?;
+            fs::write(path.with_extension("json"), raw).map_err(|error| error.to_string())?;
+        }
+        return Ok(());
+    }
+    for replaced in replaces {
+        if queued_path(state_dir, replaced) == path {
+            continue;
+        }
+        let old = queued_path(state_dir, replaced);
+        for path in [old.clone(), old.with_extension("json")] {
+            match fs::remove_file(&path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                Err(error) => return Err(format!("removing replaced queued mail failed: {error}")),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bare_id(message_id: &str) -> &str {
+    message_id
+        .trim()
+        .trim_start_matches('<')
+        .trim_end_matches('>')
+}
+
 /// Whether a send failure says the account's sending limit is reached, so trying more emails now is pointless. Pure.
 pub fn is_limit(error: &str) -> bool {
     error.contains("5.4.5") || error.to_lowercase().contains("sending limit")
@@ -408,6 +446,7 @@ pub fn is_limit(error: &str) -> bool {
 
 /// Send the queued emails, oldest first; returns one log line per email sent or refused. Stops at the sending limit.
 pub fn flush_outbox(settings: &BTreeMap<String, String>, state_dir: &Path) -> Vec<String> {
+    let mut lines = retry_replacements(state_dir);
     let entries = fs::read_dir(state_dir.join(OUTBOX)).into_iter().flatten();
     let mut waiting: Vec<PathBuf> = entries
         .filter_map(|entry| Some(entry.ok()?.path()))
@@ -415,15 +454,46 @@ pub fn flush_outbox(settings: &BTreeMap<String, String>, state_dir: &Path) -> Ve
         .collect();
     waiting.sort();
     let to = settings::get(settings, "mail.human_address");
-    let mut lines = Vec::new();
     for (at, path) in waiting.iter().enumerate() {
+        if !path.is_file() {
+            continue;
+        }
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         let sent = fs::read(path)
             .map_err(|error| error.to_string())
             .and_then(|raw| deliver(settings, to, &raw));
         match sent {
             Ok(()) => {
-                let _ = fs::remove_file(path);
+                if let Err(error) = fs::remove_file(path) {
+                    lines.push(format!(
+                        "sent queued email {name}, but removing it failed: {error}"
+                    ));
+                    continue;
+                }
+                let metadata = path.with_extension("json");
+                if metadata.is_file() {
+                    let replaced = fs::read(&metadata)
+                        .map_err(|error| error.to_string())
+                        .and_then(|raw| {
+                            serde_json::from_slice::<Vec<String>>(&raw)
+                                .map_err(|error| error.to_string())
+                        })
+                        .and_then(|ids| {
+                            replace_queued(
+                                state_dir,
+                                &path.file_stem().unwrap_or_default().to_string_lossy(),
+                                &ids,
+                            )
+                        });
+                    match replaced {
+                        Ok(()) => {
+                            let _ = fs::remove_file(metadata);
+                        }
+                        Err(error) => lines.push(format!(
+                            "sent queued email {name}, but replacing queued mail failed: {error}"
+                        )),
+                    }
+                }
                 lines.push(format!("sent queued email {name}"));
             }
             Err(error) if is_limit(&error) => {
@@ -434,6 +504,36 @@ pub fn flush_outbox(settings: &BTreeMap<String, String>, state_dir: &Path) -> Ve
                 break;
             }
             Err(error) => lines.push(format!("queued email {name} was refused: {error}")),
+        }
+    }
+    lines
+}
+
+/// Retry supersession cleanup after successful sends without resending those emails.
+fn retry_replacements(state_dir: &Path) -> Vec<String> {
+    let mut lines = Vec::new();
+    for entry in fs::read_dir(state_dir.join(OUTBOX)).into_iter().flatten() {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.extension().is_none_or(|kind| kind != "json") || path.with_extension("eml").exists()
+        {
+            continue;
+        }
+        let result = fs::read(&path)
+            .map_err(|error| error.to_string())
+            .and_then(|raw| {
+                serde_json::from_slice::<Vec<String>>(&raw).map_err(|error| error.to_string())
+            })
+            .and_then(|ids| {
+                replace_queued(
+                    state_dir,
+                    &path.file_stem().unwrap_or_default().to_string_lossy(),
+                    &ids,
+                )
+            })
+            .and_then(|()| fs::remove_file(&path).map_err(|error| error.to_string()));
+        if let Err(error) = result {
+            lines.push(format!("replacing queued mail cleanup failed: {error}"));
         }
     }
     lines
@@ -715,9 +815,11 @@ pub fn unread(
     let agent = settings::get(settings, "mail.agent_address");
     let query = format!("UNSEEN FROM \"{agent}\" SUBJECT \"[{tag}]\"");
     let found = mailbox.search("INBOX", trash_ids.is_empty(), &query)?;
-    let (doomed, kept): (Vec<Header>, Vec<Header>) = found
-        .into_iter()
-        .partition(|header| trash_ids.contains(&header.message_id));
+    let (doomed, kept): (Vec<Header>, Vec<Header>) = found.into_iter().partition(|header| {
+        trash_ids
+            .iter()
+            .any(|id| bare_id(id) == bare_id(&header.message_id))
+    });
     if !doomed.is_empty() {
         let uids: Vec<&str> = doomed.iter().map(|header| header.uid.as_str()).collect();
         let moved = mailbox.session.uid_mv(uids.join(","), TRASH);
@@ -907,5 +1009,33 @@ mod tests {
         assert!(!is_limit("the email was not sent: connection refused"));
         let path = queued_path(Path::new("/state"), "<1791.42@gmail.com>");
         assert_eq!(path, Path::new("/state/outbox/1791.42gmail.com.eml"));
+    }
+
+    #[test]
+    fn replacements_keep_queued_mail_until_sent() -> Result<(), String> {
+        let state = std::env::temp_dir().join(format!("amh-replaces-{}", new_id()));
+        fs::create_dir_all(state.join(OUTBOX)).map_err(|error| error.to_string())?;
+        let old = "<blocked@gmail.com>";
+        let replacement = "<replacement@gmail.com>";
+        let unrelated = "<other@gmail.com>";
+        for id in [old, replacement, unrelated] {
+            fs::write(queued_path(&state, id), b"queued").map_err(|error| error.to_string())?;
+        }
+        let ids = vec!["blocked@gmail.com".to_owned()];
+        replace_queued(&state, replacement, &ids)?;
+        assert!(is_queued(&state, old));
+        let metadata = queued_path(&state, replacement).with_extension("json");
+        let saved: Vec<String> =
+            serde_json::from_slice(&fs::read(&metadata).map_err(|error| error.to_string())?)
+                .map_err(|error| error.to_string())?;
+        assert_eq!(saved, ids);
+        fs::remove_file(queued_path(&state, replacement)).map_err(|error| error.to_string())?;
+        assert!(retry_replacements(&state).is_empty());
+        assert!(!metadata.exists());
+        assert!(!is_queued(&state, old));
+        assert!(is_queued(&state, unrelated));
+        replace_queued(&state, replacement, &ids)?;
+        assert_eq!(bare_id(old), bare_id(" blocked@gmail.com "));
+        fs::remove_dir_all(state).map_err(|error| error.to_string())
     }
 }

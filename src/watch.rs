@@ -432,6 +432,9 @@ fn deliver_block(
     plan: &Plan,
     block: &[String],
 ) -> Result<bool, String> {
+    if omnigent::status(settings, &plan.target).0 == "paused" {
+        return Ok(false);
+    }
     let name = &task.name;
     let text = match delivery_text(settings, store, block) {
         Ok(text) => decide::addressed(task, plan, &text),
@@ -684,7 +687,18 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
     }
     let active = store.active()?;
     let (awaiting, sent) = (record(store, AWAITING), record(store, mail::SENT_LOG));
-    let mut keep = Vec::new();
+    let paused: BTreeSet<&str> = active
+        .iter()
+        .filter(|task| omnigent::status(settings, task.address()).0 == "paused")
+        .map(|task| task.name.as_str())
+        .collect();
+    let (held, ready): (Vec<&str>, Vec<&str>) = awaiting.lines().partition(|row| {
+        row.split_whitespace()
+            .nth(1)
+            .is_some_and(|name| paused.contains(name))
+    });
+    let awaiting = ready.join("\n");
+    let mut keep: Vec<String> = held.into_iter().map(str::to_owned).collect();
     for chase in decide::chase(&awaiting, &sent, &active, epoch_s(), hour_minute) {
         let failed = |task: &str, error: String| {
             log(&format!("chasing an answer from {task} failed: {error}"));

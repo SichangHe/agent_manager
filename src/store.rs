@@ -434,6 +434,28 @@ impl Store {
         }
     }
 
+    /// Save a bullet entry without a task record, moving an existing identical bullet.
+    // 🧑 "There is no task file for it. ... add a way and tell me; I added nothing."
+    pub fn list_add(&self, entry: &str, section: &str) -> Result<(), String> {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.contains(['\n', '\r']) {
+            return Err("amh: a list entry must be one nonempty line".to_owned());
+        }
+        let section = format!("{section}:");
+        if !taskfile::SECTIONS.contains(&section.as_str()) {
+            return Err(format!("amh: invalid task-list section `{section}`"));
+        }
+        let list = self.list()?;
+        let row = format!("- {entry}");
+        let mut lines: Vec<_> = list.lines().filter(|line| line.trim() != row).collect();
+        let at = lines
+            .iter()
+            .position(|line| line.trim().eq_ignore_ascii_case(&section))
+            .ok_or_else(|| format!("amh: TODO.md has no `{section}` section"))?;
+        lines.insert(at + 1, &row);
+        self.write("TODO.md", &(lines.join("\n") + "\n"))
+    }
+
     /// Put the task's row at the top of its section of the task list.
     pub fn place(&self, task: &Task) -> Result<(), String> {
         match taskfile::placed(&self.list()?, &task.name, task.address(), task.section())? {

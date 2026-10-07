@@ -31,6 +31,67 @@ impl Workspace {
 }
 
 #[test]
+fn plain_list_entries_survive_exports_and_task_placement() -> Result<(), Box<dyn std::error::Error>>
+{
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-list-{}-{now}", std::process::id())));
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(workspace.0.join("state"))?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\na.md omnigent://a\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("a.md"),
+        "---\nstatus: running\nrunat: omnigent://a\npending_task_items: []\n---\n",
+    )?;
+    let entry = "Exxact server access below the OS";
+    let add = ["task", "list-add", entry, "--under", "low priority"];
+    workspace.ok(&add)?;
+    let expected = fs::read_to_string(root.join("TODO.md"))?;
+    assert!(expected.contains(&format!("low priority:\n- {entry}\n")));
+    assert_eq!(
+        fs::read_dir(&root)?
+            .filter_map(Result::ok)
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "md"))
+            .count(),
+        2
+    );
+    fs::write(root.join("TODO.md"), "stale export")?;
+    workspace.ok(&add)?;
+    assert_eq!(fs::read_to_string(root.join("TODO.md"))?, expected);
+    workspace.ok(&["task", "place", "a", "--under", "low priority"])?;
+    let placed = fs::read_to_string(root.join("TODO.md"))?;
+    assert!(placed.contains(&format!("- {entry}")));
+    workspace.ok(&["task", "list-add", entry, "--under", "human pending"])?;
+    let moved = fs::read_to_string(root.join("TODO.md"))?;
+    assert_eq!(moved.matches(entry).count(), 1);
+    assert!(moved.contains(&format!("human pending:\n- {entry}\n")));
+    workspace.ok(&["task", "check"])?;
+    for invalid in ["", "one\ntwo", "one\rtwo"] {
+        assert!(
+            !workspace
+                .run(&["task", "list-add", invalid, "--under", "low priority"])?
+                .status
+                .success()
+        );
+        assert_eq!(fs::read_to_string(root.join("TODO.md"))?, moved);
+    }
+    Ok(())
+}
+
+#[test]
 fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn std::error::Error>>
 {
     let now = std::time::SystemTime::now()

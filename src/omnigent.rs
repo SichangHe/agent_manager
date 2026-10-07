@@ -95,14 +95,83 @@ fn post_message(settings: &Settings, address: &str, text: &str) -> Result<Value,
 
 /// Deliver `text` to an agent as its next user message.
 pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
-    let answer = post_message(settings, address, text)?;
+    let current = api(
+        settings,
+        "GET",
+        &format!(
+            "/v1/sessions/{}?include_items=false&refresh_state=true",
+            session(address)?
+        ),
+        None,
+    )?;
+    if quota_paused(address, &current, crate::quota::Attempt::Reserve)? {
+        return Err(format!(
+            "{address} is paused for its provider session quota; keep requests pending"
+        ));
+    }
+    let answer = match post_message(settings, address, text) {
+        Ok(answer) => answer,
+        Err(error) => {
+            if error.starts_with("Omnigent answered ") {
+                quota_paused(address, &current, crate::quota::Attempt::Release)?;
+            }
+            return Err(error);
+        }
+    };
     if answer["queued"] != true {
+        if answer["queued"] == false {
+            quota_paused(address, &current, crate::quota::Attempt::Release)?;
+        }
         return Err(format!("{address} did not queue the message: {answer}"));
     }
-    if text.trim().contains('\n') {
+    if text.trim().contains('\n')
+        && current["harness"]
+            .as_str()
+            .is_some_and(|harness| harness.contains("claude"))
+    {
         let _ = post_message(settings, address, FOLLOW_UP);
     }
     Ok(())
+}
+
+fn session_error(session_value: &Value) -> &str {
+    session_value["last_task_error"]
+        .as_str()
+        .or_else(|| session_value["last_task_error"]["message"].as_str())
+        .unwrap_or_default()
+}
+
+fn quota_paused(
+    address: &str,
+    session_value: &Value,
+    attempt: crate::quota::Attempt,
+) -> Result<bool, String> {
+    if session_value["status"].as_str().is_none() {
+        return Err(
+            "Omnigent returned an invalid session status; quota state is unchanged".to_owned(),
+        );
+    }
+    let error = if session_value["status"] == "failed" {
+        session_error(session_value)
+    } else {
+        ""
+    };
+    crate::quota::paused(
+        &crate::settings::state_dir().join("amh-quota-pauses.json"),
+        session(address)?,
+        error,
+        chrono::Utc::now(),
+        session_value["updated_at"]
+            .as_str()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .map(|at| at.with_timezone(&chrono::Utc))
+            .or_else(|| {
+                session_value["updated_at"]
+                    .as_i64()
+                    .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
+            }),
+        attempt,
+    )
 }
 
 /// A JSON value as the evidence line shows it.
@@ -174,7 +243,25 @@ pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
         )
     });
     match found {
-        Ok(session) => classify(&session),
+        Ok(found) => match quota_paused(address, &found, crate::quota::Attempt::Observe) {
+            Ok(true) => (
+                "paused",
+                format!(
+                    "provider session quota: {}",
+                    shown(&found["last_task_error"])
+                ),
+            ),
+            Ok(false)
+                if crate::quota::limited(session_error(&found)) && found["status"] == "failed" =>
+            {
+                (
+                    "ready",
+                    "provider session quota reset; one retry available".to_owned(),
+                )
+            }
+            Ok(false) => classify(&found),
+            Err(error) => ("paused", error),
+        },
         Err(error) => ("missing", error),
     }
 }
@@ -419,6 +506,15 @@ pub fn launch_default(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn object_quota_errors_match_live_session_format() {
+        let found = json!({
+            "status": "failed",
+            "last_task_error": {"code": "native_turn_error", "message": "Session limit reached"}
+        });
+        assert!(crate::quota::limited(session_error(&found)));
+    }
 
     #[test]
     fn a_session_without_a_running_terminal_runs_nothing() {

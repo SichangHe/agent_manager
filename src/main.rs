@@ -13,6 +13,7 @@ mod log;
 mod mail;
 mod mail_routes;
 mod omnigent;
+mod quota;
 mod requests;
 mod settings;
 mod store;
@@ -75,6 +76,9 @@ fn parsed(command: &Command, matches: &ArgMatches) -> Value {
         };
         object.insert(id.to_owned(), value);
     }
+    if let Ok(Some(task)) = values.try_get_one::<String>("task_file") {
+        object.insert("task_file".to_owned(), work::task_name(task).into());
+    }
     Value::Object(object)
 }
 
@@ -95,4 +99,44 @@ fn main() -> ExitCode {
     });
     log::record(&line, &format!("exit={code}"));
     ExitCode::from(code)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tell_accepts_task_file_before_and_after_recipient() -> Result<(), clap::Error> {
+        for args in [
+            vec!["amh", "--task-file", "a.md", "tell", "manager", "hello"],
+            vec!["amh", "tell", "--task-file", "a.md", "manager", "hello"],
+            vec!["amh", "tell", "manager", "--task-file", "a.md", "hello"],
+            vec![
+                "amh",
+                "tell",
+                "--task-file",
+                "a.md",
+                "human",
+                "--subject",
+                "hello",
+                "body",
+            ],
+            vec![
+                "amh",
+                "tell",
+                "--task-file",
+                "a.md",
+                "agent",
+                "b.md",
+                "--file",
+                "/tmp/message",
+            ],
+        ] {
+            let command = cli::command();
+            let matches = command.clone().try_get_matches_from(args)?;
+            let values = parsed(&command, &matches);
+            assert_eq!(values["task_file"], "a.md");
+        }
+        Ok(())
+    }
 }
