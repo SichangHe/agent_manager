@@ -291,11 +291,11 @@ pub fn incoming(settings: &Settings, cursor: u64) -> Result<Vec<Value>, String> 
         .map_err(|_| "invalid zulip.human_id")?;
     let stream = settings::get(settings, "zulip.stream_id");
     let conversation = if stream.is_empty() {
-        json!({"operator":"dm","operand":human.to_string()})
+        json!({"operator":"dm","operand":human})
     } else {
-        json!({"operator":"stream","operand":stream})
+        json!({"operator":"stream","operand":stream.parse::<u64>().map_err(|_| "invalid zulip.stream_id")?})
     };
-    let narrow = json!([conversation,{"operator":"sender","operand":human.to_string()}]);
+    let narrow = json!([conversation,{"operator":"sender","operand":human}]);
     let result = api(
         settings,
         "GET",
