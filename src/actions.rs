@@ -14,7 +14,105 @@ use crate::agents::{self, NewTask};
 use crate::mail::{self, Attached, Draft};
 use crate::store::Store;
 use crate::tasks::{self, Task};
-use crate::{decide, guest, omnigent, settings, taskfile, view, watch, work};
+use crate::{decide, guest, omnigent, requests, settings, taskfile, view, watch, work};
+
+fn creator(store: &Store) -> Result<String, String> {
+    Ok(store.own(None)?.name)
+}
+
+pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
+    for mut task in store
+        .all()?
+        .into_iter()
+        .filter(|task| task.address() == address && task.field("agent_stopped") == Some("true"))
+    {
+        task.fields.retain(|(key, _)| key != "agent_stopped");
+        store.save(&task)?;
+    }
+    Ok(())
+}
+
+/// Commit dependency releases and delivery intents before attempting agent messages.
+pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String> {
+    let mut all = store.all()?;
+    let mut resolved = Vec::new();
+    for task in &mut all {
+        resolved.extend(
+            requests::sync(task)?
+                .into_iter()
+                .filter(|r| r.stage == requests::Stage::Resolved)
+                .map(|r| r.id),
+        );
+    }
+    for task in &mut all {
+        if requests::unblock(task, &resolved)? {
+            store.save(task)?;
+        }
+    }
+    let mut failed = Vec::new();
+    let mut awakened = Vec::new();
+    for task in &mut all {
+        let queued = requests::notifications(task)?;
+        for message in queued {
+            let to = message["to"]
+                .as_str()
+                .ok_or("amh: notification lacks recipient")?;
+            let text = message["text"]
+                .as_str()
+                .ok_or("amh: notification lacks text")?;
+            let delivered = agents::address_of(store, to)
+                .and_then(|address| omnigent::send(settings, &address, text).map(|()| address));
+            if let Err(error) = delivered {
+                crate::log::event(
+                    &store.state_dir,
+                    "message failed",
+                    &task.name,
+                    serde_json::json!({"to": to, "text": text, "error": error}),
+                )?;
+                failed.push(format!("{}: {error}", task.name));
+                continue;
+            }
+            if let Ok(address) = delivered {
+                awakened.push(address);
+            }
+            let mut remaining = requests::notifications(task)?;
+            if let Some(at) = remaining.iter().position(|queued| queued == &message) {
+                remaining.remove(at);
+            }
+            requests::set_notifications(task, remaining);
+            store.save(task)?;
+            crate::log::event(&store.state_dir, "message delivered", &task.name, message)?;
+        }
+    }
+    for address in awakened {
+        clear_stopped(store, &address)?;
+    }
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "amh: requests saved; notifications retained for retry: {}",
+            failed.join("; ")
+        ))
+    }
+}
+
+fn finish_request(task: &mut Task, item: &str, evidence: &str) -> Result<String, String> {
+    let request = requests::finish(task, item, evidence)?;
+    if request.stage == requests::Stage::Requested {
+        requests::queue(
+            task,
+            &request.creator,
+            &format!(
+                "Resolution requested for {}: {}\n{}\nDecide with `amh todo approve {}` or `amh todo reject {} --reason REASON`.",
+                request.id, request.text, request.evidence, request.id, request.id
+            ),
+        )?;
+        Ok(String::new())
+    } else {
+        Ok(request.text)
+    }
+}
 
 const UNIT: &str = "amh-watch.service";
 
@@ -286,6 +384,7 @@ fn short(values: &Value) -> Result<u8, String> {
                 model: None,
                 effort: None,
                 as_manager: values["as_manager"].as_bool().unwrap_or(false),
+                long_running: false,
                 email: None,
                 lines: None,
             };
@@ -318,6 +417,13 @@ fn short(values: &Value) -> Result<u8, String> {
                 }
                 let _lock = store.lock()?;
                 let mut task = store.load(name)?;
+                let mut records = requests::sync(&mut task)?;
+                for request in &mut records {
+                    request.stage = requests::Stage::Resolved;
+                    request.evidence = "the human closed the task with amh stop".to_owned();
+                    request.blockers.clear();
+                }
+                requests::write(&mut task, &records);
                 for item in task.items.clone() {
                     tasks::remove_item(
                         &mut task,
@@ -339,6 +445,7 @@ fn short(values: &Value) -> Result<u8, String> {
                     .collect();
                 task.body = kept.join("\n");
                 store.save(&task)?;
+                request_effects(&settings, &store)?;
             }
             let at = agents::close_task(&settings, &store, name, true, false, false)?;
             say(&format!("closed {name} at {at}\n"));
@@ -358,6 +465,14 @@ fn short(values: &Value) -> Result<u8, String> {
                 &at,
                 n,
             ));
+            let events = read("amh-events.jsonl");
+            let matching: Vec<&str> = events
+                .lines()
+                .filter(|line| line.contains(name) || line.contains(&at))
+                .collect();
+            for line in matching.iter().skip(matching.len().saturating_sub(n)) {
+                say(&format!("{line}\n"));
+            }
             Ok(0)
         }
         other => Err(format!("amh: no short command {other}")),
@@ -453,13 +568,19 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let mut task = store.own(text("task_file"))?;
             let mut added = Vec::new();
             for item in many("add") {
-                added.extend(tasks::add_item(&mut task, item, true)?);
+                if let Some(item) = tasks::add_item(&mut task, item, true)? {
+                    requests::register(&mut task, &item, "human", "amh tell human --add")?;
+                    added.push(item);
+                }
             }
             let mut done = Vec::new();
             for item in many("done") {
-                done.push(tasks::remove_item(&mut task, item, "")?);
+                let finished = finish_request(&mut task, item, "")?;
+                if !finished.is_empty() {
+                    done.push(finished);
+                }
             }
-            if !added.is_empty() || !done.is_empty() {
+            if !many("add").is_empty() || !many("done").is_empty() {
                 store.save(&task)?;
             }
             drop(lock);
@@ -468,6 +589,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
             tell_human(&settings, &task, need("subject"), &body, &replaces, &attach)?;
+            let _lock = store.lock()?;
+            request_effects(&settings, &store)?;
             match done.is_empty() {
                 true => String::new(),
                 false => tasks::close_hint(&task).to_owned(),
@@ -491,6 +614,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             };
             let message = work::envelope(&from, &message);
             omnigent::send(&settings, &to, &message).map_err(failed)?;
+            let _lock = store.lock()?;
+            clear_stopped(&store, &to)?;
             String::new()
         }
         ("tell", "guest") => tell_guest(
@@ -500,7 +625,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
             need("file"),
             &many("image"),
         )?,
-        ("todo", "list") => store.own(text("task_file"))?.items.join("\n") + "\n",
+        ("todo", "list") => {
+            let _lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let before = task.render();
+            let listed = requests::listed(&mut task)?;
+            if task.render() != before {
+                store.save(&task)?;
+            }
+            listed
+        }
         ("todo", "add") | ("task", "give") => {
             let lock = store.lock()?;
             let mut task = match action.0 {
@@ -508,8 +642,28 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 _ => store.own(text("task_file"))?,
             };
             let mut new: Vec<String> = Vec::new();
+            let author = if flag("from_human") {
+                "human".to_owned()
+            } else if action.0 == "todo" {
+                task.name.clone()
+            } else {
+                creator(&store)?
+            };
             for item in many("item") {
-                new.extend(tasks::add_item(&mut task, item, flag("from_human"))?);
+                if let Some(item) = tasks::add_item(&mut task, item, flag("from_human"))? {
+                    requests::register(
+                        &mut task,
+                        &item,
+                        &author,
+                        &format!(
+                            "amh {} {}; caller {}",
+                            action.0,
+                            action.1,
+                            crate::log::caller()
+                        ),
+                    )?;
+                    new.push(item);
+                }
             }
             if !new.is_empty() {
                 store.save(&task)?;
@@ -528,11 +682,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let mut task = store.own(text("task_file"))?;
             let mut done = Vec::new();
             for item in many("item") {
-                done.push(tasks::remove_item(
+                let finished = finish_request(
                     &mut task,
                     item,
                     &tasks::quiet_evidence(need("evidence"), text("quiet_because")),
-                )?);
+                )?;
+                if !finished.is_empty() {
+                    done.push(finished);
+                }
             }
             store.save(&task)?;
             drop(lock);
@@ -541,8 +698,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 Some(_) => "the human is not emailed, as they asked\n",
                 None => report_items(&settings, &store, &task, &[], &done)?,
             };
+            let _lock = store.lock()?;
+            request_effects(&settings, &store)?;
             format!(
-                "removed {} open item(s)\n{hint}{}",
+                "resolved {} human request(s); agent requests await their creator\n{hint}{}",
                 done.len(),
                 tasks::close_hint(&task)
             )
@@ -553,6 +712,72 @@ pub fn run(values: &Value) -> Result<u8, String> {
             tasks::replace_item(&mut task, need("old"), need("new"))?;
             store.save(&task)?;
             "replaced 1 open item\n".to_owned()
+        }
+        ("todo", "approve") | ("todo", "reject") => {
+            let _lock = store.lock()?;
+            let caller = store.own(text("task_file"))?;
+            let id = need("id");
+            let owner = store
+                .all()?
+                .into_iter()
+                .find(|task| {
+                    requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id))
+                })
+                .ok_or("amh: no such request ID")?;
+            let mut owner = owner;
+            let request = requests::decide(
+                &mut owner,
+                id,
+                &caller.name,
+                action.1 == "approve",
+                need("reason"),
+            )?;
+            let recipient = owner.name.clone();
+            requests::queue(
+                &mut owner,
+                &recipient,
+                &format!(
+                    "{}: {} ({})",
+                    request.id,
+                    request.stage.text(),
+                    request.evidence
+                ),
+            )?;
+            store.save(&owner)?;
+            request_effects(&settings, &store)?;
+            format!("{}: {}\n", id, request.stage.text())
+        }
+        ("todo", "wait") => {
+            let _lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let blockers = many("blocker")
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            requests::wait(&mut task, need("id"), &blockers, &store.all()?)?;
+            store.save(&task)?;
+            String::new()
+        }
+        ("todo", "take") => {
+            let _lock = store.lock()?;
+            let mut to = store.own(text("task_file"))?;
+            let id = need("id");
+            let mut source = store
+                .all()?
+                .into_iter()
+                .find(|task| {
+                    requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id))
+                })
+                .ok_or("amh: no such request ID")?;
+            requests::transfer(&mut source, &mut to, id)?;
+            store.save_transfer(&source, &to)?;
+            crate::log::event(
+                &store.state_dir,
+                "request moved",
+                id,
+                serde_json::json!({"from": source.name, "to": to.name}),
+            )?;
+            String::new()
         }
         ("task", "start") => {
             if text("email").is_some() != text("lines").is_some() {
@@ -572,6 +797,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 model: text("model"),
                 effort: text("effort"),
                 as_manager: flag("as_manager"),
+                long_running: false,
                 email: text("email"),
                 lines: text("lines"),
             };
@@ -609,11 +835,25 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         ("task", "move") => {
             let _lock = store.lock()?;
-            let (mut source, mut to) = (store.load(need("source"))?, store.load(need("to"))?);
-            tasks::move_item(&mut source, &mut to, need("item"))?;
-            store.save(&to)?;
+            let (mut source, to) = (store.load(need("source"))?, store.load(need("to"))?);
+            let request = requests::sync(&mut source)?
+                .into_iter()
+                .find(|r| {
+                    r.stage == requests::Stage::Added
+                        && (r.text == need("item") || r.id == need("item"))
+                })
+                .ok_or("amh: no such added request")?;
+            if source.name == to.name || to.status() == "done" {
+                return Err("amh: destination is done or the current owner".to_owned());
+            }
+            let message = format!(
+                "{} offers you request {}: {}. Take ownership with `amh todo take {}`.",
+                source.name, request.id, request.text, request.id
+            );
+            requests::queue(&mut source, &to.name, &message)?;
             store.save(&source)?;
-            String::new()
+            request_effects(&settings, &store)?;
+            "ownership offered; the target must run `amh todo take ID`\n".to_owned()
         }
         ("task", "status") => {
             let _lock = store.lock()?;
@@ -667,11 +907,20 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("agent", "stop") => {
             let at = agents::address_of(&store, need("who"))?;
             omnigent::stop(&settings, &at).map_err(failed)?;
+            let _lock = store.lock()?;
+            for mut task in store.all()?.into_iter().filter(|task| task.address() == at) {
+                task.fields.retain(|(key, _)| key != "agent_stopped");
+                task.fields
+                    .push(("agent_stopped".to_owned(), "true".to_owned()));
+                store.save(&task)?;
+            }
             String::new()
         }
         ("agent", "compact") => {
             let at = agents::address_of(&store, need("who"))?;
             omnigent::send(&settings, &at, "/compact").map_err(failed)?;
+            let _lock = store.lock()?;
+            clear_stopped(&store, &at)?;
             String::new()
         }
         ("mail", "unread") => {

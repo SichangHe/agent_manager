@@ -15,12 +15,14 @@ pub struct Task {
 impl Task {
     pub fn parse(name: &str, text: &str) -> Result<Self, String> {
         let (fields, items, body) = taskfile::parse(name, text)?;
-        Ok(Self {
+        let task = Self {
             name: name.to_owned(),
             fields,
             items,
             body,
-        })
+        };
+        crate::requests::validate(&task)?;
+        Ok(task)
     }
 
     pub fn render(&self) -> String {
@@ -152,11 +154,31 @@ pub fn remove_item(task: &mut Task, item: &str, evidence: &str) -> Result<String
 /// Reword one open item, keeping its authorship mark.
 pub fn replace_item(task: &mut Task, old: &str, new: &str) -> Result<(), String> {
     let at = position(task, old).ok_or("amh: no such open item; copy it from `amh todo list`")?;
-    task.items[at] = taskfile::mark(new, task.items[at].starts_with(HUMAN_MARK))?;
+    let mut records = crate::requests::sync(task)?;
+    let request = records
+        .iter_mut()
+        .find(|r| r.text == task.items[at] && r.stage != crate::requests::Stage::Resolved)
+        .ok_or("amh: no such request")?;
+    if request.stage != crate::requests::Stage::Added {
+        return Err("amh: cannot reword a request awaiting resolution".to_owned());
+    }
+    let text = taskfile::mark(new, task.items[at].starts_with(HUMAN_MARK))?;
+    if task
+        .items
+        .iter()
+        .enumerate()
+        .any(|(n, item)| n != at && item == &text)
+    {
+        return Err("amh: replacement duplicates another open item".to_owned());
+    }
+    request.text = text.clone();
+    task.items[at] = text;
+    crate::requests::write(task, &records);
     Ok(())
 }
 
 /// Move one open item from `source` to `to`.
+#[cfg(test)]
 pub fn move_item(source: &mut Task, to: &mut Task, item: &str) -> Result<(), String> {
     let at = source
         .items

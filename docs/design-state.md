@@ -1,6 +1,13 @@
 # Design proposal: state model, request lifecycle, dependencies, events
 
-(authored by agents unless marked 🧑; a proposal for the human to accept, change, or reject; nothing here is built)
+(authored by agents unless marked 🧑)
+
+current decision: the human answered yes to one request per open item,
+completion of human requests by email without approval, the editor shortcut,
+and markdown first with SQLite later (stored manager email ending `2566.txt`)
+
+implemented markdown stages, dependencies and event logging are described in
+`request-lifecycle.md`; the SQLite model below remains a future proposal
 
 sources: the human's words in `docs/vision.md` (`M/N:L` = email N, line L)
 

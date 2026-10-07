@@ -45,6 +45,7 @@ pub struct NewTask<'a> {
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
     pub as_manager: bool,
+    pub long_running: bool,
     pub email: Option<&'a str>,
     pub lines: Option<&'a str>,
 }
@@ -70,12 +71,14 @@ pub fn problems(
 /// Whether a task's record names an agent and something still runs there.
 pub fn has_live_agent(settings: &Settings, task: &Task) -> bool {
     // 🧑 "Make restarting a failed or stopped task on another tool work, keeping the task file and its open items"
-    task.status() != "done"
-        && task.address() != "retired"
-        && matches!(
-            omnigent::status(settings, task.address()).0,
-            "running" | "ready" | "stuck"
-        )
+    if task.status() == "done" || task.address() == "retired" {
+        return false;
+    }
+    match omnigent::status(settings, task.address()).0 {
+        "running" | "stuck" => true,
+        "ready" => task.field("agent_stopped") != Some("true"),
+        _ => false,
+    }
 }
 
 /// Read a pipe to its end on its own thread, so a long output cannot block the command while its end is awaited.
@@ -155,9 +158,22 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
         } else {
             work::new_task(start.name)
         };
+        let old = task.address().to_owned();
         work::record_start(&mut task, start.fields, &address, start.tool, start.record);
         store.save(&task)?;
         store.place(&task)?;
+        if !old.is_empty() && old != address {
+            for report in work::repointed(store.active()?, &old, &address) {
+                store.save(&report)?;
+            }
+            if old == settings::get(settings, "main_manager") {
+                let env = store.state_dir.join("env.toml");
+                let failed =
+                    |error: io::Error| format!("amh: cannot rewrite {}: {error}", env.display());
+                let text = fs::read_to_string(&env).map_err(failed)?;
+                taskfile::write(&env, &text.replace(&old, &address)).map_err(failed)?;
+            }
+        }
     }
     // 🧑 "Make the agent spawning script start the session and then inject the prompt, in 2 separate steps, and verify that it works"
     omnigent::send(settings, &address, &prompt).map_err(agent)?;
@@ -197,6 +213,7 @@ pub fn close_task(
     let task = {
         let _lock = store.lock()?;
         let mut task = store.load(name)?;
+        crate::requests::can_close(&task, &store.all()?)?;
         work::close(&mut task)?;
         store.save(&task)?;
         store.place(&task)?;
@@ -256,19 +273,6 @@ pub fn rotate(
         record: &record,
     };
     let new = start_agent(settings, store, &start)?;
-    {
-        let _lock = store.lock()?;
-        for report in work::repointed(store.active()?, &old, &new) {
-            store.save(&report)?;
-        }
-        if is_main {
-            let env = store.state_dir.join("env.toml");
-            let failed =
-                |error: io::Error| format!("amh: cannot rewrite {}: {error}", env.display());
-            let text = fs::read_to_string(&env).map_err(failed)?;
-            taskfile::write(&env, &text.replace(&old, &new)).map_err(failed)?;
-        }
-    }
     omnigent::stop(settings, &old).map_err(agent)?;
     Ok(new)
 }
@@ -281,6 +285,11 @@ fn given(value: Option<&str>) -> Option<&str> {
 /// Create or reuse a task file, launch its agent with the goal as its manager's request, and return the agent's address.
 pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<String, String> {
     let mut fields = work::start_fields(new.manager, new.as_manager);
+    if new.long_running
+        && let Some((_, status)) = fields.iter_mut().find(|(key, _)| key == "status")
+    {
+        *status = "long_running".to_owned();
+    }
     if store.root.join(new.name).exists() {
         let old = store.load(new.name)?;
         if has_live_agent(settings, &old) {

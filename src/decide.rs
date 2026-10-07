@@ -551,6 +551,55 @@ pub fn compress_due(
     }
 }
 
+/// The names of the config tables under `group`, e.g. the `NAME` of every `[job.NAME]`.
+pub fn table_names(settings: &BTreeMap<String, String>, group: &str) -> Vec<String> {
+    let mut names: Vec<String> = settings
+        .keys()
+        .filter_map(|key| key.strip_prefix(group)?.strip_prefix('.'))
+        .filter_map(|rest| Some(rest.rsplit_once('.')?.0.to_owned()))
+        .collect();
+    names.dedup();
+    names
+}
+
+/// A span such as `30s`, `15m`, `2h`, `1d` in seconds.
+pub fn span_s(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let unit = text.chars().last()?;
+    let number = text.strip_suffix(unit)?;
+    let each = match unit {
+        's' => 1,
+        'm' => 60,
+        'h' => 3600,
+        'd' => 86400,
+        _ => return None,
+    };
+    number
+        .parse::<u64>()
+        .ok()
+        .filter(|n| *n > 0)
+        .and_then(|n| n.checked_mul(each))
+}
+
+/// Whether a scheduled job runs now: `every_s` after its last run, or once `at_today_s` has passed and it has not run since.
+// 🧑 "allow some sort of scripts or commands that should be run like a cron job, but is tied to AMH server"
+/// A job never seen before runs at once when it repeats, and waits for its next time of day otherwise.
+pub fn job_due(
+    every_s: Option<u64>,
+    at_today_s: Option<u64>,
+    last_s: Option<u64>,
+    now_s: u64,
+) -> bool {
+    match (every_s, at_today_s, last_s) {
+        (Some(_), _, None) => true,
+        (Some(every), _, Some(last)) => now_s
+            .checked_sub(last)
+            .is_some_and(|elapsed| elapsed >= every),
+        (None, Some(at), Some(last)) => now_s >= at && last < at,
+        _ => false,
+    }
+}
+
 /// The emails that count toward compression: not the "pending item created/deleted" notices.
 // 🧑 "Pending-item created emails, and pending-item removed or deleted emails, are not countable manager mail."
 pub fn countable(sender: &str) -> bool {
@@ -1048,5 +1097,38 @@ mod tests {
             without_awaiting(awaiting, "t_a.md", "m-9.txt"),
             (awaiting.to_owned(), 0)
         );
+    }
+    #[test]
+    fn jobs_run_on_their_schedule() {
+        let settings: BTreeMap<String, String> = [
+            ("job.a.every", "15m"),
+            ("job.a.run", "x"),
+            ("job.b.at", "04:00"),
+            ("jobs", "no"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        assert_eq!(table_names(&settings, "job"), ["a", "b"]);
+        assert_eq!(
+            (
+                span_s("15m"),
+                span_s("2h"),
+                span_s("0m"),
+                span_s("m"),
+                span_s("5")
+            ),
+            (Some(900), Some(7200), None, None, None)
+        );
+        assert!(job_due(Some(900), None, None, 5));
+        assert!(!job_due(Some(900), None, Some(100), 999));
+        assert!(job_due(Some(900), None, Some(100), 1000));
+        assert!(!job_due(None, Some(500), None, 600));
+        assert!(job_due(None, Some(500), Some(400), 500));
+        assert!(!job_due(None, Some(500), Some(500), 600));
+        assert!(!job_due(None, Some(500), Some(400), 499));
+        assert_eq!(span_s("é"), None);
+        assert_eq!(span_s("18446744073709551615d"), None);
+        assert!(!job_due(Some(1), None, Some(u64::MAX), 0));
     }
 }

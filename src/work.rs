@@ -45,17 +45,28 @@ impl Problem {
 
 /// Whether a task's record says an agent should be working at its address.
 pub fn expects_agent(task: &Task) -> bool {
-    task.status() != "blocked" && task.address() != "retired"
+    task.status() != "blocked"
+        && task.address() != "retired"
+        && task.field("agent_stopped") != Some("true")
 }
 
 /// The problem of an active task whose agent is in `state`: gone, failed, stuck, or idle with open items.
 pub fn problem_of(task: &Task, state: &str) -> Option<Problem> {
     let waiting = task.status() == "long_running" && task.field("blocked_on").is_some();
+    let requests_waiting = crate::requests::read(task).is_ok_and(|requests| {
+        !task.items.is_empty()
+            && task.items.iter().all(|item| {
+                requests.iter().any(|r| {
+                    r.text == *item
+                        && (r.stage == crate::requests::Stage::Requested || !r.blockers.is_empty())
+                })
+            })
+    });
     match state {
         "missing" => Some(Problem::Missing),
         "error" => Some(Problem::Error),
         "stuck" => Some(Problem::Stuck),
-        "ready" if !task.items.is_empty() && !waiting => Some(Problem::Idle),
+        "ready" if !task.items.is_empty() && !waiting && !requests_waiting => Some(Problem::Idle),
         _ => None,
     }
 }
@@ -170,7 +181,8 @@ pub fn record_start(
     let session = address
         .strip_prefix(crate::omnigent::PREFIX)
         .unwrap_or(address);
-    task.fields.retain(|(key, _)| key != "session_id");
+    task.fields
+        .retain(|(key, _)| key != "session_id" && key != "agent_stopped");
     let placed = [("runat", address), ("tool", tool), ("session_id", session)];
     let fields = fields
         .iter()

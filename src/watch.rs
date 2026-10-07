@@ -216,6 +216,7 @@ fn ensure_guest_agent(settings: &Settings, store: &Store, address: &str) -> Resu
         model: None,
         effort: None,
         as_manager: false,
+        long_running: false,
         email: None,
         lines: None,
     };
@@ -361,6 +362,7 @@ fn deliver_block(
         return Ok(false);
     }
     let _lock = store.lock()?;
+    crate::actions::clear_stopped(store, &plan.target)?;
     let mut fresh = store.load(name)?;
     match decide::without_marker(&fresh.body, &block[0]) {
         Some(body) => {
@@ -642,6 +644,7 @@ pub fn run() -> u8 {
         reminded_s: BTreeMap::new(),
         last_nudge: None,
     };
+    let mut jobs = crate::jobs::Jobs::default();
     let mut last_flush: Option<Instant> = None;
     let mut last_compress: Option<Instant> = None;
     log("watcher started");
@@ -655,6 +658,12 @@ pub fn run() -> u8 {
         };
         let store = Store::new(&settings);
         watcher.take_in(&settings, &store);
+        let request_effects = store
+            .lock()
+            .and_then(|_lock| crate::actions::request_effects(&settings, &store));
+        if let Err(error) = request_effects {
+            log(&format!("request notifications failed: {error}"));
+        }
         let mut scanned = watcher.deliver_pending(&settings, &store);
         if scanned.is_ok()
             && watcher
@@ -677,6 +686,9 @@ pub fn run() -> u8 {
             for line in mail::flush_outbox(&settings, &store.state_dir) {
                 log(&line);
             }
+        }
+        for line in jobs.tick(&settings, &store) {
+            log(&line);
         }
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));

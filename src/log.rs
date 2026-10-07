@@ -8,7 +8,7 @@ use std::io::Write;
 use crate::settings;
 
 /// Who is calling: the agent's Omnigent session, else its tmux pane, else the login name.
-fn caller() -> String {
+pub fn caller() -> String {
     let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     if let Some(session) = set("OMNIGENT_RUNNER_PRIMARY_SESSION_ID") {
         format!("omnigent://{session}")
@@ -17,6 +17,23 @@ fn caller() -> String {
     } else {
         format!("user:{}", set("USER").unwrap_or_default())
     }
+}
+
+/// Append a structured domain event; unlike diagnostic action logging, report write failure.
+pub fn event(
+    folder: &std::path::Path,
+    kind: &str,
+    subject: &str,
+    data: serde_json::Value,
+) -> Result<(), String> {
+    fs::create_dir_all(folder).map_err(|e| format!("amh: cannot create event directory: {e}"))?;
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(folder.join("amh-events.jsonl"))
+        .map_err(|e| format!("amh: cannot open event log: {e}"))?;
+    writeln!(file, "{}", serde_json::json!({"time": chrono::Local::now().to_rfc3339(), "actor": caller(), "kind": kind, "subject": subject, "data": data}))
+        .map_err(|e| format!("amh: cannot append event: {e}"))
 }
 
 /// Append one line to `amh-actions.log` in the state folder; a failure to log never fails the action.

@@ -24,6 +24,7 @@ what a plugin can call today; every command prints plain text and exits non-zero
 - control
     - `amh task start NAME.md --dir DIR --prompt FILE [--tool claude|codex|cursor|antigravity] [--as-manager]`: prints the new agent's address
         - restarts failed or stopped agents on the selected tool, keeping task history and open items
+        - managed tasks follow the replacement address; restarting the main manager updates its configured address
         - stop running, idle, or waiting agents with `amh agent stop NAME.md` first
     - `amh agent stop WHO`; `amh task close NAME.md`
 - where things are
