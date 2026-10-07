@@ -592,6 +592,9 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     let counted: Vec<&mail::Header> = unread
         .iter()
         .filter(|header| decide::countable(&header.sender))
+        // The human manager: "the compression notice counts PB news and PB urgent emails (shown as '(no tag)'). The compression rules exclude them"
+        // Every email an agent sends through `amh` has a task tag, so an untagged one is not the human manager's to compress.
+        .filter(|header| mail::tag_of(&header.subject).is_some())
         .collect();
     let path = store.state_dir.join(COMPRESSED);
     let noted = fs::read_to_string(&path).unwrap_or_default();
@@ -611,11 +614,7 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     }
     let tags: Vec<String> = counted
         .iter()
-        .map(|header| {
-            mail::tag_of(&header.subject)
-                .unwrap_or("(no tag)")
-                .to_owned()
-        })
+        .filter_map(|header| mail::tag_of(&header.subject).map(str::to_owned))
         .collect();
     let task = store.load(name)?;
     omnigent::send(
