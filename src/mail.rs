@@ -568,24 +568,9 @@ impl Mailbox {
         if sender.contains(['"', '\\', '\r', '\n']) {
             return Err("invalid sender in unread mail search".to_owned());
         }
-        self.unseen_matching(sender, false)
-    }
-
-    /// Inbox emails from a configured sender, optionally including read notifications.
-    pub fn unseen_matching(
-        &mut self,
-        sender: &str,
-        include_read: bool,
-    ) -> Result<Vec<(String, Vec<u8>)>, String> {
-        if sender.contains(['"', '\\', '\r', '\n']) {
-            return Err("invalid sender in mail search".to_owned());
-        }
         let failed = |error: imap::Error| format!("reading unread mail failed: {error}");
         self.session.select("INBOX").map_err(failed)?;
-        let query = format!(
-            "{}FROM \"{sender}\"",
-            if include_read { "" } else { "UNSEEN " }
-        );
+        let query = format!("UNSEEN FROM \"{sender}\"");
         let uids = self.session.uid_search(query).map_err(failed)?;
         if uids.is_empty() {
             return Ok(Vec::new());
