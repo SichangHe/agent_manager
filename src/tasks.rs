@@ -181,6 +181,18 @@ pub fn add_note(task: &mut Task, text: &str) {
     task.note(text);
 }
 
+/// What to print after the last open item of a running worker task goes: finishing items never closes a task.
+// 🧑 "Fix these", on agent feedback: "Marking the open item done did not close the task, so its status remained running after completion."
+pub fn close_hint(task: &Task) -> &'static str {
+    let lasting = task.field("is_manager") == Some("true") || task.status() != "running";
+    match task.items.is_empty() && !lasting {
+        true => {
+            "You have no open items left and your task still says `running`. If the task is finished, close it now with `amh task close`; if you only wait for something, say what with `amh task status TASK blocked --on WHAT`.\n"
+        }
+        false => "",
+    }
+}
+
 /// The field that pins a task's row under one section of the task list.
 const PIN: &str = "listed_under";
 
@@ -506,6 +518,16 @@ mod tests {
         pin(&mut work, "low priority").unwrap();
         set_status(&mut work, "running", None).unwrap();
         assert_eq!(work.section(), "current:");
+    }
+
+    #[test]
+    fn the_last_item_done_asks_a_running_worker_to_close() {
+        let mut work = worker();
+        assert_eq!(close_hint(&work).is_empty(), !work.items.is_empty());
+        work.items.clear();
+        assert!(close_hint(&work).contains("amh task close"));
+        set_status(&mut work, "long_running", None).unwrap();
+        assert_eq!(close_hint(&work), "");
     }
 
     #[test]

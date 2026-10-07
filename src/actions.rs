@@ -468,7 +468,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
             tell_human(&settings, &task, need("subject"), &body, &replaces, &attach)?;
-            String::new()
+            match done.is_empty() {
+                true => String::new(),
+                false => tasks::close_hint(&task).to_owned(),
+            }
         }
         ("tell", "agent") => {
             let message = match (text("text"), text("file")) {
@@ -538,7 +541,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 Some(_) => "the human is not emailed, as they asked\n",
                 None => report_items(&settings, &store, &task, &[], &done)?,
             };
-            format!("removed {} open item(s)\n{hint}", done.len())
+            format!(
+                "removed {} open item(s)\n{hint}{}",
+                done.len(),
+                tasks::close_hint(&task)
+            )
         }
         ("todo", "replace") => {
             let _lock = store.lock()?;
