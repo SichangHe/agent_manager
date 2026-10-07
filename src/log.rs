@@ -12,11 +12,35 @@ pub fn caller() -> String {
     let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
     if let Some(session) = set("OMNIGENT_RUNNER_PRIMARY_SESSION_ID") {
         format!("omnigent://{session}")
+    } else if let Some(task) = task_caller() {
+        task
     } else if let Some(pane) = set("TMUX_PANE") {
         format!("tmux-pane:{pane}")
     } else {
-        format!("user:{}", set("USER").unwrap_or_default())
+        set("USER").map_or_else(
+            || format!("terminal:{}", std::process::id()),
+            |user| format!("user:{user}"),
+        )
     }
+}
+
+/// A caller that explicitly supplies its launch identity when the runner environment is absent.
+fn task_caller() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+    let named = args
+        .windows(2)
+        .find(|pair| pair[0] == "--task-file")
+        .map(|pair| pair[1].clone())
+        .or_else(|| {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix("--task-file=").map(str::to_owned))
+        })
+        .or_else(|| std::env::var("OMO_AGENT_TASK_FILE").ok())?;
+    let values = settings::load().ok()?;
+    let name = crate::work::task_name(&named);
+    let text = fs::read_to_string(settings::work_logs(&values).join(&name)).ok()?;
+    let task = crate::tasks::Task::parse(&name, &text).ok()?;
+    (!task.address().is_empty()).then(|| task.address().to_owned())
 }
 
 /// Append a structured domain event; unlike diagnostic action logging, report write failure.

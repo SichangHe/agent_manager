@@ -123,5 +123,6 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
     assert!(events.contains("request blocked"));
     assert!(events.contains("request moved"));
     assert!(events.contains("request resolved"));
+    assert!(events.contains("\"actor\":\"omnigent://h\""));
     Ok(())
 }

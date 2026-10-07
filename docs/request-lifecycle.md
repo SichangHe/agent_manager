@@ -41,6 +41,7 @@ dependencies and delivery
 
 observability
 - `amh-events.jsonl` records actor, time, event kind, request ID and data
+    - runner address, else explicit `--task-file` identity, else terminal or login name
     - successful request changes and agent-record status/address changes
     - `amh log TASK` includes matching domain events
 - `amh-actions.log` retains failed command diagnostics
