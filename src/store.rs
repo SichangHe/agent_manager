@@ -162,9 +162,9 @@ impl Store {
             let (to, mut events) = self.prepare(to)?;
             let (source, source_events) = self.prepare(source)?;
             events.extend(source_events);
-            let old = self.load(&source.name)?;
+            let mut old = self.load(&source.name)?;
             let remaining = requests::read(&source)?;
-            for request in requests::read(&old)? {
+            for request in requests::sync(&mut old)? {
                 if !remaining.iter().any(|record| record.id == request.id) {
                     events.push(log::event_value(
                         "request moved",
