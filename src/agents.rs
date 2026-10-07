@@ -153,7 +153,7 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
     .map_err(agent)?;
     {
         let _lock = store.lock()?;
-        let mut task = if store.root.join(start.name).exists() {
+        let mut task = if store.contains(start.name)? {
             store.load(start.name)?
         } else {
             work::new_task(start.name)
@@ -290,7 +290,7 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     {
         *status = "long_running".to_owned();
     }
-    if store.root.join(new.name).exists() {
+    if store.contains(new.name)? {
         let old = store.load(new.name)?;
         if has_live_agent(settings, &old) {
             return Err(format!(

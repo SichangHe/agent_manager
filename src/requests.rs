@@ -33,6 +33,7 @@ pub struct Request {
     pub stage: Stage,
     pub blockers: Vec<String>,
     pub evidence: String,
+    pub resolved_at: Option<String>,
 }
 
 /// Read records without silently discarding corrupt metadata.
@@ -78,13 +79,14 @@ pub fn read(task: &Task) -> Result<Vec<Request>, String> {
                 stage,
                 blockers,
                 evidence: text("evidence")?,
+                resolved_at: record["resolved_at"].as_str().map(str::to_owned),
             })
         })
         .collect()
 }
 
 pub fn write(task: &mut Task, requests: &[Request]) {
-    let records: Vec<Value> = requests.iter().map(|r| json!({"id": r.id, "text": r.text, "creator": r.creator, "source": r.source, "stage": r.stage.text(), "blockers": r.blockers, "evidence": r.evidence})).collect();
+    let records: Vec<Value> = requests.iter().map(|r| json!({"id": r.id, "text": r.text, "creator": r.creator, "source": r.source, "stage": r.stage.text(), "blockers": r.blockers, "evidence": r.evidence, "resolved_at":r.resolved_at})).collect();
     task.fields.retain(|(key, _)| key != KEY);
     task.fields
         .push((KEY.to_owned(), json!(records).to_string()));
@@ -129,6 +131,7 @@ pub fn sync(task: &mut Task) -> Result<Vec<Request>, String> {
             stage: Stage::Added,
             blockers: Vec::new(),
             evidence: String::new(),
+            resolved_at: None,
         });
     }
     write(task, &records);
@@ -168,6 +171,8 @@ pub fn finish(task: &mut Task, given: &str, evidence: &str) -> Result<Request, S
     } else {
         Stage::Requested
     };
+    request.resolved_at =
+        (request.stage == Stage::Resolved).then(|| chrono::Utc::now().to_rfc3339());
     let result = request.clone();
     if result.stage == Stage::Resolved {
         crate::tasks::remove_item(task, &result.text, evidence)?;
@@ -205,6 +210,7 @@ pub fn decide(
     } else {
         Stage::Added
     };
+    request.resolved_at = approve.then(|| chrono::Utc::now().to_rfc3339());
     if !approve {
         request.evidence = reason.to_owned();
     }

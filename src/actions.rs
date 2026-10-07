@@ -34,55 +34,71 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
 
 /// Commit dependency releases and delivery intents before attempting agent messages.
 pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String> {
-    let mut all = store.all()?;
-    let mut resolved = Vec::new();
-    for task in &mut all {
-        resolved.extend(
-            requests::sync(task)?
-                .into_iter()
-                .filter(|r| r.stage == requests::Stage::Resolved)
-                .map(|r| r.id),
-        );
-    }
-    for task in &mut all {
-        if requests::unblock(task, &resolved)? {
-            store.save(task)?;
+    let mut database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+    let through = database.latest_event_id()?;
+    if database.cursor("request_effects")? < through {
+        let mut all = store.all()?;
+        let mut resolved = Vec::new();
+        for task in &mut all {
+            resolved.extend(
+                requests::sync(task)?
+                    .into_iter()
+                    .filter(|r| r.stage == requests::Stage::Resolved)
+                    .map(|r| r.id),
+            );
         }
+        for task in &mut all {
+            if requests::unblock(task, &resolved)? {
+                store.save(task)?;
+            }
+        }
+        database.set_cursor("request_effects", through)?;
     }
     let mut failed = Vec::new();
     let mut awakened = Vec::new();
-    for task in &mut all {
-        let queued = requests::notifications(task)?;
-        for message in queued {
-            let to = message["to"]
-                .as_str()
-                .ok_or("amh: notification lacks recipient")?;
-            let text = message["text"]
-                .as_str()
-                .ok_or("amh: notification lacks text")?;
-            let delivered = agents::address_of(store, to)
-                .and_then(|address| omnigent::send(settings, &address, text).map(|()| address));
-            if let Err(error) = delivered {
-                crate::log::event(
-                    &store.state_dir,
-                    "message failed",
-                    &task.name,
-                    serde_json::json!({"to": to, "text": text, "error": error}),
-                )?;
-                failed.push(format!("{}: {error}", task.name));
-                continue;
-            }
-            if let Ok(address) = delivered {
-                awakened.push(address);
-            }
-            let mut remaining = requests::notifications(task)?;
-            if let Some(at) = remaining.iter().position(|queued| queued == &message) {
-                remaining.remove(at);
-            }
-            requests::set_notifications(task, remaining);
-            store.save(task)?;
-            crate::log::event(&store.state_dir, "message delivered", &task.name, message)?;
+    for message in database.pending_messages()? {
+        let to = message["target"]
+            .as_str()
+            .ok_or("amh: notification lacks recipient")?;
+        let text = message["text"]
+            .as_str()
+            .ok_or("amh: notification lacks text")?;
+        let source = message["source"]
+            .as_str()
+            .ok_or("amh: notification lacks owner")?;
+        let id = message["id"].as_i64().ok_or("amh: notification lacks ID")?;
+        let delivered = agents::address_of(store, to)
+            .and_then(|address| omnigent::send(settings, &address, text).map(|()| address));
+        if let Err(error) = delivered {
+            database.finish_message(id, false, &error)?;
+            crate::log::event(
+                &store.state_dir,
+                "message failed",
+                source,
+                serde_json::json!({"to": to, "text": text, "error": error}),
+            )?;
+            failed.push(format!("{source}: {error}"));
+            continue;
         }
+        if let Ok(address) = delivered {
+            awakened.push(address);
+        }
+        let mut task = store.load(source)?;
+        let mut remaining = requests::notifications(&task)?;
+        if let Some(at) = remaining
+            .iter()
+            .position(|queued| queued["to"] == to && queued["text"] == text)
+        {
+            remaining.remove(at);
+        }
+        requests::set_notifications(&mut task, remaining);
+        let event = crate::log::event_value(
+            "message delivered",
+            source,
+            serde_json::json!({"id":id,"to":to,"text":text}),
+        );
+        database.complete_message(id, &[(task.name.clone(), task.render())], &[event])?;
+        store.refresh_exports()?;
     }
     for address in awakened {
         clear_stopped(store, &address)?;
@@ -276,13 +292,8 @@ fn queue_from_human(
     )
     .map_err(|error| format!("amh: cannot store what you wrote: {error}"))?;
     // The file may have changed meanwhile, so the block is appended to its current text.
-    let current = fs::read_to_string(store.root.join(name))
-        .map_err(|error| format!("amh: cannot read {name}: {error}"))?;
-    taskfile::write(
-        &store.root.join(name),
-        &decide::queued(&current, &mail_name),
-    )
-    .map_err(|error| format!("amh: cannot write {name}: {error}"))?;
+    let current = store.load(name)?.render();
+    store.write(name, &decide::queued(&current, &mail_name))?;
     Ok(format!(
         "queued for the agent of {name}; the watcher delivers it within seconds\n"
     ))
@@ -420,6 +431,7 @@ fn short(values: &Value) -> Result<u8, String> {
                 let mut records = requests::sync(&mut task)?;
                 for request in &mut records {
                     request.stage = requests::Stage::Resolved;
+                    request.resolved_at = Some(chrono::Utc::now().to_rfc3339());
                     request.evidence = "the human closed the task with amh stop".to_owned();
                     request.blockers.clear();
                 }
@@ -465,9 +477,20 @@ fn short(values: &Value) -> Result<u8, String> {
                 &at,
                 n,
             ));
-            let events = read("amh-events.jsonl");
-            let matching: Vec<&str> = events
-                .lines()
+            let events = if store.state_dir.join("amh.sqlite3").exists() {
+                crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+                    .events()?
+                    .into_iter()
+                    .map(|event| event.to_string())
+                    .collect::<Vec<_>>()
+            } else {
+                read("amh-events.jsonl")
+                    .lines()
+                    .map(str::to_owned)
+                    .collect()
+            };
+            let matching: Vec<&String> = events
+                .iter()
                 .filter(|line| line.contains(name) || line.contains(&at))
                 .collect();
             for line in matching.iter().skip(matching.len().saturating_sub(n)) {
@@ -771,12 +794,6 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 .ok_or("amh: no such request ID")?;
             requests::transfer(&mut source, &mut to, id)?;
             store.save_transfer(&source, &to)?;
-            crate::log::event(
-                &store.state_dir,
-                "request moved",
-                id,
-                serde_json::json!({"from": source.name, "to": to.name}),
-            )?;
             String::new()
         }
         ("task", "start") => {

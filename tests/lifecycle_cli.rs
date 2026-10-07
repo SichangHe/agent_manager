@@ -60,6 +60,10 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
             ),
         )?;
     }
+    fs::write(
+        root.join("h.md"),
+        "---\nstatus: running\nrunat: omnigent://h\npending_task_items:\n  - 🧑 human request\n---\n",
+    )?;
     workspace.ok(&["todo", "add", "change A", "--task-file", "a"])?;
     workspace.ok(&["todo", "add", "change B", "--task-file", "b"])?;
     assert!(
@@ -101,10 +105,6 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
     let close = workspace.run(&["task", "close", "a"])?;
     assert!(!close.status.success());
     assert!(String::from_utf8_lossy(&close.stderr).contains("stay alive"));
-    fs::write(
-        root.join("h.md"),
-        "---\nstatus: running\nrunat: omnigent://h\npending_task_items:\n  - 🧑 human request\n---\n",
-    )?;
     workspace.ok(&[
         "todo",
         "done",
@@ -119,10 +119,15 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
     let h = fs::read_to_string(root.join("h.md"))?;
     assert!(h.contains("pending_task_items: []"));
     assert!(h.contains("stage\":\"resolved"));
-    let events = fs::read_to_string(workspace.0.join("state/amh-events.jsonl"))?;
+    let database = rusqlite::Connection::open(workspace.0.join("state/amh.sqlite3"))?;
+    let mut query = database.prepare("SELECT kind || ' ' || actor FROM events ORDER BY id")?;
+    let events = query
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
     assert!(events.contains("request blocked"));
     assert!(events.contains("request moved"));
     assert!(events.contains("request resolved"));
-    assert!(events.contains("\"actor\":\"omnigent://h\""));
+    assert!(events.contains("omnigent://h"));
     Ok(())
 }

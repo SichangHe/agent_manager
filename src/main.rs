@@ -3,7 +3,9 @@
 
 mod actions;
 mod agents;
+mod archive;
 mod cli;
+mod database;
 mod decide;
 mod guest;
 mod jobs;

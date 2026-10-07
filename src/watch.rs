@@ -61,6 +61,7 @@ struct Watcher {
     /// When each task's idle agent was last reminded, in seconds since `started`.
     reminded_s: BTreeMap<String, u64>,
     last_nudge: Option<Instant>,
+    pending_events: Option<i64>,
 }
 
 fn log(text: &str) {
@@ -165,8 +166,7 @@ fn take_in(
     let task = &decide::route(&tasks, main_manager, &mail.subject, &mail.body)?.name;
     write_private(stored, &decide::stored_mail(&mail.subject, &mail.body))
         .map_err(|error| format!("cannot write {}: {error}", stored.display()))?;
-    let file = fs::read_to_string(store.root.join(task))
-        .map_err(|error| format!("cannot read {task}: {error}"))?;
+    let file = store.load(task)?.render();
     store.write(task, &decide::queued(&file, name))?;
     Ok(task.clone())
 }
@@ -204,7 +204,7 @@ fn take_in_mail(settings: &Settings, store: &Store, mailbox: &mut Mailbox) -> Re
 // 🧑 "Make it lazy. Make the watcher start an agent. If there's no agent for that guest or reuse an agent if they already exist."
 fn ensure_guest_agent(settings: &Settings, store: &Store, address: &str) -> Result<(), String> {
     let name = guest::task_name(settings);
-    if store.root.join(&name).exists() && agents::has_live_agent(settings, &store.load(&name)?) {
+    if store.contains(&name)? && agents::has_live_agent(settings, &store.load(&name)?) {
         return Ok(());
     }
     let new = NewTask {
@@ -416,6 +416,11 @@ impl Watcher {
     ///
     /// A block in a task that has no agent (done or retired) goes to that task's manager, else to the main manager.
     fn deliver_pending(&mut self, settings: &Settings, store: &Store) -> Result<(), String> {
+        let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        let through = database.latest_event_id()?;
+        if self.pending_events == Some(through) && self.failed_at.is_empty() {
+            return Ok(());
+        }
         let tasks = store.all()?;
         let agent_at = decide::agent_addresses(&tasks);
         let retry = Duration::from_secs(decide::RETRY_S);
@@ -425,6 +430,7 @@ impl Watcher {
                 continue;
             }
             let plan = decide::plan(task, &agent_at, settings::get(settings, "main_manager"));
+            self.failed_at.remove(&task.name);
             for (_, block) in taskfile::pending_blocks(&task.body) {
                 if !block.is_empty() && !deliver_block(settings, store, task, &plan, &block)? {
                     self.failed_at.insert(task.name.clone(), Instant::now());
@@ -432,6 +438,12 @@ impl Watcher {
                 }
             }
         }
+        self.failed_at.retain(|name, _| {
+            tasks
+                .iter()
+                .any(|task| &task.name == name && task.body.contains(MARKER))
+        });
+        self.pending_events = Some(through);
         Ok(())
     }
 
@@ -643,10 +655,13 @@ pub fn run() -> u8 {
         failed_at: BTreeMap::new(),
         reminded_s: BTreeMap::new(),
         last_nudge: None,
+        pending_events: None,
     };
     let mut jobs = crate::jobs::Jobs::default();
     let mut last_flush: Option<Instant> = None;
     let mut last_compress: Option<Instant> = None;
+    let mut last_archive: Option<Instant> = None;
+    let mut last_commit: Option<Instant> = None;
     log("watcher started");
     loop {
         let settings = match settings::load() {
@@ -657,6 +672,35 @@ pub fn run() -> u8 {
             }
         };
         let store = Store::new(&settings);
+        if last_archive.is_none_or(|last| last.elapsed().as_secs() >= 86400) {
+            let archived = store.lock().and_then(|_lock| {
+                let mut database =
+                    crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+                crate::archive::archive_events(
+                    &mut database,
+                    &store.root.join("archive"),
+                    chrono::Utc::now(),
+                )?;
+                let count = crate::archive::archive_requests(&store, chrono::Utc::now())?;
+                store.refresh_exports()?;
+                Ok(count)
+            });
+            match archived {
+                Ok(_) => last_archive = Some(Instant::now()),
+                Err(error) => log(&format!("archival failed: {error}")),
+            }
+        }
+        if settings::get(&settings, "archive.commit") != "false"
+            && last_commit.is_none_or(|last| last.elapsed().as_secs() >= 3600)
+        {
+            match crate::archive::commit_markdown(&store.root) {
+                Ok(_) => last_commit = Some(Instant::now()),
+                Err(error) => {
+                    last_commit = Some(Instant::now());
+                    log(&format!("Markdown commit failed: {error}"));
+                }
+            }
+        }
         watcher.take_in(&settings, &store);
         let request_effects = store
             .lock()

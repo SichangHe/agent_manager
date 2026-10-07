@@ -7,6 +7,7 @@ description = "Agent manager helper: one command for agents and managers"
 [dependencies]
 clap = "4"
 serde_json = "1"
+rusqlite = "0.38"
 toml = "0.9"
 ureq = { version = "3", features = ["json"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }

@@ -50,6 +50,10 @@ pub fn event(
     subject: &str,
     data: serde_json::Value,
 ) -> Result<(), String> {
+    if folder.join("amh.sqlite3").exists() {
+        return crate::database::Database::open(&folder.join("amh.sqlite3"))?
+            .commit(&[], &[event_value(kind, subject, data)]);
+    }
     fs::create_dir_all(folder).map_err(|e| format!("amh: cannot create event directory: {e}"))?;
     let mut file = OpenOptions::new()
         .create(true)
@@ -58,6 +62,10 @@ pub fn event(
         .map_err(|e| format!("amh: cannot open event log: {e}"))?;
     writeln!(file, "{}", serde_json::json!({"time": chrono::Local::now().to_rfc3339(), "actor": caller(), "kind": kind, "subject": subject, "data": data}))
         .map_err(|e| format!("amh: cannot append event: {e}"))
+}
+
+pub fn event_value(kind: &str, subject: &str, data: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"time": chrono::Local::now().to_rfc3339(), "actor": caller(), "kind": kind, "subject": subject, "data": data})
 }
 
 /// Append one line to `amh-actions.log` in the state folder; a failure to log never fails the action.

@@ -186,6 +186,7 @@ pub fn command() -> Command {
             )
         )
         .subcommand(Command::new("manager").about("Main manager: the watcher, replacing a manager, and repository checks.").subcommand_required(true).arg_required_else_help(true)
+            .after_help("Storage: the first locked operation imports existing tasks and event history into amh.sqlite3 in AMH_STATE_DIR. SQLite then owns task state; Markdown is regenerated for reading. Use `amh edit TASK` to append human prompts. The watcher archives events and dated resolved requests after 30 days and commits work-log Markdown hourly. Set [archive] commit = false to disable automatic commits. Unknown legacy resolution dates start their retention window at migration.")
             .subcommand(Command::new("watchers").about("Restart the background watcher that takes in email and delivers pending work.")
             )
             .subcommand(Command::new("rotate").about("Replace a manager with a fresh one that takes over its task and reports.")

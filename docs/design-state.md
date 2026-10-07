@@ -6,8 +6,10 @@ current decision: the human answered yes to one request per open item,
 completion of human requests by email without approval, the editor shortcut,
 and markdown first with SQLite later (stored manager email ending `2566.txt`)
 
-implemented markdown stages, dependencies and event logging are described in
-`request-lifecycle.md`; the SQLite model below remains a future proposal
+implemented stages, dependencies and SQLite storage are described in
+`request-lifecycle.md`; the normalized table model below remains a design proposal
+the implemented database stores compatible task snapshots, events, durable
+message records and watcher cursors
 
 sources: the human's words in `docs/vision.md` (`M/N:L` = email N, line L)
 

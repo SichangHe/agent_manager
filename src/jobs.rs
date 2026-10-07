@@ -146,10 +146,9 @@ impl Jobs {
         let mut missing = Vec::new();
         for task in decide::table_names(settings, "keep") {
             let name = work::task_name(&task);
-            let alive = store.root.join(&name).exists()
-                && store
-                    .load(&name)
-                    .is_ok_and(|task| agents::has_live_agent(settings, &task));
+            let alive = store
+                .load(&name)
+                .is_ok_and(|task| agents::has_live_agent(settings, &task));
             if alive {
                 continue;
             }
@@ -169,7 +168,7 @@ impl Jobs {
 /// Start the agent of `[keep.TASK]` under the main manager and mark its task long-running.
 fn revive(settings: &Settings, store: &Store, table: &str, name: &str) -> Result<String, String> {
     let key = |field: &str| settings::get(settings, &format!("keep.{table}.{field}"));
-    let old = if store.root.join(name).exists() {
+    let old = if store.contains(name)? {
         Some(store.load(name)?)
     } else {
         None
