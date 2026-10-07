@@ -1,0 +1,31 @@
+# Zulip human messages
+(authored by agents unless marked 🧑)
+
+- 🧑 "Set it up s.t. we do Zulip instead of emails, and start messaging me with Zulip"
+- `human.transport = "zulip"` switches all human updates from SMTP to Zulip
+  - `zulip.human_id` identifies the human by numeric Zulip user ID
+  - `zulip.env_file` points to a private credential file
+    - `ZULIP_SITE`, `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY`
+    - keep credentials outside the repository with permission `0600`
+- 🧑 "Implement threading"
+  - `zulip.stream_id` selects a private channel shared only with the bot and human
+  - one topic per task tag preserves independent task threads
+  - replies route by topic without requiring a task header
+  - omitting the channel selects direct messages
+- each update starts with `[task_tag]`
+  - reply with that header or quote the message to address its task
+  - untagged replies go to the main manager
+  - incoming messages use the existing persisted task delivery queue
+  - `amh-zulip-cursor.txt` remembers the last captured message across restarts
+- `amh tell human --replaces zulip:ID` deletes the indicated bot message after the replacement is sent
+  - failed deletion remains queued for the watcher to retry
+  - a deletion failure does not hide the replacement's sent Message-ID
+- external Gmail intake continues
+  - SMTP outbox flushing pauses while Zulip is selected
+  - existing queued email remains available for deliberate migration
+- attachments upload to Zulip and appear as links in the private message
+  - retain the existing combined size limit of 20 MB
+- `amh-zulip-aliases.json` maps migrated email Message-IDs to `zulip:ID` for subsequent replacement
+- failed sends retain private payloads in `amh-zulip-pending`
+  - verify delivery before retrying because a lost network response may conceal a successful send
+  - these payloads are not automatically retried

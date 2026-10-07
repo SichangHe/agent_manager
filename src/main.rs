@@ -22,6 +22,7 @@ mod tasks;
 mod view;
 mod watch;
 mod work;
+mod zulip;
 
 use std::process::ExitCode;
 

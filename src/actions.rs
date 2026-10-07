@@ -205,6 +205,15 @@ fn tell_human(
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
+    if crate::zulip::enabled(settings) {
+        say(&format!("Zulip message sent.\nMessage-ID: {message_id}\n"));
+        if let Err(error) = crate::zulip::replace(settings, replaces) {
+            eprintln!(
+                "amh: replacement was sent; earlier message deletion failed: {error}. Do not send the replacement again."
+            );
+        }
+        return Ok(());
+    }
     mail::replace_queued(&settings::state_dir(), &message_id, replaces)
         .map_err(|error| format!("amh: {error}"))?;
     if mail::is_queued(&settings::state_dir(), &message_id) {

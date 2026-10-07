@@ -36,6 +36,8 @@ records, all under the work-log root (`work_logs` in `env.toml`)
 - name of a task file without `.md` = tag in email subjects `[tag]`
 
 modules
+- Zulip (`src/zulip.rs`): human updates, uploads, task-topic replies, replacement deletion, and retained email migration aliases
+    - transport settings and flow: `docs/zulip.md`
 - settings (`src/settings.rs`)
     - 🧑 "Separate config file, which should live in .config or something and get committed, and env, which should be in local state or something and include things like where the work_logs is"
     - `config.toml` in the config folder (`$AMH_CFG_DIR`, else `$XDG_CONFIG_HOME/amh`, else `~/.config/amh`): same on every machine, committed; optional

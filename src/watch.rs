@@ -209,6 +209,56 @@ fn take_in_mail(
     Ok(())
 }
 
+fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
+    let path = store.state_dir.join("amh-zulip-cursor.txt");
+    let mut cursor = fs::read_to_string(&path)
+        .unwrap_or_default()
+        .trim()
+        .parse::<u64>()
+        .unwrap_or(0);
+    for message in crate::zulip::incoming(settings, cursor)? {
+        let id = message["id"].as_u64().ok_or("Zulip message has no ID")?;
+        let body = message["content"]
+            .as_str()
+            .ok_or("Zulip message has no content")?;
+        let subject = if settings::get(settings, "zulip.stream_id").is_empty() {
+            crate::zulip::subject(body)
+        } else {
+            let topic = message["subject"]
+                .as_str()
+                .ok_or("Zulip stream message has no topic")?;
+            format!("[{topic}] Zulip message")
+        };
+        let name = format!("zulip-{id}.txt");
+        let stored = store.root.join("manager_mail").join(&name);
+        {
+            let _lock = store.lock()?;
+            let key = format!("zulip:{id}");
+            if !crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+                .received_mail(&key)?
+            {
+                let tasks = store.all()?;
+                let mut task = decide::route(
+                    &tasks,
+                    settings::get(settings, "main_manager"),
+                    &subject,
+                    &crate::zulip::own_text(body),
+                )?
+                .clone();
+                write_private(&stored, &decide::stored_mail(&subject, body))
+                    .map_err(|error| format!("cannot store Zulip message: {error}"))?;
+                task.body = decide::queued(&task.body, &name);
+                store.receive_mail(&key, &task)?;
+                log(&format!("Zulip {id} -> {}", task.name));
+            }
+        }
+        cursor = id;
+        write_private(&path, &cursor.to_string())
+            .map_err(|error| format!("cannot save Zulip cursor: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Commit the task notification and receipt before changing the external mailbox.
 fn route_mail(
     store: &Store,
@@ -849,6 +899,11 @@ pub fn run() -> u8 {
             }
         }
         watcher.take_in(&settings, &store);
+        if crate::zulip::enabled(&settings)
+            && let Err(error) = take_in_zulip(&settings, &store)
+        {
+            log(&format!("Zulip intake failed: {error}"));
+        }
         let request_effects = store
             .lock()
             .and_then(|_lock| crate::actions::request_effects(&settings, &store));
@@ -866,7 +921,9 @@ pub fn run() -> u8 {
                 .and_then(|()| watcher.nudge(&settings, &store))
                 .and_then(|()| chase_answers(&settings, &store));
         }
-        if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
+        if !crate::zulip::enabled(&settings)
+            && last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY)
+        {
             last_compress = Some(Instant::now());
             if let Err(error) = notify_compression(&settings, &store) {
                 log(&format!("mailbox compression check failed: {error}"));
@@ -874,6 +931,11 @@ pub fn run() -> u8 {
         }
         if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
             last_flush = Some(Instant::now());
+            if crate::zulip::enabled(&settings)
+                && let Err(error) = crate::zulip::replace(&settings, &[])
+            {
+                log(&format!("queued Zulip deletion failed: {error}"));
+            }
             for line in mail::flush_outbox(&settings, &store.state_dir) {
                 log(&line);
             }

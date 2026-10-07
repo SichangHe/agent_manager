@@ -446,6 +446,9 @@ pub fn is_limit(error: &str) -> bool {
 
 /// Send the queued emails, oldest first; returns one log line per email sent or refused. Stops at the sending limit.
 pub fn flush_outbox(settings: &BTreeMap<String, String>, state_dir: &Path) -> Vec<String> {
+    if crate::zulip::enabled(settings) {
+        return Vec::new();
+    }
     let mut lines = retry_replacements(state_dir);
     let entries = fs::read_dir(state_dir.join(OUTBOX)).into_iter().flatten();
     let mut waiting: Vec<PathBuf> = entries
@@ -763,6 +766,9 @@ pub fn send(
     sender: &str,
     attachments: &[PathBuf],
 ) -> Result<String, String> {
+    if crate::zulip::enabled(settings) {
+        return crate::zulip::send(settings, state_dir, tag, subject, body, sender, attachments);
+    }
     let found = Mailbox::agent(settings)
         .and_then(|mut mailbox| mailbox.search(ALL_MAIL, true, &thread_query(tag)))?;
     let plan = plan(tag, subject, &found)?;
