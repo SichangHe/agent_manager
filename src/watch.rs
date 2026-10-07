@@ -29,7 +29,7 @@ const COMPRESS_EVERY: Duration = Duration::from_secs(300);
 /// The record in the state folder of the last notice to compress: `EPOCH COUNT`.
 const COMPRESSED: &str = "amh-compress.txt";
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
-const AWAITING: &str = "amh-awaiting.txt";
+pub const AWAITING: &str = "amh-awaiting.txt";
 const TOLD_HUMAN: &str = "amh-told-human.txt";
 const PROBLEM_NOTICES: &str = "amh-problem-notices.txt";
 

@@ -351,7 +351,7 @@ pub fn chase(
                 task: name.to_owned(),
                 address: task.address().to_owned(),
                 text: format!(
-                    "The human's email manager_mail/{mail} was given to you at {given} and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing."
+                    "The human's email manager_mail/{mail} was given to you at {given} and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled {mail} --because 'THE HUMAN'S WORDS'` instead."
                 ),
                 row: format!("{at} {name} {mail} 1"),
             }
@@ -575,6 +575,22 @@ pub fn compress_text(count: usize, over: usize, tags: &[String]) -> String {
         "Mailbox compression is due: the human has {count} unread emails from agents, more than {over}; the pending-item notices are not counted. Compress the mailbox now. Unread per task tag: {}.",
         listed.join(", ")
     )
+}
+
+/// The waiting list without the rows of `task` for the stored human email `mail`, and how many rows went.
+// 🧑 "No need to email me for this, just handle it"
+pub fn without_awaiting(awaiting: &str, task: &str, mail: &str) -> (String, usize) {
+    let mail = mail.rsplit('/').next().unwrap_or(mail);
+    let waits = |row: &&str| {
+        let mut parts = row.split(' ');
+        (parts.nth(1), parts.next()) == (Some(task), Some(mail))
+    };
+    let kept: String = awaiting
+        .lines()
+        .filter(|row| !waits(row))
+        .map(|row| format!("{row}\n"))
+        .collect();
+    (kept, awaiting.lines().filter(waits).count())
 }
 
 #[cfg(test)]
@@ -863,7 +879,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "The human's email manager_mail/m-11.txt was given to you at T99095 and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing."
+            "The human's email manager_mail/m-11.txt was given to you at T99095 and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled m-11.txt --because 'THE HUMAN'S WORDS'` instead."
         );
         let reminded = "99095 t_sub.md m-11.txt 1";
         assert_eq!(chased(reminded, ""), [Chase::Keep(reminded.to_owned())]);
@@ -1018,6 +1034,19 @@ mod tests {
         assert_eq!(
             compress_text(18, 16, &tags),
             "Mailbox compression is due: the human has 18 unread emails from agents, more than 16; the pending-item notices are not counted. Compress the mailbox now. Unread per task tag: b 2, (no tag) 1, a 1."
+        );
+    }
+
+    #[test]
+    fn a_handled_human_email_is_no_longer_chased() {
+        let awaiting = "10 t_a.md m-1.txt 1\n20 t_b.md m-1.txt 0\n30 t_a.md m-2.txt 0\n";
+        assert_eq!(
+            without_awaiting(awaiting, "t_a.md", "manager_mail/m-1.txt"),
+            ("20 t_b.md m-1.txt 0\n30 t_a.md m-2.txt 0\n".to_owned(), 1)
+        );
+        assert_eq!(
+            without_awaiting(awaiting, "t_a.md", "m-9.txt"),
+            (awaiting.to_owned(), 0)
         );
     }
 }

@@ -466,6 +466,35 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let theirs = unread.iter().filter(|header| header.is_own());
             theirs.map(|header| header.listed() + "\n").collect()
         }
+        ("mail", "handled") => {
+            let _lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let path = store.state_dir.join(watch::AWAITING);
+            let (kept, n) = decide::without_awaiting(
+                &fs::read_to_string(&path).unwrap_or_default(),
+                &task.name,
+                need("mail"),
+            );
+            if n == 0 {
+                return Err(format!(
+                    "amh: no email {} of the human is waiting for an answer from {}",
+                    need("mail"),
+                    task.name
+                ));
+            }
+            taskfile::write(&path, &kept)
+                .map_err(|error| format!("amh: cannot update the waiting list: {error}"))?;
+            tasks::add_note(
+                &mut task,
+                &format!(
+                    "handled the human's email {} without emailing, because the human wrote: {}",
+                    need("mail"),
+                    need("because")
+                ),
+            );
+            store.save(&task)?;
+            "noted; you will not be reminded to answer that email\n".to_owned()
+        }
         ("manager", "watchers") => {
             let restarted = systemctl(&["restart", UNIT])?;
             return match restarted {
