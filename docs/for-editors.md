@@ -23,6 +23,8 @@ what a plugin can call today; every command prints plain text and exits non-zero
     - `amh agent view WHO [--read-only]`: attaches the calling terminal to the agent's own tmux terminal; needs a real terminal, e.g. a terminal buffer
 - control
     - `amh task start NAME.md --dir DIR --prompt FILE [--tool claude|codex|cursor|antigravity] [--as-manager]`: prints the new agent's address
+        - restarts failed or stopped agents on the selected tool, keeping task history and open items
+        - stop running, idle, or waiting agents with `amh agent stop NAME.md` first
     - `amh agent stop WHO`; `amh task close NAME.md`
 - where things are
     - the work-log root and other machine settings: `env.toml` in `$AMH_STATE_DIR`, else `$XDG_STATE_HOME/amh`, else `~/.local/state/amh`; key `work_logs`

@@ -69,9 +69,13 @@ pub fn problems(
 
 /// Whether a task's record names an agent and something still runs there.
 pub fn has_live_agent(settings: &Settings, task: &Task) -> bool {
+    // 🧑 "Make restarting a failed or stopped task on another tool work, keeping the task file and its open items"
     task.status() != "done"
         && task.address() != "retired"
-        && omnigent::status(settings, task.address()).0 != "missing"
+        && matches!(
+            omnigent::status(settings, task.address()).0,
+            "running" | "ready" | "stuck"
+        )
 }
 
 /// Read a pipe to its end on its own thread, so a long output cannot block the command while its end is awaited.
@@ -276,6 +280,7 @@ fn given(value: Option<&str>) -> Option<&str> {
 
 /// Create or reuse a task file, launch its agent with the goal as its manager's request, and return the agent's address.
 pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<String, String> {
+    let mut fields = work::start_fields(new.manager, new.as_manager);
     if store.root.join(new.name).exists() {
         let old = store.load(new.name)?;
         if has_live_agent(settings, &old) {
@@ -284,6 +289,13 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
                 new.name,
                 old.address()
             ));
+        }
+        if old.status() == "long_running" {
+            for (key, value) in &mut fields {
+                if key == "status" {
+                    *value = "long_running".to_owned();
+                }
+            }
         }
     }
     let tool = given(new.tool).unwrap_or(work::default_tool(new.as_manager));
@@ -319,7 +331,7 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
         store,
         &Start {
             name: new.name,
-            fields: &work::start_fields(new.manager, new.as_manager),
+            fields: &fields,
             tool,
             model: given(new.model).unwrap_or(&model),
             effort: given(new.effort).unwrap_or(&effort),

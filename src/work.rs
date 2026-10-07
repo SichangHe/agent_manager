@@ -166,6 +166,7 @@ pub fn record_start(
     tool: &str,
     record: &str,
 ) {
+    let persistent = task.status() == "long_running";
     let session = address
         .strip_prefix(crate::omnigent::PREFIX)
         .unwrap_or(address);
@@ -180,7 +181,7 @@ pub fn record_start(
             None => task.fields.push((key.to_owned(), value.to_owned())),
         }
     }
-    if task.status() != "blocked" {
+    if task.status() != "blocked" && !(persistent && task.status() == "long_running") {
         task.fields.retain(|(key, _)| key != "blocked_on");
     }
     let before = if task.body.trim().is_empty() {
@@ -604,6 +605,32 @@ pub mod tests {
         record_start(&mut blocked, &[], "omnigent://s3", "codex", "(replaced)\n");
         assert_eq!(blocked.field("blocked_on"), Some("human"));
         assert_eq!(blocked.status(), "blocked");
+        let mut standing = task(
+            "standing.md",
+            &[
+                ("status", "long_running"),
+                ("blocked_on", "standing role: waits for requests"),
+            ],
+            &["human request"],
+            "history\n",
+        );
+        let mut fields = start_fields("omnigent://m", false);
+        if let Some((_, status)) = fields.iter_mut().find(|(key, _)| key == "status") {
+            *status = "long_running".to_owned();
+        }
+        record_start(
+            &mut standing,
+            &fields,
+            "omnigent://s4",
+            "codex",
+            "handoff\n",
+        );
+        assert_eq!(
+            standing.field("blocked_on"),
+            Some("standing role: waits for requests")
+        );
+        assert_eq!(standing.items, ["human request"]);
+        assert_eq!(standing.body, "history\n\nhandoff\n");
     }
 
     const MAIN: &str = "omnigent://main";
