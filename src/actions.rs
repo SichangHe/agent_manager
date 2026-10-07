@@ -616,7 +616,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             String::new()
         }
         ("task", "check") => {
-            let findings = tasks::check(&store.list()?, &store.listed()?);
+            let findings = tasks::check(&store.list()?, &store.all()?);
             say(&findings
                 .iter()
                 .map(|finding| format!("{finding}\n"))

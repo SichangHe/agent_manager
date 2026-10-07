@@ -265,7 +265,10 @@ pub fn with_changes(body: &str, changes: &str) -> String {
 
 /// Every disagreement between the task list and the task files that belong in it: the active ones and the pinned ones.
 // 🧑 "Maybe we should have a validation script that agents should run after editing task file/TODO file?"
-pub fn check(list: &str, active: &[Task]) -> Vec<String> {
+pub fn check(list: &str, all: &[Task]) -> Vec<String> {
+    let shown = |task: &&Task| task.is_active() || task.pinned().is_some();
+    let active: Vec<Task> = all.iter().filter(shown).cloned().collect();
+    let active = active.as_slice();
     let mut rows: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
     let mut section = String::new();
     for row in list.lines() {
@@ -309,7 +312,12 @@ pub fn check(list: &str, active: &[Task]) -> Vec<String> {
     }
     // 🧑 "You have current tasks in \"previous\" in TODO.md ... Act to prevent that in the future"
     for (name, placed) in &rows {
-        let open = placed.iter().any(|(section, _)| section != "previous:");
+        // 🧑 "Write done everything that got paused into a file in work_logs and put in low priority"
+        // So a plain document, which is no task file, may be listed outside `current:`.
+        let is_task = all.iter().any(|task| task.name == *name);
+        let open = placed
+            .iter()
+            .any(|(section, _)| section == "current:" || (is_task && section != "previous:"));
         if open && !active.iter().any(|task| task.name == *name) {
             findings.push(format!(
                 "{name}: listed as open work in TODO.md but it is done or not a task file"
@@ -476,6 +484,21 @@ mod tests {
         assert_eq!(done.section(), "low priority:");
         let list = "current:\n\nlow priority:\nt_done.md x\n\nprevious:\n";
         assert_eq!(check(list, &[done.clone()]), [""; 0]);
+        let plain = "current:\n\nlow priority:\nnotes.md\n\nprevious:\n";
+        assert_eq!(check(plain, &[]), [""; 0]);
+        assert_eq!(
+            check(
+                &plain.replace("notes", "t_done"),
+                &[task(
+                    "t_done.md",
+                    &[("status", "done"), ("runat", "x")],
+                    &[],
+                    ""
+                )]
+            )
+            .len(),
+            1
+        );
         assert!(pin(&mut done, "later").is_err());
         assert_eq!(pin(&mut done, "auto"), Ok(()));
         assert_eq!(done.section(), "previous:");
