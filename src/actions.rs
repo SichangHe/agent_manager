@@ -212,12 +212,7 @@ fn tell_human(
                 "amh: replacement was sent; earlier message deletion failed: {error}. Do not send the replacement again."
             );
         }
-        match crate::zulip::consolidation_reminder(
-            settings,
-            &settings::state_dir(),
-            task.tag(),
-            &message_id,
-        ) {
+        match crate::zulip::consolidation_reminder(settings, task.tag(), &message_id) {
             Ok(reminder) if !reminder.is_empty() => say(&reminder),
             Ok(_) => {}
             Err(error) => eprintln!(

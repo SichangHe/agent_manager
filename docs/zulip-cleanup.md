@@ -1,27 +1,29 @@
 # Zulip cleanup
 (authored by agents unless marked 🧑)
 
-- 🧑 “Implement both. Make sane decisions.”
-- daily watcher pass; `zulip.cleanup_days` defaults to 30
+- 🧑 “Don't back up.”
+- 🧑 “Make sure this cleanup is script-driven and uses no agents in its normal path”
+- unattended daily watcher pass with direct API requests
+  - no agents, downloads, or backups
+  - `zulip.cleanup_days` defaults to 30
   - 0 disables cleanup
   - at most 500 messages and 20 uploads per pass
 - messages: configured AMH stream, bot sender, completed task, no open requests
   - human must appear in read receipts
   - missing/private/unavailable receipt preserves message
   - pagination wraps after reaching recent messages
-  - archive linked bot uploads before message deletion; Zulip automatically deletes last-reference uploads
-  - unknown/other-user upload links or unavailable bytes preserve the message
+  - final task check and deletion share the task-store lock
+  - Zulip automatically deletes last-reference uploads
+  - unknown/other-user upload links preserve the message
 - uploads: bot uploads with no message references, older than retention period
   - configured bot is dedicated to AMH; other users’ uploads are inaccessible
   - uncertain-send payload references preserved
   - current and legacy API reference/timestamp schemas supported
-  - archive bytes and metadata, check byte count, recheck references before deletion
-  - redirects retained; credentials never follow redirects
+  - recheck references before deletion
   - persisted upload cursor prevents failures starving later uploads
-- archive: private files under local state `zulip-archive`
-  - message JSON, upload JSON and bytes written and synced before deletion
-  - linked-upload metadata stored separately for each message
-  - conflicting existing archive stops cleanup
+- bounded message/upload scans have separate 15-second budgets
+  - persisted cursor files under local state
+  - malformed cursors restart safely
 - sources
   - Zulip [read receipts](https://zulip.com/api/get-read-receipts): “IDs of users who have marked the target message as read and whose read status is available to the current user”
   - Zulip [attachments](https://zulip.com/api/get-attachments): “Fetch metadata on files uploaded by the requesting user”

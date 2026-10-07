@@ -23,7 +23,7 @@
 - after sending, the caller receives a consolidation reminder for earlier retained bot updates in the same task
   - enabled by default; `zulip.consolidation_reminder = false` disables this check
   - checks up to 100 recent messages; direct messages additionally require the exact task header
-  - preserves their IDs and full contents in a private local JSON file
+  - shows their IDs; agents read their contents in the task topic before replacing them
   - retained messages do not establish whether the human read them
   - consolidate still-pending details and all open requests in the next useful update, then explicitly replace superseded IDs
   - never automatically summarizes or deletes messages; human messages are excluded
