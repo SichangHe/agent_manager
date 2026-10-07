@@ -53,6 +53,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
                 .arg(Arg::new("text").required(false).value_name("TEXT").help("the message"))
                 .arg(Arg::new("file").long("file").help("file holding the message, instead of TEXT"))
+                .arg(Arg::new("from").long("from").value_name("NAME").help("only for a script that is no agent, e.g. a cron job: its name, shown to the agent as the sender"))
             )
             .subcommand(Command::new("guest").about("The guest agent only: answer a guest email; it goes to the guest alone.")
                 .arg(Arg::new("mail").long("mail").required(true).value_name("FILE.txt").help("name of the stored guest email being answered"))

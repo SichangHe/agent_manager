@@ -477,7 +477,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 _ => return Err("amh: give the message as TEXT or as --file, not both".to_owned()),
             };
             let to = agents::address_of(&store, need("who"))?;
-            let message = work::envelope(&omnigent::own_address()?, &message);
+            // 🧑 "allow some sort of scripts or commands that should be run like a cron job, but is tied to AMH server"
+            // Until that exists, a script that is no agent names itself with --from.
+            let from = match (omnigent::own_address(), text("from")) {
+                (Ok(address), _) => address,
+                (Err(_), Some(script)) => format!("script {script}"),
+                (Err(_), None) => {
+                    return Err("amh: cannot tell which agent is calling; a script that is no agent passes --from NAME".to_owned());
+                }
+            };
+            let message = work::envelope(&from, &message);
             omnigent::send(&settings, &to, &message).map_err(failed)?;
             String::new()
         }
