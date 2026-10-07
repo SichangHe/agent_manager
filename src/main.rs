@@ -23,6 +23,7 @@ mod view;
 mod watch;
 mod work;
 mod zulip;
+mod zulip_cleanup;
 
 use std::process::ExitCode;
 

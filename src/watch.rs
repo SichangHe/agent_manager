@@ -858,6 +858,7 @@ pub fn run() -> u8 {
     let mut last_flush: Option<Instant> = None;
     let mut last_compress: Option<Instant> = None;
     let mut last_archive: Option<Instant> = None;
+    let mut last_zulip_cleanup: Option<Instant> = None;
     let mut last_commit: Option<Instant> = None;
     log("watcher started");
     loop {
@@ -942,6 +943,15 @@ pub fn run() -> u8 {
         }
         for line in jobs.tick(&settings, &store) {
             log(&line);
+        }
+        if crate::zulip::enabled(&settings)
+            && last_zulip_cleanup.is_none_or(|last| last.elapsed().as_secs() >= 86400)
+        {
+            last_zulip_cleanup = Some(Instant::now());
+            match crate::zulip_cleanup::run(&settings, &store) {
+                Ok(summary) => log(&summary),
+                Err(error) => log(&format!("Zulip cleanup failed: {error}")),
+            }
         }
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));

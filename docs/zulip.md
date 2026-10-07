@@ -20,6 +20,13 @@
 - `amh tell human --replaces zulip:ID` deletes the indicated bot message after the replacement is sent
   - failed deletion remains queued for the watcher to retry
   - a deletion failure does not hide the replacement's sent Message-ID
+- after sending, the caller receives a consolidation reminder for earlier retained bot updates in the same task
+  - enabled by default; `zulip.consolidation_reminder = false` disables this check
+  - checks up to 100 recent messages; direct messages additionally require the exact task header
+  - preserves their IDs and full contents in a private local JSON file
+  - retained messages do not establish whether the human read them
+  - consolidate still-pending details and all open requests in the next useful update, then explicitly replace superseded IDs
+  - never automatically summarizes or deletes messages; human messages are excluded
 - external Gmail intake continues
   - SMTP outbox flushing pauses while Zulip is selected
   - existing queued email remains available for deliberate migration

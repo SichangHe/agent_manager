@@ -12,7 +12,7 @@ pub fn enabled(settings: &Settings) -> bool {
     settings::get(settings, "human.transport") == "zulip"
 }
 
-fn credentials(settings: &Settings) -> Result<Settings, String> {
+pub(crate) fn credentials(settings: &Settings) -> Result<Settings, String> {
     let path = settings::get(settings, "zulip.env_file");
     let text = fs::read_to_string(path)
         .map_err(|error| format!("cannot read Zulip credentials: {error}"))?;
@@ -37,13 +37,143 @@ fn credentials(settings: &Settings) -> Result<Settings, String> {
     Ok(values)
 }
 
-fn api(
+pub(crate) fn api(
     settings: &Settings,
     method: &str,
     path: &str,
     fields: &[(&str, String)],
 ) -> Result<Value, String> {
     request(settings, method, path, fields, None)
+}
+
+/// Download an upload without sending credentials outside the configured origin.
+pub(crate) fn download(settings: &Settings, path: &str, max_bytes: u64) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let values = credentials(settings)?;
+    let site = settings::get(&values, "ZULIP_SITE").trim_end_matches('/');
+    if !site.starts_with("https://")
+        || !path.starts_with("/user_uploads/")
+        || path.contains(['?', '#'])
+    {
+        return Err("Zulip download requires a same-origin upload path".to_owned());
+    }
+    let auth = STANDARD.encode(format!(
+        "{}:{}",
+        settings::get(&values, "ZULIP_BOT_EMAIL"),
+        settings::get(&values, "ZULIP_BOT_API_KEY")
+    ));
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(30)))
+        .build()
+        .into();
+    let mut response = agent
+        .get(format!("{site}{path}"))
+        .header("Authorization", &format!("Basic {auth}"))
+        .call()
+        .map_err(|error| format!("Zulip download failed: {error}"))?;
+    if response.status().as_u16() != 200 {
+        return Err(format!("Zulip download returned {}", response.status()));
+    }
+    let mut bytes = Vec::new();
+    response
+        .body_mut()
+        .as_reader()
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("cannot read Zulip upload: {error}"))?;
+    if bytes.len() as u64 > max_bytes {
+        return Err("Zulip upload exceeds archive size limit".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// Prompt for deliberate consolidation; retained messages are not evidence of human unread state.
+// 🧑 "Do agents get notification to compress their prior julip messages when sending messages and there are existing pending things." "Implement both. Make sane decisions."
+pub fn consolidation_reminder(
+    settings: &Settings,
+    state: &Path,
+    tag: &str,
+    current: &str,
+) -> Result<String, String> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if settings::get(settings, "zulip.consolidation_reminder") == "false" {
+        return Ok(String::new());
+    }
+    let bot = api(settings, "GET", "users/me", &[])?["user_id"]
+        .as_u64()
+        .ok_or("Zulip profile has no user ID")?;
+    let stream = settings::get(settings, "zulip.stream_id");
+    let mut narrow = vec![json!({"operator":"sender","operand":bot})];
+    if stream.is_empty() {
+        let human: u64 = settings::get(settings, "zulip.human_id")
+            .parse()
+            .map_err(|_| "invalid zulip.human_id")?;
+        narrow.push(json!({"operator":"dm","operand":human}));
+    } else {
+        let stream: u64 = stream.parse().map_err(|_| "invalid zulip.stream_id")?;
+        narrow.push(json!({"operator":"stream","operand":stream}));
+        narrow.push(json!({"operator":"topic","operand":tag}));
+    }
+    let result = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "100".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", Value::Array(narrow).to_string()),
+        ],
+    )?;
+    let messages = result["messages"]
+        .as_array()
+        .ok_or("Zulip response has no messages")?;
+    let prior = retained_updates(messages, bot, tag, current);
+    if prior.is_empty() {
+        return Ok(String::new());
+    }
+    let folder = state.join("amh-zulip-consolidation");
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&folder)
+        .map_err(|error| error.to_string())?;
+    let path = folder.join(format!("{}.json", current.trim_start_matches("zulip:")));
+    fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(Value::Array(prior.clone()).to_string().as_bytes()))
+        .map_err(|error| format!("cannot preserve consolidation context: {error}"))?;
+    let ids: Vec<String> = prior
+        .iter()
+        .filter_map(|message| message["id"].as_u64().map(|id| format!("zulip:{id}")))
+        .collect();
+    Ok(format!(
+        "Earlier retained bot updates for this task (up to 100 recent messages checked): {}. Full text: {}. This does not establish whether the human read them. If they still describe pending work, consolidate their relevant details and all open requests into your next update; use --replaces for superseded IDs after preserving their content. Human messages are never consolidation candidates. Do not resend only to satisfy this reminder.",
+        ids.join(", "),
+        path.display()
+    ))
+}
+
+fn retained_updates(messages: &[Value], bot: u64, tag: &str, current: &str) -> Vec<Value> {
+    messages
+        .iter()
+        .filter(|message| {
+            message["sender_id"].as_u64() == Some(bot)
+                && message["id"]
+                    .as_u64()
+                    .is_some_and(|id| format!("zulip:{id}") != current)
+                && message["content"]
+                    .as_str()
+                    .is_some_and(|body| body.starts_with(&format!("[{tag}] ")))
+        })
+        .cloned()
+        .collect()
 }
 
 fn request(
@@ -349,6 +479,66 @@ pub fn own_text(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn disabled_consolidation_needs_no_credentials() -> Result<(), String> {
+        let settings = Settings::from([(
+            "zulip.consolidation_reminder".to_owned(),
+            "false".to_owned(),
+        )]);
+        assert_eq!(
+            consolidation_reminder(&settings, Path::new("/unused"), "task", "zulip:1")?,
+            ""
+        );
+        Ok(())
+    }
+    #[test]
+    #[ignore = "reads the configured live Zulip account without sending messages"]
+    fn live_consolidation_reminder() -> Result<(), String> {
+        let settings = settings::load()?;
+        let state =
+            std::env::temp_dir().join(format!("amh-zulip-reminder-test-{}", std::process::id()));
+        let result = consolidation_reminder(&settings, &state, "amh_support_codex", "zulip:0");
+        let _ = fs::remove_dir_all(&state);
+        let reminder = result?;
+        assert!(reminder.contains("Full text:"));
+        Ok(())
+    }
+    #[test]
+    #[ignore = "downloads an existing bot upload without deleting it"]
+    fn live_upload_download() -> Result<(), String> {
+        let settings = settings::load()?;
+        let uploads = api(&settings, "GET", "attachments", &[])?;
+        let upload = uploads["attachments"]
+            .as_array()
+            .ok_or("attachments missing")?
+            .iter()
+            .find(|upload| {
+                upload["size"]
+                    .as_u64()
+                    .is_some_and(|size| size < 1024 * 1024)
+            })
+            .ok_or("no small attachment available")?;
+        let path = upload["path_id"]
+            .as_str()
+            .ok_or("attachment path missing")?;
+        let bytes = download(&settings, &format!("/user_uploads/{path}"), 1024 * 1024)?;
+        assert_eq!(Some(bytes.len() as u64), upload["size"].as_u64());
+        Ok(())
+    }
+    #[test]
+    fn consolidation_keeps_only_prior_bot_updates_for_exact_task() {
+        let messages = vec![
+            json!({"id":1,"sender_id":7,"content":"[task] pending decision"}),
+            json!({"id":2,"sender_id":8,"content":"[task] human reply"}),
+            json!({"id":3,"sender_id":7,"content":"[task_other] other task"}),
+            json!({"id":4,"sender_id":7,"content":"[task] just sent"}),
+            json!({"sender_id":7,"content":"[task] malformed"}),
+        ];
+        assert_eq!(
+            retained_updates(&messages, 7, "task", "zulip:4"),
+            vec![messages[0].clone()]
+        );
+    }
     #[test]
     fn direct_and_quoted_task_replies_route() {
         assert_eq!(
