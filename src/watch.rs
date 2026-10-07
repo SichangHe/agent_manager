@@ -311,7 +311,7 @@ fn attempt(settings: &Settings, task: &Task, plan: &Plan, text: &str) -> Outcome
     let (state, evidence) = omnigent::status(settings, &plan.target);
     // A missing or stuck agent reads no messages, so its mail goes to its manager.
     let sent = match state {
-        "missing" | "stuck" => Err(format!("the agent is {state}: {evidence}")),
+        "missing" | "stuck" | "error" => Err(format!("the agent is {state}: {evidence}")),
         _ => omnigent::send(settings, &plan.target, text),
     };
     let Err(error) = sent else {

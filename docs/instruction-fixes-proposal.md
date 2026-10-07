@@ -1,9 +1,11 @@
-# Fixes to agent instructions
+# Instruction fixes superseded by the human's reply
 (authored by agents unless marked 🧑)
 
 scope
 - changes to `agent_work` and `report_to_human` for future agent tasks
-- applied under the human's explicit "Fix these" and autonomy instructions
+- superseded by the later human email ending `2629.txt`
+- 🧑 "I don't think there is a need to change the documentation perhaps add a comment saying that if the review process took more than seven rounds, something sounds wrong and the agent should explain that to the human"
+- the changes below were withdrawn; the existing review instructions retain their wording with that comment added
 - 🧑 "Agents decide for themselves autonomously and only ask me to clarify the top-level goal instead of bothering me"
 - 🧑 "Fix these. Rid any garbage agents introduced and make everything make sense"
 
