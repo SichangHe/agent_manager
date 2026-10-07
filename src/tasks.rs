@@ -52,11 +52,23 @@ impl Task {
         ["running", "long_running", "blocked"].contains(&self.status())
     }
 
+    /// The task-list section the task is pinned under, whatever its status.
+    // 🧑 "put Teamtype in low priority" and "restore the HANDBOOK.md paper review to human pending", both for done tasks.
+    pub fn pinned(&self) -> Option<&'static str> {
+        let under = self.field(PIN)?;
+        SECTIONS
+            .into_iter()
+            .find(|section| section.trim_end_matches(':') == under)
+    }
+
     /// The task-list section the task belongs in.
     // 🧑 "None of the currently listed as human pending tasks is actually pending on the human."
     // 🧑 "Should be something they are blocked on, not someone, e.g. human reviewing a file."
     // So a blocker that starts with `human` and then says what the human is to do counts as waiting on the human.
     pub fn section(&self) -> &'static str {
+        if let Some(pinned) = self.pinned() {
+            return pinned;
+        }
         let waits_on_human = self.status() == "blocked"
             && self
                 .field("blocked_on")
@@ -169,7 +181,23 @@ pub fn add_note(task: &mut Task, text: &str) {
     task.note(text);
 }
 
-/// Set the status and what a blocked task waits for.
+/// The field that pins a task's row under one section of the task list.
+const PIN: &str = "listed_under";
+
+/// Pin the task's row under `section` of the task list (a heading without its colon), or unpin it with `auto`.
+pub fn pin(task: &mut Task, section: &str) -> Result<(), String> {
+    let wanted = section.trim().trim_end_matches(':').to_lowercase();
+    task.fields.retain(|(key, _)| key != PIN);
+    if wanted == "auto" {
+        return Ok(());
+    }
+    task.fields.push((PIN.to_owned(), wanted));
+    task.pinned().map(drop).ok_or_else(|| {
+        format!("amh: no section `{section}`; use current, 'human pending', 'low priority', previous, or auto")
+    })
+}
+
+/// Set the status and what a blocked task waits for; a status change unpins the task's row.
 pub fn set_status(task: &mut Task, status: &str, blocked_on: Option<&str>) -> Result<(), String> {
     let waits = blocked_on.is_some_and(|on| !on.is_empty());
     if (status == "blocked") != waits && status != "long_running" {
@@ -178,7 +206,8 @@ pub fn set_status(task: &mut Task, status: &str, blocked_on: Option<&str>) -> Re
                 .to_owned(),
         );
     }
-    task.fields.retain(|(key, _)| key != "blocked_on");
+    task.fields
+        .retain(|(key, _)| key != "blocked_on" && key != PIN);
     match task.fields.iter_mut().find(|(key, _)| key == "status") {
         Some(field) => field.1 = status.to_owned(),
         None => task.fields.push(("status".to_owned(), status.to_owned())),
@@ -234,7 +263,7 @@ pub fn with_changes(body: &str, changes: &str) -> String {
     }
 }
 
-/// Every disagreement between the active task files and the task list.
+/// Every disagreement between the task list and the task files that belong in it: the active ones and the pinned ones.
 // 🧑 "Maybe we should have a validation script that agents should run after editing task file/TODO file?"
 pub fn check(list: &str, active: &[Task]) -> Vec<String> {
     let mut rows: Vec<(&str, Vec<(String, &str)>)> = Vec::new();
@@ -288,7 +317,7 @@ pub fn check(list: &str, active: &[Task]) -> Vec<String> {
         }
     }
     let mut shared: Vec<(&str, Vec<&str>)> = Vec::new();
-    for task in active {
+    for task in active.iter().filter(|task| task.is_active()) {
         match shared
             .iter_mut()
             .find(|(address, _)| *address == task.address())
@@ -438,6 +467,22 @@ mod tests {
             (work.field("blocked_on"), work.section()),
             (Some("human"), "current:")
         );
+    }
+
+    #[test]
+    fn a_pin_overrides_the_section_until_the_status_changes() {
+        let mut done = task("t_done.md", &[("status", "done"), ("runat", "x")], &[], "");
+        assert_eq!(pin(&mut done, "Low priority:"), Ok(()));
+        assert_eq!(done.section(), "low priority:");
+        let list = "current:\n\nlow priority:\nt_done.md x\n\nprevious:\n";
+        assert_eq!(check(list, &[done.clone()]), [""; 0]);
+        assert!(pin(&mut done, "later").is_err());
+        assert_eq!(pin(&mut done, "auto"), Ok(()));
+        assert_eq!(done.section(), "previous:");
+        let mut work = worker();
+        pin(&mut work, "low priority").unwrap();
+        set_status(&mut work, "running", None).unwrap();
+        assert_eq!(work.section(), "current:");
     }
 
     #[test]

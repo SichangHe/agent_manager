@@ -29,5 +29,5 @@ what a plugin can call today; every command prints plain text and exits non-zero
     - what amh did: `amh-actions.log` (every run) and `amh-watch.log` (mail in, deliveries, problems) in the same folder
 
 not stable yet
-- short commands for the human (`amh new`, `ls`, `view`, `say`, `edit`, `stop`, `log`) are proposed, not built; do not depend on those names
+- short commands for the human (`amh new`, `ls`, `view`, `say`, `edit`, `stop`, `log`) are built; the human may still drop them
 - there is no machine-readable output; ask the amh maintainer (task `claude_support.md`) for what the plugin needs, e.g. `--json` on `agent list`

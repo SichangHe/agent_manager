@@ -607,8 +607,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
             store.place(&task)?;
             String::new()
         }
+        ("task", "place") => {
+            let _lock = store.lock()?;
+            let mut task = store.load(need("task"))?;
+            tasks::pin(&mut task, need("under"))?;
+            store.save(&task)?;
+            store.place(&task)?;
+            String::new()
+        }
         ("task", "check") => {
-            let findings = tasks::check(&store.list()?, &store.active()?);
+            let findings = tasks::check(&store.list()?, &store.listed()?);
             say(&findings
                 .iter()
                 .map(|finding| format!("{finding}\n"))

@@ -185,8 +185,10 @@ pub fn placed(
             return Ok(None);
         }
     }
+    // A row that was alone in its section leaves one empty line behind, not two.
+    let alone = |at: usize| at > 0 && rows[at - 1].is_empty() && rows.get(at + 1) == Some(&"");
     let mut rows: Vec<&str> = (0..rows.len())
-        .filter(|at| !old.contains(at))
+        .filter(|at| !old.contains(at) && !(*at > 0 && old.contains(&(at - 1)) && alone(at - 1)))
         .map(|at| rows[at])
         .collect();
     let mut at = rows
@@ -199,6 +201,13 @@ pub fn placed(
     }
     let row = format!("{name} {address}");
     rows.insert(at, &row);
+    if section != "previous:"
+        && rows
+            .get(at + 1)
+            .is_some_and(|next| SECTIONS.contains(&heading(next).as_str()))
+    {
+        rows.insert(at + 1, "");
+    }
     Ok(Some(rows.join("\n")))
 }
 
@@ -296,7 +305,7 @@ mod tests {
         let waiting = placed(&listed, "t_work.md", at, "human pending:")
             .unwrap()
             .unwrap();
-        assert!(waiting.contains("human pending:\n\nt_work.md omnigent://s1\nlow priority:"));
+        assert!(waiting.contains("human pending:\n\nt_work.md omnigent://s1\n\nlow priority:"));
         // A closed task tops `previous`, and a changed address replaces the row.
         let closed = placed(&waiting, "t_work.md", "omnigent://s2", "previous:")
             .unwrap()
@@ -304,6 +313,17 @@ mod tests {
         assert_eq!(
             closed,
             "current:\n\nt_a.md x\n\nhuman pending:\n\nlow priority:\n\nprevious:\nt_work.md omnigent://s2\nt_old.md y\n"
+        );
+        assert_eq!(
+            placed(
+                "low priority:\n\nprevious:\n",
+                "t_work.md",
+                at,
+                "low priority:"
+            ),
+            Ok(Some(format!(
+                "low priority:\n\nt_work.md {at}\n\nprevious:\n"
+            )))
         );
         assert_eq!(
             placed("current:\n", "t_work.md", at, "previous:"),

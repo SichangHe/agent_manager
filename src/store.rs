@@ -76,6 +76,12 @@ impl Store {
         Ok(self.all()?.into_iter().filter(Task::is_active).collect())
     }
 
+    /// Every task file the task list must show: the active ones and the pinned ones.
+    pub fn listed(&self) -> Result<Vec<Task>, String> {
+        let shown = |task: &Task| task.is_active() || task.pinned().is_some();
+        Ok(self.all()?.into_iter().filter(shown).collect())
+    }
+
     /// The caller's task: the named file, else the one active task whose agent runs at the caller's address.
     // 🧑 "We need to pass in the task file name at launch and let the agent pass in that when they use any helper command."
     pub fn own(&self, named: Option<&str>) -> Result<Task, String> {
