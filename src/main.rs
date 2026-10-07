@@ -22,14 +22,25 @@ use std::process::ExitCode;
 use clap::{ArgAction, ArgMatches, Command};
 use serde_json::{Map, Value};
 
+/// The values that name a task file.
+const TASK_KEYS: [&str; 5] = ["task", "who", "source", "to", "task_file"];
+
 /// Turn the chosen action and its values into one JSON object: `group`, `action`, and each value under its name.
 fn parsed(command: &Command, matches: &ArgMatches) -> Value {
     let (group, group_matches) = matches.subcommand().expect("clap requires a group");
-    let (action, values) = group_matches.subcommand().expect("clap requires an action");
-    let leaf = command
+    let top = command
         .find_subcommand(group)
-        .and_then(|found| found.find_subcommand(action))
-        .expect("clap matched this action");
+        .expect("clap matched this command");
+    // A short command for the human has no actions under it; it is its own action in the group `short`.
+    let (group, action, values, leaf) = match group_matches.subcommand() {
+        Some((action, values)) => {
+            let leaf = top
+                .find_subcommand(action)
+                .expect("clap matched this action");
+            (group, action, values, leaf)
+        }
+        None => ("short", group, group_matches, top),
+    };
     let mut object = Map::from_iter([
         ("group".to_owned(), Value::from(group)),
         ("action".to_owned(), Value::from(action)),
@@ -45,6 +56,17 @@ fn parsed(command: &Command, matches: &ArgMatches) -> Value {
                 .into(),
             ArgAction::Set => values.get_one::<String>(id).cloned().into(),
             _ => continue,
+        };
+        // 🧑 "Make it lenient and allow both having and not having .md and allow full paths."
+        let named = |given: &Value| {
+            given
+                .as_str()
+                .map_or(Value::Null, |given| work::task_name(given).into())
+        };
+        let value = match (TASK_KEYS.contains(&id), &value) {
+            (true, Value::String(_)) => named(&value),
+            (true, Value::Array(many)) => many.iter().map(named).collect(),
+            _ => value,
         };
         object.insert(id.to_owned(), value);
     }

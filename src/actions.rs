@@ -106,33 +106,101 @@ fn tell_human(
     Ok(())
 }
 
-/// Let the human add to a task file in their editor and queue what they added for the task's agent, as a stored email is queued.
-fn edit_task(settings: &Settings, store: &Store, name: &str) -> Result<String, String> {
-    let before = store.load(name)?.render();
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    let copy = std::env::temp_dir().join(format!("amh-edit-{}-{name}", now.as_nanos()));
-    fs::write(&copy, &before)
-        .map_err(|error| format!("amh: cannot write {}: {error}", copy.display()))?;
+/// Run the human's editor on `path` and wait for it to exit.
+fn edit(path: &Path) -> Result<(), String> {
     let editor = ["VISUAL", "EDITOR"]
         .iter()
         .find_map(|name| std::env::var(name).ok().filter(|set| !set.is_empty()))
         .unwrap_or_else(|| "vi".to_owned());
+    let command = format!("{editor} \"$1\"");
+    let edited = Command::new("sh")
+        .args(["-c", &command, "sh"])
+        .arg(path)
+        .status();
+    match edited {
+        Ok(status) if status.success() => Ok(()),
+        Ok(_) => Err(format!(
+            "amh: {editor} did not exit cleanly; nothing was taken"
+        )),
+        Err(error) => Err(format!("amh: cannot run {editor}: {error}")),
+    }
+}
+
+/// A temporary file for the human to edit, named after what it is for.
+fn scratch(purpose: &str) -> PathBuf {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!("amh-{}-{purpose}", now.as_nanos()))
+}
+
+/// Text the human types in their editor, starting from an empty file; refused when left empty.
+fn typed(purpose: &str) -> Result<String, String> {
+    let path = scratch(purpose);
+    fs::write(&path, "")
+        .map_err(|error| format!("amh: cannot write {}: {error}", path.display()))?;
+    let text = edit(&path).and_then(|()| {
+        fs::read_to_string(&path)
+            .map_err(|error| format!("amh: cannot read {}: {error}", path.display()))
+    });
+    let _ = fs::remove_file(&path);
+    match text? {
+        text if text.trim().is_empty() => {
+            Err("amh: nothing was typed; nothing was done".to_owned())
+        }
+        text => Ok(text),
+    }
+}
+
+/// Queue text from the human for a task's agent, as a stored email is queued: it is delivered within seconds like an email from the human.
+fn queue_from_human(
+    settings: &Settings,
+    store: &Store,
+    name: &str,
+    text: &str,
+    how: &str,
+) -> Result<String, String> {
+    let prefix = match settings::get(settings, "mail.stored_prefix") {
+        "" => "mail",
+        prefix => prefix,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let mail_name = format!("{prefix}-edit-{}.txt", now.as_millis());
+    let tag = name.strip_suffix(".md").unwrap_or(name);
+    let _lock = store.lock()?;
+    let _ = fs::create_dir_all(store.root.join("manager_mail"));
+    let stored = store.root.join("manager_mail").join(&mail_name);
+    fs::write(
+        &stored,
+        decide::stored_mail(&format!("[{tag}] {how}"), text),
+    )
+    .map_err(|error| format!("amh: cannot store what you wrote: {error}"))?;
+    // The file may have changed meanwhile, so the block is appended to its current text.
+    let current = fs::read_to_string(store.root.join(name))
+        .map_err(|error| format!("amh: cannot read {name}: {error}"))?;
+    taskfile::write(
+        &store.root.join(name),
+        &decide::queued(&current, &mail_name),
+    )
+    .map_err(|error| format!("amh: cannot write {name}: {error}"))?;
+    Ok(format!(
+        "queued for the agent of {name}; the watcher delivers it within seconds\n"
+    ))
+}
+
+/// Let the human add to a task file in their editor and queue what they added for the task's agent.
+// 🧑 "some sort of shortcut that opens the editor with a copy of the task file and pushes the appended stuff on close, just like what things like cron do"
+fn edit_task(settings: &Settings, store: &Store, name: &str) -> Result<String, String> {
+    let before = store.load(name)?.render();
+    let copy = scratch(name);
+    fs::write(&copy, &before)
+        .map_err(|error| format!("amh: cannot write {}: {error}", copy.display()))?;
     let added = loop {
-        let command = format!("{editor} \"$1\"");
-        let edited = Command::new("sh")
-            .args(["-c", &command, "sh"])
-            .arg(&copy)
-            .status();
-        if !edited
-            .map_err(|error| format!("amh: cannot run {editor}: {error}"))?
-            .success()
-        {
+        if let Err(error) = edit(&copy) {
             let _ = fs::remove_file(&copy);
-            return Err(format!(
-                "amh: {editor} did not exit cleanly; nothing was taken"
-            ));
+            return Err(error);
         }
         let after = fs::read_to_string(&copy)
             .map_err(|error| format!("amh: cannot read {}: {error}", copy.display()))?;
@@ -152,37 +220,148 @@ fn edit_task(settings: &Settings, store: &Store, name: &str) -> Result<String, S
         }
     };
     let _ = fs::remove_file(&copy);
-    let Some(added) = added else {
-        return Ok("nothing was added\n".to_owned());
-    };
-    let prefix = match settings::get(settings, "mail.stored_prefix") {
-        "" => "mail",
-        prefix => prefix,
-    };
-    let mail_name = format!("{prefix}-edit-{}.txt", now.as_secs());
-    let tag = name.strip_suffix(".md").unwrap_or(name);
-    let _lock = store.lock()?;
-    let _ = fs::create_dir_all(store.root.join("manager_mail"));
-    let stored = store.root.join("manager_mail").join(&mail_name);
-    fs::write(
-        &stored,
-        decide::stored_mail(
-            &format!("[{tag}] added to the task file in the editor"),
+    match added {
+        Some(added) => queue_from_human(
+            settings,
+            store,
+            name,
             &added,
+            "added to the task file in the editor",
         ),
-    )
-    .map_err(|error| format!("amh: cannot store what you added: {error}"))?;
-    // The file may have changed while the editor was open, so the block is appended to its current text.
-    let current = fs::read_to_string(store.root.join(name))
-        .map_err(|error| format!("amh: cannot read {name}: {error}"))?;
-    taskfile::write(
-        &store.root.join(name),
-        &decide::queued(&current, &mail_name),
-    )
-    .map_err(|error| format!("amh: cannot write {name}: {error}"))?;
-    Ok(format!(
-        "queued for the agent of {name}; the watcher delivers it within seconds\n"
-    ))
+        None => Ok("nothing was added\n".to_owned()),
+    }
+}
+
+/// The short commands for the human; each maps onto the long action it stands for or does a little more.
+// 🧑 "there needs to be sane short commands for common tasks like spawning agents, without needing tons of flags"
+fn short(values: &Value) -> Result<u8, String> {
+    let text = |key: &str| values[key].as_str().filter(|value| !value.is_empty());
+    let name = text("task").unwrap_or_default();
+    let long = |group: &str, action: &str, more: Value| {
+        let mut object = more;
+        object["group"] = group.into();
+        object["action"] = action.into();
+        run(&object)
+    };
+    match values["action"].as_str().unwrap_or_default() {
+        "ls" => long("agent", "tree", serde_json::json!({})),
+        "view" => long(
+            "agent",
+            "view",
+            serde_json::json!({"who": values["who"], "read_only": values["read_only"]}),
+        ),
+        "edit" => long("task", "edit", serde_json::json!({"task": name})),
+        "say" => {
+            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
+            let store = Store::new(&settings);
+            store.load(name)?;
+            let said = match text("text") {
+                Some(said) => format!("{}\n", said.trim_end()),
+                None => typed(name)?,
+            };
+            say(&queue_from_human(
+                &settings,
+                &store,
+                name,
+                &said,
+                "said with amh say",
+            )?);
+            Ok(0)
+        }
+        "new" => {
+            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
+            let store = Store::new(&settings);
+            let goal = match text("goal") {
+                Some(goal) => goal.to_owned(),
+                None => typed(name)?,
+            };
+            let here = std::env::current_dir()
+                .map_err(|error| format!("amh: cannot tell the current directory: {error}"))?;
+            let new = NewTask {
+                name,
+                workdir: &here.to_string_lossy(),
+                goal: &goal,
+                manager: settings::get(&settings, "main_manager"),
+                tool: Some(text("tool").unwrap_or("claude")),
+                model: None,
+                effort: None,
+                as_manager: values["as_manager"].as_bool().unwrap_or(false),
+                email: None,
+                lines: None,
+            };
+            say(&format!(
+                "{} started at {}\n",
+                name,
+                agents::start_task(&settings, &store, &new)?
+            ));
+            Ok(0)
+        }
+        "stop" => {
+            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
+            let store = Store::new(&settings);
+            let found = store.load(name)?;
+            let undelivered = taskfile::pending_blocks(&found.body).len();
+            if !found.items.is_empty() || undelivered > 0 {
+                let listed: String = found
+                    .items
+                    .iter()
+                    .map(|item| format!("  - {item}\n"))
+                    .collect();
+                say(&format!(
+                    "{name} still has {} open item(s) and {undelivered} undelivered message(s):\n{listed}Close it anyway? [y/N] ",
+                    found.items.len()
+                ));
+                let mut answer = String::new();
+                let _ = io::stdin().read_line(&mut answer);
+                if !answer.trim().to_lowercase().starts_with('y') {
+                    return Err("amh: nothing was closed".to_owned());
+                }
+                let _lock = store.lock()?;
+                let mut task = store.load(name)?;
+                for item in task.items.clone() {
+                    tasks::remove_item(
+                        &mut task,
+                        &item,
+                        "the human closed the task with amh stop",
+                    )?;
+                }
+                // An undelivered block keeps its text in the file; only its marker goes, so nothing tries to deliver it later.
+                let markers: Vec<usize> = taskfile::pending_blocks(&task.body)
+                    .into_iter()
+                    .map(|(at, _)| at)
+                    .collect();
+                let kept: Vec<&str> = task
+                    .body
+                    .split('\n')
+                    .enumerate()
+                    .filter(|(at, _)| !markers.contains(at))
+                    .map(|(_, line)| line)
+                    .collect();
+                task.body = kept.join("\n");
+                store.save(&task)?;
+            }
+            let at = agents::close_task(&settings, &store, name, true, false, false)?;
+            say(&format!("closed {name} at {at}\n"));
+            Ok(0)
+        }
+        "log" => {
+            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
+            let store = Store::new(&settings);
+            let at = store.load(name)?.address().to_owned();
+            let n = text("lines").and_then(|n| n.parse().ok()).unwrap_or(60);
+            let read =
+                |file: &str| fs::read_to_string(store.state_dir.join(file)).unwrap_or_default();
+            say(&work::task_log(
+                &read("amh-watch.log"),
+                &read("amh-actions.log"),
+                name,
+                &at,
+                n,
+            ));
+            Ok(0)
+        }
+        other => Err(format!("amh: no short command {other}")),
+    }
 }
 
 /// Email an answer to the guest alone, on the thread of the stored guest email `mail_name`; returns what to print.
@@ -240,6 +419,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
         given.filter_map(Value::as_str).collect()
     };
     let action = (need("group"), need("action"));
+    if action.0 == "short" {
+        return short(values);
+    }
     match action {
         ("agent", "view") => return Err(view::open(need("who"), flag("read_only"))),
         ("manager", "watch") => return Ok(watch::run()),

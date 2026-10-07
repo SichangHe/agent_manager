@@ -93,6 +93,12 @@ modules
         - `todo add`, `todo done`, `task give` take several items per call; a call that changes the human's items emails them at once, one email per call, and then prints a hint to batch
         - `amh tell human --add ITEM --done ITEM` records the item changes and lists them under the message in the same email, sent at once
         - nothing waits: no record of unreported changes, no later digest
+- short commands for the human, top level (`src/cli.rs`, `short` in `src/actions.rs`)
+    - 🧑 "sane short commands for common tasks like spawning agents, without needing tons of flags"
+    - `new NAME [GOAL] [-m] [-t TOOL]` (current directory, Claude, reports to the main manager; editor when GOAL is missing), `ls` (= `agent tree`), `view NAME [-r]`, `say NAME [TEXT]` (queued like an email from the human; editor when TEXT is missing), `edit NAME`, `stop NAME` (asks once when open items or undelivered messages remain, then clears them and closes), `log NAME [-n N]` (the task's lines from both logs, merged by time)
+    - 🧑 "Make it lenient and allow both having and not having .md and allow full paths.": every value that names a task (`task`, `who`, `source`, `to`, `task_file`) goes through `work::task_name`: `NAME`, `NAME.md`, or a path; an `omnigent://` address stays
+- blocked tasks: 🧑 "Make it s.t. agents naturally learn to use --on from running the help page command they would normally run"
+    - the rule (WHAT is the thing waited for, never just who) and examples are in the help of the `task` group, of `task status`, and of `--on`; no instruction file says it
 - `amh task edit TASK.md` (the human): opens `$VISUAL`/`$EDITOR`/`vi` on a copy of the task file, like `crontab -e`
     - 🧑 "Should be append-only. If the edit changed other things, offer to reopen the file and ask for fix"
     - what was added at the end is stored as `manager_mail/PREFIX-edit-EPOCH.txt` and queued with a `(pending)` block, so it reaches the agent exactly like an email from the human

@@ -384,6 +384,42 @@ pub fn appended(before: &str, after: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// The task file name meant by what was typed: the name with or without `.md`, or a path to the file. An agent address stays as it is.
+// 🧑 "Make it lenient and allow both having and not having .md and allow full paths."
+pub fn task_name(given: &str) -> String {
+    if given.starts_with(crate::omnigent::PREFIX) || given.is_empty() {
+        return given.to_owned();
+    }
+    let name = given
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(given);
+    if name.ends_with(".md") {
+        name.to_owned()
+    } else {
+        format!("{name}.md")
+    }
+}
+
+/// The newest `n` lines about one task from the watcher's log and the action log, in time order; long lines are cut.
+pub fn task_log(watch: &str, actions: &str, name: &str, address: &str, n: usize) -> String {
+    let named = format!("\"{name}\"");
+    let about_watch = watch
+        .lines()
+        .filter(|line| line.contains(name) || line.contains(address));
+    let about_action = actions
+        .lines()
+        .filter(|line| line.contains(address) || line.contains(&named));
+    let mut lines: Vec<&str> = about_watch.chain(about_action).collect();
+    lines.sort_by_key(|line| line.get(..19).unwrap_or_default());
+    let newest = &lines[lines.len().saturating_sub(n)..];
+    newest
+        .iter()
+        .map(|line| format!("{}\n", line.chars().take(300).collect::<String>()))
+        .collect()
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -788,5 +824,30 @@ pub mod tests {
         );
         assert!(appended(before, "---\nstatus: done\n---\nbody\nnew\n").is_err());
         assert!(appended(before, "---\nstatus: running\n---\nbody and more\n").is_err());
+    }
+
+    #[test]
+    fn a_task_is_named_with_or_without_md_or_by_its_path() {
+        for given in [
+            "t_work",
+            "t_work.md",
+            "/root/logs/t_work.md",
+            "./t_work",
+            "logs/t_work",
+        ] {
+            assert_eq!(task_name(given), "t_work.md");
+        }
+        assert_eq!(task_name("omnigent://abc"), "omnigent://abc");
+        assert_eq!(task_name(""), "");
+    }
+
+    #[test]
+    fn a_task_log_merges_both_logs_in_time_order() {
+        let watch = "2026-10-06 10:00:05 mail m-1.txt 'x' -> t_a.md\n2026-10-06 10:00:09 delivered in t_b.md to omnigent://b\n";
+        let actions = "2026-10-06 10:00:07 omnigent://a exit=0 {\"action\":\"human\"}\n2026-10-06 10:00:01 user:x exit=0 {\"task\":\"t_a.md\"}\n";
+        assert_eq!(
+            task_log(watch, actions, "t_a.md", "omnigent://a", 2),
+            "2026-10-06 10:00:05 mail m-1.txt 'x' -> t_a.md\n2026-10-06 10:00:07 omnigent://a exit=0 {\"action\":\"human\"}\n"
+        );
     }
 }
