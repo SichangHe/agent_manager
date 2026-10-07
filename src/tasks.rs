@@ -111,6 +111,18 @@ fn position(task: &Task, given: &str) -> Option<usize> {
     exact.or_else(|| task.items.iter().position(|open| bare(open) == bare(given)))
 }
 
+/// The evidence to note for a removed item, with the human's own words when they asked not to be emailed about it.
+pub fn quiet_evidence(evidence: &str, human_words: Option<&str>) -> String {
+    match human_words {
+        Some(words) => format!(
+            "{}; the human is not emailed, because they wrote: {}",
+            evidence.trim(),
+            words.trim()
+        ),
+        None => evidence.to_owned(),
+    }
+}
+
 /// Remove one finished or cancelled item, leaving a one-line record in the body; returns the item as it was stored.
 pub fn remove_item(task: &mut Task, item: &str, evidence: &str) -> Result<String, String> {
     let at = position(task, item).ok_or_else(|| {
@@ -507,5 +519,14 @@ mod tests {
             Ok("write code")
         );
         assert!(remove_item(&mut work, "ship", "").is_err());
+    }
+
+    #[test]
+    fn a_quiet_removal_notes_the_humans_words() {
+        assert_eq!(
+            quiet_evidence("image fixed ", Some(" don't bother me afterwards")),
+            "image fixed; the human is not emailed, because they wrote: don't bother me afterwards"
+        );
+        assert_eq!(quiet_evidence("image fixed", None), "image fixed");
     }
 }

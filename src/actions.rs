@@ -516,11 +516,19 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let mut task = store.own(text("task_file"))?;
             let mut done = Vec::new();
             for item in many("item") {
-                done.push(tasks::remove_item(&mut task, item, need("evidence"))?);
+                done.push(tasks::remove_item(
+                    &mut task,
+                    item,
+                    &tasks::quiet_evidence(need("evidence"), text("quiet_because")),
+                )?);
             }
             store.save(&task)?;
             drop(lock);
-            let hint = report_items(&settings, &store, &task, &[], &done)?;
+            // 🧑 "Get some agent to fix it, and don’t bother me afterwards"
+            let hint = match text("quiet_because") {
+                Some(_) => "the human is not emailed, as they asked\n",
+                None => report_items(&settings, &store, &task, &[], &done)?,
+            };
             format!("removed {} open item(s)\n{hint}", done.len())
         }
         ("todo", "replace") => {

@@ -93,6 +93,7 @@ modules
         - `todo add`, `todo done`, `task give` take several items per call; a call that changes the human's items emails them at once, one email per call, and then prints a hint to batch
         - `amh tell human --add ITEM --done ITEM` records the item changes and lists them under the message in the same email, sent at once
         - nothing waits: no record of unreported changes, no later digest
+        - 🧑 "Get some agent to fix it, and don’t bother me afterwards": `todo done ... --quiet-because WORDS` removes the human's items without the email and notes the human's words in the task file
 - short commands for the human, top level (`src/cli.rs`, `short` in `src/actions.rs`)
     - 🧑 "sane short commands for common tasks like spawning agents, without needing tons of flags"
     - `new NAME [GOAL] [-m] [-t TOOL]` (current directory, Claude, reports to the main manager; editor when GOAL is missing), `ls` (= `agent tree`), `view NAME [-r]`, `say NAME [TEXT]` (queued like an email from the human; editor when TEXT is missing), `edit NAME`, `stop NAME` (asks once when open items or undelivered messages remain, then clears them and closes), `log NAME [-n N]` (the task's lines from both logs, merged by time)
