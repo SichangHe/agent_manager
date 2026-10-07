@@ -10,6 +10,15 @@ use serde_json::Value;
 pub struct Database(Connection);
 
 impl Database {
+    pub fn received_mail(&self, key: &str) -> Result<bool, String> {
+        self.0
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM metadata WHERE key = ?1)",
+                [format!("mail:{key}")],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(error)?;
         connection
@@ -116,6 +125,28 @@ impl Database {
         let transaction = self.0.transaction().map_err(error)?;
         commit_records(&transaction, snapshots, events)?;
         transaction.commit().map_err(error)
+    }
+
+    /// Commit a mail receipt with its task updates and outbox exactly once per stable key.
+    pub fn receive_mail(
+        &mut self,
+        key: &str,
+        snapshots: &[(String, String)],
+        events: &[Value],
+    ) -> Result<bool, String> {
+        let transaction = self.0.transaction().map_err(error)?;
+        let inserted = transaction
+            .execute(
+                "INSERT OR IGNORE INTO metadata (key, value) VALUES (?1, 'received')",
+                [format!("mail:{key}")],
+            )
+            .map_err(error)?;
+        if inserted == 0 {
+            return Ok(false);
+        }
+        commit_records(&transaction, snapshots, events)?;
+        transaction.commit().map_err(error)?;
+        Ok(true)
     }
 
     /// Remove compatibility notifications and record successful delivery in the same transaction.
@@ -310,6 +341,48 @@ fn error(error: rusqlite::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mail_receipt_rollback_retry_and_reopen() -> Result<(), Box<dyn std::error::Error>> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos();
+        let folder =
+            std::env::temp_dir().join(format!("amh-mail-receipt-{}-{now}", std::process::id()));
+        std::fs::create_dir(&folder)?;
+        let path = folder.join("state.sqlite3");
+        let mut db = Database::open(&path)?;
+        let snapshots = [("task.md".into(), "received notification".into())];
+        let event = serde_json::json!({"time": "now", "actor": "router", "kind": "message queued", "subject": "task.md", "data": {"to": "worker", "text": "GitHub notification"}});
+        assert!(
+            db.receive_mail(
+                "inbox:message-id",
+                &snapshots,
+                &[event.clone(), serde_json::json!({})]
+            )
+            .is_err()
+        );
+        assert_eq!(db.task("task.md")?, None);
+        assert!(db.events()?.is_empty());
+        assert!(db.pending_messages()?.is_empty());
+        assert!(db.receive_mail("inbox:message-id", &snapshots, std::slice::from_ref(&event))?);
+        drop(db);
+        let mut db = Database::open(&path)?;
+        let baseline = db.events()?;
+        assert!(!db.receive_mail(
+            "inbox:message-id",
+            &[("task.md".into(), "stale retry".into())],
+            &[serde_json::json!({})]
+        )?);
+        assert_eq!(db.task("task.md")?, Some("received notification".into()));
+        assert_eq!(db.events()?, baseline);
+        assert_eq!(db.pending_messages()?.len(), 1);
+        assert!(db.receive_mail("other-inbox:message-id", &snapshots, &[event])?);
+        assert_eq!(db.pending_messages()?.len(), 2);
+        drop(db);
+        std::fs::remove_dir_all(folder)?;
+        Ok(())
+    }
 
     #[test]
     fn import_commit_rollback_and_reopen() -> Result<(), Box<dyn std::error::Error>> {

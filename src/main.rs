@@ -11,6 +11,7 @@ mod guest;
 mod jobs;
 mod log;
 mod mail;
+mod mail_routes;
 mod omnigent;
 mod requests;
 mod settings;

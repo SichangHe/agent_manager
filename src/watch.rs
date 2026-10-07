@@ -56,6 +56,7 @@ enum IntakeError {
 struct Watcher {
     started: Instant,
     link: Link,
+    human_link: Link,
     /// When the delivery of a task's blocks last reached nobody.
     failed_at: BTreeMap<String, Instant>,
     /// When each task's idle agent was last reminded, in seconds since `started`.
@@ -172,12 +173,20 @@ fn take_in(
 }
 
 /// Take in each new human email; one that cannot be routed stays unread and unstored.
-fn take_in_mail(settings: &Settings, store: &Store, mailbox: &mut Mailbox) -> Result<(), String> {
+fn take_in_mail(
+    settings: &Settings,
+    store: &Store,
+    mailbox: &mut Mailbox,
+    routed: &BTreeSet<String>,
+) -> Result<(), String> {
     let prefix = match settings::get(settings, "mail.stored_prefix") {
         "" => "mail",
         prefix => prefix,
     };
     for (uid, raw) in mailbox.unseen_from(settings::get(settings, "mail.human_address"))? {
+        if routed.contains(&uid) {
+            continue;
+        }
         let mail = mail::parse(&raw);
         let name = format!("{prefix}-{uid}.txt");
         let stored = store.root.join("manager_mail").join(&name);
@@ -198,6 +207,90 @@ fn take_in_mail(settings: &Settings, store: &Store, mailbox: &mut Mailbox) -> Re
         mailbox.mark_read(&uid)?;
     }
     Ok(())
+}
+
+/// Commit the task notification and receipt before changing the external mailbox.
+fn route_mail(
+    store: &Store,
+    mailbox: &mut Mailbox,
+    kind: &str,
+    rules: &[crate::mail_routes::Rule],
+) -> Result<BTreeSet<String>, String> {
+    let mut routed = BTreeSet::new();
+    let senders: BTreeSet<&str> = rules
+        .iter()
+        .filter(|rule| rule.mailbox == kind)
+        .map(|rule| rule.from.as_str())
+        .collect();
+    for sender in senders {
+        for (uid, raw) in mailbox.unseen_from(sender)? {
+            let parsed = mail::parse(&raw);
+            let Some(rule) = crate::mail_routes::choose(rules, kind, &parsed) else {
+                continue;
+            };
+            routed.insert(uid.clone());
+            let generation = mailbox.uid_validity()?;
+            let key = if parsed.message_id.is_empty() {
+                format!("{kind}:{generation}:{uid}")
+            } else {
+                format!("{kind}:{}", parsed.message_id)
+            };
+            let name = format!("routed-{kind}-{generation}-{uid}.txt");
+            let captured = (|| -> Result<bool, String> {
+                let _lock = store.lock()?;
+                if crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+                    .received_mail(&key)?
+                {
+                    store.refresh_exports()?;
+                    return Ok(false);
+                }
+                let mut task = store.load(&crate::work::task_name(&rule.to))?;
+                if !task.is_active() {
+                    return Err(format!(
+                        "mail route {} target {} is done; notification stays unread",
+                        rule.name, task.name
+                    ));
+                }
+                let path = store.root.join("manager_mail").join(&name);
+                write_private(
+                    &path,
+                    &format!(
+                        "From: {}\nMessage-ID: {}\n{}",
+                        parsed.sender,
+                        parsed.message_id,
+                        decide::stored_mail(&parsed.subject, &parsed.body)
+                    ),
+                )
+                .map_err(|error| format!("cannot store routed notification: {error}"))?;
+                let target = task.name.clone();
+                crate::requests::queue(
+                    &mut task,
+                    &target,
+                    &crate::mail_routes::message(rule, &path, &parsed),
+                )?;
+                store.receive_mail(&key, &task)
+            })();
+            let captured = match captured {
+                Ok(captured) => captured,
+                Err(error) => {
+                    log(&format!("routed {kind} mail {uid} retained: {error}"));
+                    continue;
+                }
+            };
+            if captured {
+                log(&format!(
+                    "routed {kind} mail {uid} with rule {} -> {}",
+                    rule.name, rule.to
+                ));
+            }
+            match rule.disposition.as_str() {
+                "read" => mailbox.mark_read(&uid)?,
+                "trash" => mailbox.trash(&uid)?,
+                _ => {}
+            }
+        }
+    }
+    Ok(routed)
 }
 
 /// Reuse the guest agent when it is alive; otherwise start one under the main manager.
@@ -262,6 +355,7 @@ fn take_in_guest_mail(
     settings: &Settings,
     store: &Store,
     mailbox: &mut Mailbox,
+    routed: &BTreeSet<String>,
 ) -> Result<(), IntakeError> {
     let address = settings::get(settings, "guest.address");
     if address.is_empty() {
@@ -269,6 +363,9 @@ fn take_in_guest_mail(
     }
     let unseen = mailbox.unseen_from(address);
     for (uid, raw) in unseen.map_err(IntakeError::Connection)? {
+        if routed.contains(&uid) {
+            continue;
+        }
         let mail = mail::parse(&raw);
         let stored = guest::stored_name(settings, &uid);
         if !guest::verified(&mail, address) {
@@ -381,6 +478,36 @@ fn deliver_block(
 impl Watcher {
     /// Take in the human's and the guest's unread mail on the kept connection, logging in again after a failure.
     fn take_in(&mut self, settings: &Settings, store: &Store) {
+        let rules = match crate::mail_routes::rules(settings) {
+            Ok(rules) => rules,
+            Err(error) => {
+                log(&format!("mail routing configuration rejected: {error}"));
+                Vec::new()
+            }
+        };
+        if rules.iter().any(|rule| rule.mailbox == "human") {
+            if let Link::Down { retry_at } = self.human_link
+                && Instant::now() >= retry_at
+            {
+                match Mailbox::human(settings) {
+                    Ok(mailbox) => self.human_link = Link::Up(mailbox),
+                    Err(error) => {
+                        log(&format!("human route mailbox failed: {error}"));
+                        self.human_link = Link::Down {
+                            retry_at: Instant::now() + RECONNECT,
+                        };
+                    }
+                }
+            }
+            if let Link::Up(mailbox) = &mut self.human_link
+                && let Err(error) = route_mail(store, mailbox, "human", &rules)
+            {
+                log(&format!("human email routing failed: {error}"));
+                self.human_link = Link::Down {
+                    retry_at: Instant::now() + RECONNECT,
+                };
+            }
+        }
         if let Link::Down { retry_at } = self.link
             && Instant::now() >= retry_at
         {
@@ -392,9 +519,12 @@ impl Watcher {
         let Link::Up(mailbox) = &mut self.link else {
             return;
         };
-        let taken = take_in_mail(settings, store, mailbox)
+        let taken = route_mail(store, mailbox, "agent", &rules)
             .map_err(IntakeError::Connection)
-            .and_then(|()| take_in_guest_mail(settings, store, mailbox));
+            .and_then(|routed| {
+                take_in_mail(settings, store, mailbox, &routed).map_err(IntakeError::Connection)?;
+                take_in_guest_mail(settings, store, mailbox, &routed)
+            });
         match taken {
             Ok(()) => {}
             Err(IntakeError::Connection(error)) => self.disconnected(&error),
@@ -650,6 +780,9 @@ pub fn run() -> u8 {
     let mut watcher = Watcher {
         started: Instant::now(),
         link: Link::Down {
+            retry_at: Instant::now(),
+        },
+        human_link: Link::Down {
             retry_at: Instant::now(),
         },
         failed_at: BTreeMap::new(),

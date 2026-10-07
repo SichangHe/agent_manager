@@ -226,6 +226,18 @@ impl Store {
         Ok(())
     }
 
+    /// Record mail disposition and queued notifications together before external mail deletion.
+    pub fn receive_mail(&self, key: &str, task: &Task) -> Result<bool, String> {
+        let mut database = self
+            .database()?
+            .ok_or_else(|| "amh: mail receipts require an initialized SQLite store".to_owned())?;
+        let (task, events) = self.prepare(task)?;
+        let received =
+            database.receive_mail(key, &[(task.name.clone(), task.render())], &events)?;
+        self.export(&database)?;
+        Ok(received)
+    }
+
     fn prepare(&self, task: &Task) -> Result<(Task, Vec<serde_json::Value>), String> {
         let mut task = task.clone();
         let current = requests::sync(&mut task)?;

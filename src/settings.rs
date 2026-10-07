@@ -32,6 +32,9 @@ pub fn state_dir() -> PathBuf {
 fn flatten(key: String, value: &toml::Value, values: &mut BTreeMap<String, String>) {
     match value {
         toml::Value::Table(table) => {
+            if table.is_empty() && key.starts_with("mail_route.") {
+                values.insert(key.clone(), String::new());
+            }
             for (name, inner) in table {
                 let dotted = if key.is_empty() {
                     name.clone()

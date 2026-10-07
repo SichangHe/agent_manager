@@ -175,7 +175,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
             )
         )
-        .subcommand(Command::new("mail").about("Look at the emails you sent the human; mark one of theirs as needing no reply.").subcommand_required(true).arg_required_else_help(true)
+        .subcommand(Command::new("mail").about("Look at sent emails and configure inbox routing.").after_help("Incoming routes are reloaded from config.toml or env.toml every poll. Example:\n  [mail_route.alerts]\n  mailbox = \"human\"\n  from = \"notifications@github.com\"\n  subject = \"Run failed:\"\n  to = \"ci_worker.md\"\n  disposition = \"trash\"\nOptional body is another substring filter; all filters must match. Optional priority is an integer (larger wins); equal priorities use rule name order. mailbox is human or agent; disposition is keep (default), read or trash. Unmatched emails are untouched. Trash/read happens only after a durable handoff. Rules contain no service-specific code.").subcommand_required(true).arg_required_else_help(true)
             .subcommand(Command::new("unread").about("List the emails you sent through amh that the human has not read yet.").long_about("List your emails the human has not read yet.\n\nTo drop one, send its replacement with `amh tell human --replaces MESSAGE_ID`.")
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
             )

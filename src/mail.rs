@@ -565,9 +565,27 @@ impl Mailbox {
 
     /// Each unread inbox email from `sender` as its uid and raw bytes, oldest first, without marking it read.
     pub fn unseen_from(&mut self, sender: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+        if sender.contains(['"', '\\', '\r', '\n']) {
+            return Err("invalid sender in unread mail search".to_owned());
+        }
+        self.unseen_matching(sender, false)
+    }
+
+    /// Inbox emails from a configured sender, optionally including read notifications.
+    pub fn unseen_matching(
+        &mut self,
+        sender: &str,
+        include_read: bool,
+    ) -> Result<Vec<(String, Vec<u8>)>, String> {
+        if sender.contains(['"', '\\', '\r', '\n']) {
+            return Err("invalid sender in mail search".to_owned());
+        }
         let failed = |error: imap::Error| format!("reading unread mail failed: {error}");
         self.session.select("INBOX").map_err(failed)?;
-        let query = format!("UNSEEN FROM \"{sender}\"");
+        let query = format!(
+            "{}FROM \"{sender}\"",
+            if include_read { "" } else { "UNSEEN " }
+        );
         let uids = self.session.uid_search(query).map_err(failed)?;
         if uids.is_empty() {
             return Ok(Vec::new());
@@ -589,6 +607,22 @@ impl Mailbox {
         stored
             .map(|_| ())
             .map_err(|error| format!("marking mail {uid} read failed: {error}"))
+    }
+
+    /// Move an accepted notification out of the inbox after its durable handoff.
+    pub fn trash(&mut self, uid: &str) -> Result<(), String> {
+        self.session
+            .uid_mv(uid, TRASH)
+            .map_err(|error| format!("moving routed mail {uid} to trash failed: {error}"))
+    }
+
+    /// UID generation distinguishes a reused inbox UID from the previously routed email.
+    pub fn uid_validity(&mut self) -> Result<u32, String> {
+        self.session
+            .select("INBOX")
+            .map_err(|error| format!("reading mailbox UID generation failed: {error}"))?
+            .uid_validity
+            .ok_or_else(|| "mailbox has no UIDVALIDITY".to_owned())
     }
 }
 
