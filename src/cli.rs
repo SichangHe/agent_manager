@@ -51,7 +51,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("attach").long("attach").action(ArgAction::Append).value_name("PATH").help("a file to attach, such as a figure the human asked to see; repeat as needed; 20 MB in total at most"))
                 .arg(Arg::new("replaces").long("replaces").action(ArgAction::Append).value_name("MESSAGE_ID").help("an earlier email of yours that this one replaces; if the human has not read it, it goes to the trash; repeat as needed"))
             )
-            .subcommand(Command::new("agent").about("Message an agent you manage.")
+            .subcommand(Command::new("agent").about("Message an agent you manage.").long_about("Message an agent you manage.\n\nThe sender is your Omnigent session, or the runat address of --task-file TASK (also OMO_AGENT_TASK_FILE) when the session identity is unavailable. A script that is no agent passes --from NAME.")
                 .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
                 .arg(Arg::new("text").required(false).value_name("TEXT").help("message; omit to read standard input"))
                 .arg(Arg::new("file").long("file").help("file holding the message, instead of TEXT"))

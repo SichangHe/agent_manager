@@ -663,7 +663,17 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 (Ok(address), _) => address,
                 (Err(_), Some(script)) => format!("script {script}"),
                 (Err(_), None) => {
-                    return Err("amh: cannot tell which agent is calling; a script that is no agent passes --from NAME".to_owned());
+                    // 🧑 "repair manager caller recognition" ... "despite --task-file"
+                    let task = store.own(text("task_file")).map_err(|error| {
+                        format!("{error}; a script that is no agent passes --from NAME")
+                    })?;
+                    if task.address().is_empty() {
+                        return Err(format!(
+                            "amh: caller task {} has no runat address; restart its agent or pass --from NAME for a script that is no agent",
+                            task.name
+                        ));
+                    }
+                    task.address().to_owned()
                 }
             };
             let message = work::envelope(&from, &message);

@@ -10,14 +10,18 @@ impl Drop for Workspace {
     }
 }
 impl Workspace {
-    fn run(&self, args: &[&str]) -> Result<Output, std::io::Error> {
-        Command::new(env!("CARGO_BIN_EXE_amh"))
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_amh"));
+        command
             .args(args)
             .env("AMH_STATE_DIR", self.0.join("state"))
             .env("AMH_CFG_DIR", self.0.join("config"))
             .env_remove("OMO_AGENT_TASK_FILE")
-            .env_remove("OMNIGENT_RUNNER_PRIMARY_SESSION_ID")
-            .output()
+            .env_remove("OMNIGENT_RUNNER_PRIMARY_SESSION_ID");
+        command
+    }
+    fn run(&self, args: &[&str]) -> Result<Output, std::io::Error> {
+        self.command(args).output()
     }
     fn ok(&self, args: &[&str]) -> Result<String, Box<dyn std::error::Error>> {
         let output = self.run(args)?;
@@ -28,6 +32,142 @@ impl Workspace {
         );
         Ok(String::from_utf8(output.stdout)?)
     }
+}
+
+#[test]
+fn tell_agent_resolves_task_sender_without_native_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    use std::io::{BufRead, Read, Write};
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-sender-{}-{now}", std::process::id())));
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(workspace.0.join("state"))?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\ncaller.md omnigent://caller\nempty.md\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("caller.md"),
+        "---\nstatus: running\nrunat: omnigent://caller\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        root.join("empty.md"),
+        "---\nstatus: running\nrunat: \npending_task_items: []\n---\n",
+    )?;
+    let args = ["tell", "agent", "omnigent://recipient", "hello"];
+    for (task_args, native, script, expected) in [
+        (
+            vec!["--task-file", "caller.md"],
+            None,
+            None,
+            "omnigent://caller",
+        ),
+        (vec![], None, None, "omnigent://caller"),
+        (
+            vec!["--task-file", "missing.md"],
+            None,
+            Some("cron"),
+            "script cron",
+        ),
+        (
+            vec!["--task-file", "missing.md"],
+            Some("native"),
+            Some("cron"),
+            "omnigent://native",
+        ),
+    ] {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        fs::write(
+            workspace.0.join("state/env.toml"),
+            format!(
+                "work_logs = {}\n[omnigent]\nurl = {}\n",
+                serde_json::to_string(&root.to_string_lossy())?,
+                serde_json::to_string(&url)?
+            ),
+        )?;
+        let server = std::thread::spawn(move || -> Result<String, std::io::Error> {
+            let mut message = String::new();
+            for response in ["{\"status\":\"idle\"}", "{\"queued\":true}"] {
+                let (mut stream, _) = listener.accept()?;
+                stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+                let mut reader = std::io::BufReader::new(stream.try_clone()?);
+                let mut size = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line)? == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        size = value.trim().parse().map_err(std::io::Error::other)?;
+                    }
+                }
+                let mut body = vec![0; size];
+                reader.read_exact(&mut body)?;
+                if !body.is_empty() {
+                    message = String::from_utf8(body).map_err(std::io::Error::other)?;
+                }
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}",
+                    response.len()
+                )?;
+            }
+            Ok(message)
+        });
+        let mut command = workspace.command(&args);
+        if task_args.is_empty() {
+            command.env("OMO_AGENT_TASK_FILE", "caller.md");
+        } else {
+            command.args(task_args);
+        }
+        if let Some(native) = native {
+            command.env("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", native);
+        }
+        if let Some(script) = script {
+            command.args(["--from", script]);
+        }
+        let output = command.output()?;
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let message = server.join().map_err(|_| "test server panicked")??;
+        assert!(message.contains(expected), "{message}");
+        assert!(message.contains("hello"), "{message}");
+    }
+    let empty = workspace.run(&[
+        "tell",
+        "agent",
+        "omnigent://recipient",
+        "hello",
+        "--task-file",
+        "empty.md",
+    ])?;
+    assert!(!empty.status.success());
+    let error = String::from_utf8_lossy(&empty.stderr);
+    assert!(
+        error.contains("caller task empty") && error.contains("has no runat address"),
+        "{error}"
+    );
+    let missing = workspace.run(&args)?;
+    assert!(!missing.status.success());
+    let error = String::from_utf8_lossy(&missing.stderr);
+    assert!(error.contains("--task-file NAME.md"));
+    assert!(error.contains("--from NAME"));
+    Ok(())
 }
 
 #[test]
