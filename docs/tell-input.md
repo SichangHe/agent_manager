@@ -19,3 +19,7 @@ agent sender
 - without it, `--from NAME` identifies a script; otherwise `Store::own` resolves `--task-file TASK` or `OMO_AGENT_TASK_FILE` through the task database
     - the task's `runat` address labels the message
     - a missing task or empty address fails before sending
+
+task launch parent
+- `task start` uses explicit `--manager` first, then native caller, then the address of `--task-file` or `OMO_AGENT_TASK_FILE`
+    - unresolved caller fails before launch; an empty caller address requires explicit `--manager`

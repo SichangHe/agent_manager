@@ -858,7 +858,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let goal = read(need("prompt"))?;
             let manager = match text("manager") {
                 Some(manager) => manager.to_owned(),
-                None => omnigent::own_address()?,
+                None => omnigent::own_address().or_else(|_| {
+                    let caller = store.own(text("task_file"))?;
+                    if caller.address().is_empty() {
+                        return Err(format!(
+                            "amh: caller task {} has no runat address; pass --manager ADDRESS",
+                            caller.name
+                        ));
+                    }
+                    Ok(caller.address().to_owned())
+                })?,
             };
             let new = NewTask {
                 name: need("task"),

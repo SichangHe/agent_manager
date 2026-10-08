@@ -6,6 +6,93 @@ use std::process::{Command, Output};
 struct Workspace(PathBuf);
 
 #[test]
+fn task_start_resolves_parent_before_launch_without_native_identity()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-parent-{}-{now}", std::process::id())));
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(workspace.0.join("state"))?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\nparent.md\nempty.md\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("parent.md"),
+        "---\nstatus: long_running\nrunat: omnigent://parent\nis_manager: true\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        root.join("empty.md"),
+        "---\nstatus: long_running\nrunat: \npending_task_items: []\n---\n",
+    )?;
+    let prompt = workspace.0.join("prompt.md");
+    fs::write(&prompt, "Preserve the existing human goal.\n")?;
+    let args = [
+        "task",
+        "start",
+        "child.md",
+        "--tool",
+        "codex",
+        "--dir",
+        root.to_str().ok_or("invalid path")?,
+        "--prompt",
+        prompt.to_str().ok_or("invalid path")?,
+    ];
+    for (flags, native, launch_env) in [
+        (vec!["--task-file", "parent.md"], None, None),
+        (vec![], None, Some("parent.md")),
+        (
+            vec!["--task-file", "missing.md"],
+            Some("native-parent"),
+            None,
+        ),
+        (
+            vec![
+                "--task-file",
+                "missing.md",
+                "--manager",
+                "omnigent://explicit",
+            ],
+            None,
+            None,
+        ),
+    ] {
+        let mut command = workspace.command(&args);
+        command.args(flags).env("PATH", "/usr/bin:/bin");
+        if let Some(native) = native {
+            command.env("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", native);
+        }
+        if let Some(task) = launch_env {
+            command.env("OMO_AGENT_TASK_FILE", task);
+        }
+        let output = command.output()?;
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("getagentsmd"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!root.join("child.md").exists());
+    }
+    let output = workspace
+        .command(&args)
+        .args(["--task-file", "empty.md"])
+        .output()?;
+    assert!(String::from_utf8_lossy(&output.stderr).contains("has no runat address"));
+    Ok(())
+}
+
+#[test]
 fn pb_labels_reject_wrong_owner_or_transport_before_item_changes()
 -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
