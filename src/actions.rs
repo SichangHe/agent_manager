@@ -16,10 +16,6 @@ use crate::store::Store;
 use crate::tasks::{self, Task};
 use crate::{decide, guest, omnigent, requests, settings, taskfile, view, watch, work};
 
-fn creator(store: &Store) -> Result<String, String> {
-    Ok(store.own(None)?.name)
-}
-
 pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
     for mut task in store
         .all()?
@@ -711,7 +707,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             } else if action.0 == "todo" {
                 task.name.clone()
             } else {
-                creator(&store)?
+                store.own(text("task_file"))?.name
             };
             for item in many("item") {
                 if let Some(item) = tasks::add_item(&mut task, item, flag("from_human"))? {

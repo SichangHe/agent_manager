@@ -171,6 +171,71 @@ fn tell_agent_resolves_task_sender_without_native_identity()
 }
 
 #[test]
+fn task_give_uses_explicit_caller_and_preserves_parked_task()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-give-{}-{now}", std::process::id())));
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(workspace.0.join("state"))?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\nmanager.md omnigent://manager\n\nhuman pending:\n\nlow priority:\nparked.md omnigent://parked\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("manager.md"),
+        "---\nstatus: long_running\nrunat: omnigent://manager\nis_manager: true\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        root.join("parked.md"),
+        "---\nstatus: blocked\nrunat: omnigent://parked\nblocked_on: spare quota\nlisted_under: low priority\nagent_stopped: true\npending_task_items: []\n---\n",
+    )?;
+    workspace.ok(&[
+        "task",
+        "give",
+        "parked.md",
+        "first requirement",
+        "--task-file",
+        "manager.md",
+    ])?;
+    workspace.ok(&[
+        "--task-file",
+        "manager.md",
+        "task",
+        "give",
+        "parked.md",
+        "second requirement",
+    ])?;
+    let saved = fs::read_to_string(root.join("parked.md"))?;
+    for expected in [
+        "status: blocked",
+        "blocked_on: spare quota",
+        "listed_under: low priority",
+        "agent_stopped: true",
+        "first requirement",
+        "second requirement",
+        "\"creator\":\"manager.md\"",
+    ] {
+        assert!(saved.contains(expected), "missing {expected}: {saved}");
+    }
+    assert!(
+        fs::read_to_string(root.join("TODO.md"))?
+            .contains("low priority:\nparked.md omnigent://parked")
+    );
+    Ok(())
+}
+
+#[test]
 fn plain_list_entries_survive_exports_and_task_placement() -> Result<(), Box<dyn std::error::Error>>
 {
     let now = std::time::SystemTime::now()
