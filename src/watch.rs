@@ -227,7 +227,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
             let topic = message["subject"]
                 .as_str()
                 .ok_or("Zulip stream message has no topic")?;
-            format!("[{topic}] Zulip message")
+            format!("[{}] Zulip message", crate::zulip::task_topic(topic))
         };
         let name = format!("zulip-{id}.txt");
         let stored = store.root.join("manager_mail").join(&name);

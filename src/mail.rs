@@ -104,7 +104,7 @@ fn one_line(text: &str) -> String {
 }
 
 /// Drop one reply prefix (`Re:`, `Fw:`, `Fwd:`, any case) from the front.
-fn after_prefix(subject: &str) -> Option<&str> {
+pub(crate) fn after_prefix(subject: &str) -> Option<&str> {
     let colon = subject.find(':')?;
     ["re", "fw", "fwd"]
         .iter()

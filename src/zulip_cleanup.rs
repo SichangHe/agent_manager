@@ -154,7 +154,7 @@ pub fn run(settings: &Settings, store: &Store) -> Result<String, String> {
                 || message["stream_id"].as_u64() != Some(stream)
                 || !message["subject"]
                     .as_str()
-                    .is_some_and(|topic| completed.contains(topic))
+                    .is_some_and(|topic| completed.contains(zulip::task_topic(topic)))
             {
                 continue;
             }
@@ -173,7 +173,8 @@ pub fn run(settings: &Settings, store: &Store) -> Result<String, String> {
             {
                 continue;
             }
-            let topic = message["subject"].as_str().ok_or("message has no topic")?;
+            let topic =
+                zulip::task_topic(message["subject"].as_str().ok_or("message has no topic")?);
             if own_message_uploads(settings, message).is_err() {
                 continue;
             }

@@ -190,11 +190,13 @@ fn tell_human(
     body: &str,
     replaces: &[String],
     attachments: &[PathBuf],
+    report_label: Option<&str>,
 ) -> Result<(), String> {
+    let tag = report_label.unwrap_or_else(|| task.tag());
     let sent = mail::send(
         settings,
         &settings::state_dir(),
-        task.tag(),
+        tag,
         subject,
         body,
         task.address(),
@@ -208,7 +210,7 @@ fn tell_human(
                 "amh: replacement was sent; earlier message deletion failed: {error}. Do not send the replacement again."
             );
         }
-        match crate::zulip::consolidation_reminder(settings, task.tag(), &message_id) {
+        match crate::zulip::consolidation_reminder(settings, tag, &message_id) {
             Ok(reminder) if !reminder.is_empty() => say(&reminder),
             Ok(_) => {}
             Err(error) => eprintln!(
@@ -613,6 +615,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
             };
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
+            // 🧑 "fix the messages to come through pb new and pb urgent instead of this tag"
+            if text("report_label").is_some()
+                && (task.tag() != "stock_news_watch" || !crate::zulip::enabled(&settings))
+            {
+                return Err(
+                    "amh: --report-label requires stock_news_watch and Zulip transport".to_owned(),
+                );
+            }
             let mut added = Vec::new();
             for item in many("add") {
                 if let Some(item) = tasks::add_item(&mut task, item, true)? {
@@ -635,7 +645,15 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let body = tasks::with_changes(&body, &tasks::changes_text(&added, &done));
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
-            tell_human(&settings, &task, need("subject"), &body, &replaces, &attach)?;
+            tell_human(
+                &settings,
+                &task,
+                need("subject"),
+                &body,
+                &replaces,
+                &attach,
+                text("report_label"),
+            )?;
             let _lock = store.lock()?;
             request_effects(&settings, &store)?;
             match done.is_empty() {

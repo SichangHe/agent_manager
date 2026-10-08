@@ -300,7 +300,14 @@ pub fn send(
             .create(true)
             .append(true)
             .open(state.join(mail::SENT_LOG))
-            .and_then(|mut log| writeln!(log, "{} {tag}", chrono::Utc::now().timestamp()))
+            .and_then(|mut log| {
+                writeln!(
+                    log,
+                    "{} {}",
+                    chrono::Utc::now().timestamp(),
+                    task_topic(tag)
+                )
+            })
         {
             eprintln!("amh: Zulip message {id} sent, but recording it failed: {error}");
         }
@@ -388,12 +395,26 @@ pub fn incoming(settings: &Settings, cursor: u64) -> Result<Vec<Value>, String> 
 /// Find a task header in a direct message or quoted reply; otherwise route to the main manager.
 pub fn subject(body: &str) -> String {
     for line in body.lines() {
-        let line = line.trim_start_matches(['>', ' ', '\t']);
+        let mut line = line.trim_start_matches(['>', ' ', '\t']);
+        while let Some(rest) = mail::after_prefix(line) {
+            line = rest.trim_start();
+        }
+        if line.starts_with("[pb new]") || line.starts_with("[pb urgent]") {
+            return "[stock_news_watch] Zulip message".to_owned();
+        }
         if let Some(tag) = mail::tag_of(line) {
             return format!("[{tag}] Zulip message");
         }
     }
     "Zulip message".to_owned()
+}
+
+/// Resolve the human-approved PB report labels to their owning task.
+pub fn task_topic(topic: &str) -> &str {
+    match topic {
+        "pb new" | "pb urgent" => "stock_news_watch",
+        _ => topic,
+    }
 }
 
 pub fn own_text(body: &str) -> String {
@@ -452,6 +473,19 @@ mod tests {
     }
     #[test]
     fn direct_and_quoted_task_replies_route() {
+        for label in ["pb new", "pb urgent"] {
+            assert_eq!(task_topic(label), "stock_news_watch");
+            assert_eq!(
+                subject(&format!("> [{label}] Daily report\nReply")),
+                "[stock_news_watch] Zulip message"
+            );
+        }
+        assert_eq!(task_topic("other"), "other");
+        assert_eq!(
+            subject("Re: Fwd: [pb urgent] Daily report"),
+            "[stock_news_watch] Zulip message"
+        );
+        assert_eq!(subject("[pb new-ish] Unknown"), "Zulip message");
         assert_eq!(
             subject("[amh_support_codex] Set it up"),
             "[amh_support_codex] Zulip message"

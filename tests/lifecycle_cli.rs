@@ -4,6 +4,63 @@ use std::path::PathBuf;
 use std::process::{Command, Output};
 
 struct Workspace(PathBuf);
+
+#[test]
+fn pb_labels_reject_wrong_owner_or_transport_before_item_changes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-pb-{}-{now}", std::process::id())));
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::create_dir_all(workspace.0.join("state"))?;
+    fs::create_dir_all(workspace.0.join("config"))?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\nother.md\nstock_news_watch.md\n\nprevious:\n",
+    )?;
+    for task in ["other", "stock_news_watch"] {
+        fs::write(
+            root.join(format!("{task}.md")),
+            "---\nstatus: running\nrunat: omnigent://pb-test\npending_task_items: []\n---\n",
+        )?;
+    }
+    for (task, transport) in [("other.md", "zulip"), ("stock_news_watch.md", "email")] {
+        fs::write(
+            workspace.0.join("config/config.toml"),
+            format!("[human]\ntransport = \"{transport}\"\n"),
+        )?;
+        let before = workspace.ok(&["task", "show", task])?;
+        let output = workspace.run(&[
+            "tell",
+            "human",
+            "--task-file",
+            task,
+            "--report-label",
+            "pb urgent",
+            "--subject",
+            "Report",
+            "--add",
+            "must not persist",
+            "body",
+        ])?;
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("requires stock_news_watch and Zulip")
+        );
+        assert_eq!(workspace.ok(&["task", "show", task])?, before);
+    }
+    Ok(())
+}
 impl Drop for Workspace {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);

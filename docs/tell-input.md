@@ -7,6 +7,13 @@ message input
 - `--task-file TASK` works before or after subcommands
 - manager messages retain the 600 character limit
 
+PB news reports
+- `stock_news_watch` can send with `--report-label 'pb new'` or `--report-label 'pb urgent'` under Zulip
+    - label becomes the body prefix and topic; task ownership and open items remain `stock_news_watch`
+    - replies in either topic and quoted direct replies route to the same task
+    - cleanup checks the owning task before deleting old reports
+- other tasks and email transport reject this option before item changes or delivery
+
 agent sender
 - native Omnigent session identity wins
 - without it, `--from NAME` identifies a script; otherwise `Store::own` resolves `--task-file TASK` or `OMO_AGENT_TASK_FILE` through the task database
