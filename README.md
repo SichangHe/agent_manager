@@ -127,7 +127,7 @@ modules
         - a malformed row of `amh-awaiting.txt` or `amh-sent.txt` is dropped
         - stored human mail is created with mode 0600, not created and then restricted
     - mail intake: store, route, append `(pending)` + source line, mark read
-        - route: `[tag]` task; `for manager` at body edge -> its manager; done task -> its manager; else main manager
+        - route: `[tag]` task; `for manager`/`for a manager`/`for the manager` starting or ending the body -> its manager; done task -> its manager; else main manager
         - stored file exists = already taken in
     - delivery: each `(pending)` block -> the task's agent; then the marker line is deleted, the source line stays
         - a block in a task with no agent (done or retired) goes to that task's manager, else the main manager

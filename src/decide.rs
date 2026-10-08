@@ -39,7 +39,7 @@ pub fn quoted(text: &str) -> String {
     shown
 }
 
-/// Whether the human's own text starts or ends with `for manager`, or starts by asking to terminate or replace the agent.
+/// Whether the human's own text starts or ends with `for manager`, `for a manager`, or `for the manager`, or starts by asking to terminate or replace the agent.
 // 🧑 “We should only dispatch “for manager” type and replace/terminate type messages to managers.”
 pub fn for_manager(body: &str) -> bool {
     let breaks = [
@@ -56,9 +56,16 @@ pub fn for_manager(body: &str) -> bool {
     let (Some(first), Some(last)) = (own.first(), own.last()) else {
         return false;
     };
-    first == "for manager"
-        || last == "for manager"
-        || first.starts_with("terminate this agent")
+    let phrases = ["for manager", "for a manager", "for the manager"];
+    let word_edge = |rest: Option<char>| rest.is_none_or(|c| !c.is_alphanumeric());
+    phrases.iter().any(|phrase| {
+        first
+            .strip_prefix(phrase)
+            .is_some_and(|rest| word_edge(rest.chars().next()))
+            || last
+                .strip_suffix(phrase)
+                .is_some_and(|rest| word_edge(rest.chars().next_back()))
+    }) || first.starts_with("terminate this agent")
         || first.starts_with("replace this agent")
 }
 
@@ -711,6 +718,12 @@ mod tests {
         let unrouted = route(&tasks, "omnigent://nobody", "untagged", "x");
         assert!(unrouted.unwrap_err().contains("main manager"));
         assert!(!for_manager("") && !for_manager("> for manager\n\n"));
+        // 🧑 "For a manager, this agent sounds stupid, isn't running on Luna."
+        assert!(
+            for_manager("For a manager, this agent sounds stupid")
+                && for_manager("park it.\nThis is for the manager.")
+        );
+        assert!(!for_manager("for managers in general") && !for_manager("a platform manager"));
     }
 
     #[test]
