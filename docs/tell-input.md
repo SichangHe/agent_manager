@@ -8,11 +8,13 @@ message input
 - manager messages retain the 600 character limit
 
 PB news reports
-- `stock_news_watch` can send with `--report-label 'pb new'` or `--report-label 'pb urgent'`
+- `stock_news_watch` can send with `--report-label 'pb news'` or `--report-label 'pb urgent'`
+    - 🧑 "it's pb news, not pb new"; `pb new` stays accepted for old threads
 - `--email` sends that one message by email under `human.transport=zulip`
     - 🧑 "Send the news via email like done before instead of through Zulip"
     - body with Markdown links `[label](url)` gets an HTML part showing only labels
-    - email replies to `[pb new]`/`[pb urgent]` route to `stock_news_watch`
+    - email replies to `[pb news]`/`[pb urgent]` route to `stock_news_watch`
+    - a later email with the same label and subject answers the previous one, so they form one thread
     - label becomes the body prefix and topic; task ownership and open items remain `stock_news_watch`
     - replies in either topic and quoted direct replies route to the same task
     - cleanup checks the owning task before deleting old reports

@@ -399,11 +399,8 @@ pub fn subject(body: &str) -> String {
         while let Some(rest) = mail::after_prefix(line) {
             line = rest.trim_start();
         }
-        if line.starts_with("[pb new]") || line.starts_with("[pb urgent]") {
-            return "[stock_news_watch] Zulip message".to_owned();
-        }
         if let Some(tag) = mail::tag_of(line) {
-            return format!("[{tag}] Zulip message");
+            return format!("[{}] Zulip message", task_topic(tag));
         }
     }
     "Zulip message".to_owned()
@@ -411,9 +408,9 @@ pub fn subject(body: &str) -> String {
 
 /// Resolve the human-approved PB report labels to their owning task.
 pub fn task_topic(topic: &str) -> &str {
-    match topic {
-        "pb new" | "pb urgent" => "stock_news_watch",
-        _ => topic,
+    match mail::REPORT_LABELS.contains(&topic) {
+        true => "stock_news_watch",
+        false => topic,
     }
 }
 
@@ -473,7 +470,7 @@ mod tests {
     }
     #[test]
     fn direct_and_quoted_task_replies_route() {
-        for label in ["pb new", "pb urgent"] {
+        for label in mail::REPORT_LABELS {
             assert_eq!(task_topic(label), "stock_news_watch");
             assert_eq!(
                 subject(&format!("> [{label}] Daily report\nReply")),

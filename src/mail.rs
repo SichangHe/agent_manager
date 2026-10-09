@@ -126,6 +126,10 @@ pub fn bare(subject: &str) -> &str {
     }
 }
 
+/// Labels the stock news reports carry in place of their task's tag; `pb new` is the misspelt first name, kept for old threads.
+// 🧑 "it's pb news, not pb new"
+pub const REPORT_LABELS: [&str; 3] = ["pb news", "pb urgent", "pb new"];
+
 /// The first `[tag]` at the front of a subject, ignoring reply prefixes.
 pub fn tag_of(subject: &str) -> Option<&str> {
     let mut rest = subject;
@@ -135,7 +139,9 @@ pub fn tag_of(subject: &str) -> Option<&str> {
     let inner = rest.strip_prefix('[')?;
     let tag = &inner[..inner.find(']')?];
     let allowed = |letter: char| letter.is_ascii_alphanumeric() || letter == '_' || letter == '-';
-    (!tag.is_empty() && tag.chars().all(allowed)).then_some(tag)
+    // 🧑 "the emails do not chain": a report label has a space, which no task tag has.
+    let known = REPORT_LABELS.contains(&tag) || tag.chars().all(allowed);
+    (!tag.is_empty() && known).then_some(tag)
 }
 
 /// The Gmail search for every email whose subject carries `[tag]`.
@@ -898,6 +904,16 @@ mod tests {
             reply_to: reply_to.to_owned(),
             references: references.to_owned(),
         })
+    }
+
+    #[test]
+    fn report_labels_thread_like_tags() {
+        assert_eq!(tag_of("Re: [pb news] pb news"), Some("pb news"));
+        assert_eq!(tag_of("[two words] x"), None);
+        let earlier = header("1", "[pb news] pb news", "<first@x>", "");
+        let plan = plan("pb news", "pb news", &[earlier]).unwrap();
+        assert_eq!(plan.subject, "Re: [pb news] pb news");
+        assert_eq!(plan.reply_to, "<first@x>");
     }
 
     #[test]
