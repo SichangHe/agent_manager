@@ -951,6 +951,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
             store.place(&task)?;
             String::new()
         }
+        ("task", "adopt") => {
+            let _lock = store.lock()?;
+            let caller = store.own(text("task_file"))?;
+            let task = store.load(need("task"))?;
+            let old = task.field("managerat").unwrap_or_default().to_owned();
+            for report in work::repointed(vec![task], &old, caller.address()) {
+                store.save(&report)?;
+            }
+            String::new()
+        }
         ("task", "list-add") => {
             let _lock = store.lock()?;
             store.list_add(need("entry"), need("under"))?;
