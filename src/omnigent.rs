@@ -314,9 +314,10 @@ pub fn approve_prompts(settings: &Settings, address: &str) -> Result<Vec<String>
 /// Stop an agent by ending its session.
 ///
 /// Omnigent refuses to stop a session whose terminal has already vanished; such a session runs nothing, so that counts as stopped.
-pub fn stop(settings: &Settings, address: &str) -> Result<(), String> {
+/// Returns what to tell the caller: nothing, or that Omnigent refused because the agent's terminal was already gone.
+pub fn stop(settings: &Settings, address: &str) -> Result<&'static str, String> {
     let Err(refusal) = post_event(settings, address, "stop_session", json!({})) else {
-        return Ok(());
+        return Ok("");
     };
     let resources = api(
         settings,
@@ -328,7 +329,9 @@ pub fn stop(settings: &Settings, address: &str) -> Result<(), String> {
     if has_running_terminal(&resources) {
         Err(refusal)
     } else {
-        Ok(())
+        Ok(
+            "already stopped: its terminal is gone, so no agent process runs; Omnigent may still list the session as idle with its runner online\n",
+        )
     }
 }
 

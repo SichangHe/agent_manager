@@ -1009,7 +1009,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         ("agent", "stop") => {
             let at = agents::address_of(&store, need("who"))?;
-            omnigent::stop(&settings, &at).map_err(failed)?;
+            let said = omnigent::stop(&settings, &at).map_err(failed)?;
             let _lock = store.lock()?;
             for mut task in store.all()?.into_iter().filter(|task| task.address() == at) {
                 task.fields.retain(|(key, _)| key != "agent_stopped");
@@ -1017,7 +1017,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     .push(("agent_stopped".to_owned(), "true".to_owned()));
                 store.save(&task)?;
             }
-            String::new()
+            said.to_owned()
         }
         ("agent", "compact") => {
             let at = agents::address_of(&store, need("who"))?;
