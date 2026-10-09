@@ -87,8 +87,9 @@ pub fn route<'a>(
         staffed.find(|task| task.address() == address)
     };
     let manager_of = |task: &Task| at(task.field("managerat").unwrap_or_default());
-    let tagged =
-        crate::mail::tag_of(subject).and_then(|tag| tasks.iter().find(|task| task.tag() == tag));
+    let tagged = crate::mail::tag_of(subject)
+        .map(crate::zulip::task_topic)
+        .and_then(|tag| tasks.iter().find(|task| task.tag() == tag));
     let chosen = match tagged {
         Some(tagged) if staffed(tagged) && for_manager(body) => manager_of(tagged).or(Some(tagged)),
         Some(tagged) if staffed(tagged) => Some(tagged),

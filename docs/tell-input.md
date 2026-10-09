@@ -8,7 +8,11 @@ message input
 - manager messages retain the 600 character limit
 
 PB news reports
-- `stock_news_watch` can send with `--report-label 'pb new'` or `--report-label 'pb urgent'` under Zulip
+- `stock_news_watch` can send with `--report-label 'pb new'` or `--report-label 'pb urgent'`
+- `--email` sends that one message by email under `human.transport=zulip`
+    - 🧑 "Send the news via email like done before instead of through Zulip"
+    - body with Markdown links `[label](url)` gets an HTML part showing only labels
+    - email replies to `[pb new]`/`[pb urgent]` route to `stock_news_watch`
     - label becomes the body prefix and topic; task ownership and open items remain `stock_news_watch`
     - replies in either topic and quoted direct replies route to the same task
     - cleanup checks the owning task before deleting old reports

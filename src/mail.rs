@@ -336,6 +336,44 @@ impl lettre::message::header::Header for AmhFrom {
     }
 }
 
+/// The body as HTML whose Markdown links `[label](url)` show only the label; `None` when it has no such link.
+// 🧑 "they should use links that hide the URL"
+fn html_of(text: &str) -> Option<String> {
+    let escape = |plain: &str| {
+        plain
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+    let mut html = String::new();
+    let mut rest = text;
+    let mut linked = false;
+    while let Some(open) = rest.find('[') {
+        let link = rest[open + 1..]
+            .split_once("](")
+            .and_then(|(label, after)| {
+                let (url, tail) = after.split_once(')')?;
+                let plain = !label.contains(['[', '\n']) && !url.contains(char::is_whitespace);
+                (plain && url.starts_with("http")).then_some((label, url, tail))
+            });
+        match link {
+            Some((label, url, tail)) => {
+                html += &escape(&rest[..open]);
+                html += &format!("<a href=\"{}\">{}</a>", escape(url), escape(label));
+                rest = tail;
+                linked = true;
+            }
+            None => {
+                html += &escape(&rest[..=open]);
+                rest = &rest[open + 1..];
+            }
+        }
+    }
+    html += &escape(rest);
+    linked.then(|| format!("<div style=\"white-space: pre-wrap\">{html}</div>"))
+}
+
 /// Build an email as the bytes to send, with the given Message-ID.
 pub fn compose(draft: &Draft, message_id: &str) -> Result<Vec<u8>, String> {
     let mailbox = |address: &str| {
@@ -360,7 +398,9 @@ pub fn compose(draft: &Draft, message_id: &str) -> Result<Vec<u8>, String> {
     }
     // The body ends with exactly one line break: a lone part gets one added when formatted, a part among others does not.
     let text = draft.body.strip_suffix('\n').unwrap_or(draft.body);
-    let built = if draft.attachments.is_empty() {
+    let built = if let Some(html) = html_of(text).filter(|_| draft.attachments.is_empty()) {
+        message.multipart(MultiPart::alternative_plain_html(format!("{text}\n"), html))
+    } else if draft.attachments.is_empty() {
         message.singlepart(SinglePart::plain(text.to_owned()))
     } else {
         let mut parts = MultiPart::mixed().singlepart(SinglePart::plain(format!("{text}\n")));
@@ -858,6 +898,16 @@ mod tests {
             reply_to: reply_to.to_owned(),
             references: references.to_owned(),
         })
+    }
+
+    #[test]
+    fn html_hides_link_urls() {
+        let html = html_of("A <b> [Reuters: x](https://r.com/a?b=1&c=2) end [1] (y)").unwrap();
+        assert_eq!(
+            html,
+            "<div style=\"white-space: pre-wrap\">A &lt;b&gt; <a href=\"https://r.com/a?b=1&amp;c=2\">Reuters: x</a> end [1] (y)</div>"
+        );
+        assert_eq!(html_of("no [link] here (http://x)"), None);
     }
 
     #[test]

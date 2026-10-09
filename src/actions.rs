@@ -229,7 +229,7 @@ fn tell_human(
         return Ok(());
     }
     say(&format!("Email sent.\nMessage-ID: {message_id}\n"));
-    say(&match mail::unread(settings, task.tag(), replaces) {
+    say(&match mail::unread(settings, tag, replaces) {
         Ok(unread) => mail::replace_reminder(&message_id, &unread),
         Err(error) => mail::unread_check_failed(&error),
     });
@@ -616,12 +616,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
             // 🧑 "fix the messages to come through pb new and pb urgent instead of this tag"
-            if text("report_label").is_some()
-                && (task.tag() != "stock_news_watch" || !crate::zulip::enabled(&settings))
-            {
-                return Err(
-                    "amh: --report-label requires stock_news_watch and Zulip transport".to_owned(),
-                );
+            if text("report_label").is_some() && task.tag() != "stock_news_watch" {
+                return Err("amh: --report-label requires stock_news_watch".to_owned());
             }
             let mut added = Vec::new();
             for item in many("add") {
@@ -645,8 +641,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let body = tasks::with_changes(&body, &tasks::changes_text(&added, &done));
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
+            // 🧑 "Send the news via email like done before instead of through Zulip"
+            let mut by_email = settings.clone();
+            by_email.insert("human.transport".to_owned(), "email".to_owned());
             tell_human(
-                &settings,
+                if flag("email") { &by_email } else { &settings },
                 &task,
                 need("subject"),
                 &body,

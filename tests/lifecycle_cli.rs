@@ -93,8 +93,7 @@ fn task_start_resolves_parent_before_launch_without_native_identity()
 }
 
 #[test]
-fn pb_labels_reject_wrong_owner_or_transport_before_item_changes()
--> Result<(), Box<dyn std::error::Error>> {
+fn pb_labels_reject_wrong_owner_before_item_changes() -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
@@ -121,7 +120,7 @@ fn pb_labels_reject_wrong_owner_or_transport_before_item_changes()
             "---\nstatus: running\nrunat: omnigent://pb-test\npending_task_items: []\n---\n",
         )?;
     }
-    for (task, transport) in [("other.md", "zulip"), ("stock_news_watch.md", "email")] {
+    for (task, transport) in [("other.md", "zulip"), ("other.md", "email")] {
         fs::write(
             workspace.0.join("config/config.toml"),
             format!("[human]\ntransport = \"{transport}\"\n"),
@@ -141,9 +140,7 @@ fn pb_labels_reject_wrong_owner_or_transport_before_item_changes()
             "body",
         ])?;
         assert!(!output.status.success());
-        assert!(
-            String::from_utf8_lossy(&output.stderr).contains("requires stock_news_watch and Zulip")
-        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("requires stock_news_watch"));
         assert_eq!(workspace.ok(&["task", "show", task])?, before);
     }
     Ok(())
