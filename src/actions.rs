@@ -144,7 +144,15 @@ fn read(path: &str) -> Result<String, String> {
 
 /// Run `systemctl --user` with the caller's terminal and return its exit status.
 fn systemctl(args: &[&str]) -> Result<u8, String> {
-    let status = Command::new("systemctl").arg("--user").args(args).status();
+    let mut command = Command::new("systemctl");
+    // Agent sessions often lack the variable `systemctl --user` needs to find the user's bus.
+    if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
+        use std::os::unix::fs::MetadataExt;
+        let uid = fs::metadata("/proc/self").map(|own| own.uid());
+        let uid = uid.map_err(|error| format!("amh: cannot read own user id: {error}"))?;
+        command.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
+    }
+    let status = command.arg("--user").args(args).status();
     let status = status.map_err(|error| format!("amh: cannot run systemctl: {error}"))?;
     Ok(status
         .code()
