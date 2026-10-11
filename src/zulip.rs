@@ -50,12 +50,12 @@ pub(crate) fn api(
 fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
     let human = settings::get(settings, "zulip.human_id").parse::<u64>();
     let human = human.map_err(|_| "invalid zulip.human_id")?;
-    let receipts = api(
-        settings,
-        "GET",
-        &format!("messages/{id}/read_receipts"),
-        &[],
-    )?;
+    let path = format!("messages/{id}/read_receipts");
+    let receipts = match api(settings, "GET", &path, &[]) {
+        // A message deleted since it was listed is no longer waiting to be read.
+        Err(error) if error.contains("Invalid message") => return Ok(false),
+        receipts => receipts?,
+    };
     let readers = receipts["user_ids"]
         .as_array()
         .ok_or("Zulip gave no read receipts")?;
