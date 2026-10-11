@@ -798,9 +798,11 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     );
     // The human manager: "the compression notice counts PB news and PB urgent emails (shown as '(no tag)'). The compression rules exclude them"
     let counted: Vec<String> = if crate::zulip::enabled(settings) {
-        let topics = crate::zulip::unread_topics(settings, &store.state_dir)?;
-        let report = |topic: &String| mail::REPORT_LABELS.contains(&topic.as_str());
-        topics.into_iter().filter(|topic| !report(topic)).collect()
+        let waiting = crate::zulip::unread(settings, &store.state_dir)?;
+        let topics = waiting.into_iter().map(|(_, topic, _)| topic);
+        topics
+            .filter(|topic| !mail::REPORT_LABELS.contains(&topic.as_str()))
+            .collect()
     } else {
         // Every email an agent sends through `amh` has a task tag, so an untagged one is not the human manager's to compress.
         let unread = mail::unread_all(settings)?;

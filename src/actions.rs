@@ -1028,9 +1028,19 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         ("mail", "unread") => {
             let task = store.own(text("task_file"))?;
-            let unread = mail::unread(&settings, task.tag(), &[]).map_err(failed)?;
-            let theirs = unread.iter().filter(|header| header.is_own());
-            theirs.map(|header| header.listed() + "\n").collect()
+            if crate::zulip::enabled(&settings) {
+                let waiting = crate::zulip::unread(&settings, &store.state_dir).map_err(failed)?;
+                let shown = waiting
+                    .iter()
+                    .filter(|(_, topic, _)| flag("all") || topic == task.tag());
+                shown
+                    .map(|(id, topic, body)| format!("== zulip:{id} topic {topic}\n{body}\n"))
+                    .collect()
+            } else {
+                let unread = mail::unread(&settings, task.tag(), &[]).map_err(failed)?;
+                let theirs = unread.iter().filter(|header| header.is_own());
+                theirs.map(|header| header.listed() + "\n").collect()
+            }
         }
         ("mail", "handled") => {
             let _lock = store.lock()?;

@@ -62,11 +62,11 @@ fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
     Ok(!readers.iter().any(|reader| reader.as_u64() == Some(human)))
 }
 
-/// The topic of each bot message in the human's channel that the human has not read, among the newest `CHECKED`.
+/// Each bot message in the human's channel that the human has not read, among the newest `CHECKED`, oldest first: its ID, topic, and text.
 ///
 /// A message once read stays read, so read IDs are remembered in `amh-zulip-read.txt` and not asked about again.
 // 🧑 "I think I do have more than 16 unread messages. And so why is not the global message compression happening?"
-pub fn unread_topics(settings: &Settings, state_dir: &Path) -> Result<Vec<String>, String> {
+pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String, String)>, String> {
     const CHECKED: usize = 150;
     let bot = api(settings, "GET", "users/me", &[])?["user_id"]
         .as_u64()
@@ -93,7 +93,8 @@ pub fn unread_topics(settings: &Settings, state_dir: &Path) -> Result<Vec<String
     let path = state_dir.join("amh-zulip-read.txt");
     let known = fs::read_to_string(&path).unwrap_or_default();
     let known: Vec<u64> = known.lines().filter_map(|id| id.parse().ok()).collect();
-    let (mut read, mut topics) = (Vec::new(), Vec::new());
+    let (mut read, mut waiting) = (Vec::new(), Vec::new());
+    let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
     for message in messages {
         let Some(id) = message["id"].as_u64() else {
             continue;
@@ -101,12 +102,12 @@ pub fn unread_topics(settings: &Settings, state_dir: &Path) -> Result<Vec<String
         if known.contains(&id) || !unread_by_human(settings, id)? {
             read.push(id.to_string());
         } else {
-            topics.push(message["subject"].as_str().unwrap_or_default().to_owned());
+            waiting.push((id, text(&message["subject"]), text(&message["content"])));
         }
     }
     fs::write(&path, read.join("\n"))
         .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
-    Ok(topics)
+    Ok(waiting)
 }
 
 /// Tell an agent that just sent an update which of its task's earlier updates the human has not read, to merge them.
@@ -167,7 +168,7 @@ pub fn consolidation_reminder(
         return Ok(String::new());
     }
     Ok(format!(
-        "The human has not read {} earlier update(s) of this task: {}. Merge them now: read them in the task's Zulip topic, send ONE update that holds everything still worth reading from them and from the message you just sent, with --replaces for each of these IDs and for the message you just sent. Human messages are never replaced.",
+        "The human has not read {} earlier update(s) of this task: {}. Merge them now: read them with `amh mail unread`, send ONE update that holds everything still worth reading from them and from the message you just sent, with --replaces for each of these IDs and for the message you just sent. Human messages are never replaced.",
         ids.len(),
         ids.join(", ")
     ))
