@@ -925,9 +925,7 @@ pub fn run() -> u8 {
                 .and_then(|()| watcher.nudge(&settings, &store))
                 .and_then(|()| chase_answers(&settings, &store));
         }
-        if !crate::zulip::enabled(&settings)
-            && last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY)
-        {
+        if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
             last_compress = Some(Instant::now());
             if let Err(error) = notify_compression(&settings, &store) {
                 log(&format!("mailbox compression check failed: {error}"));
