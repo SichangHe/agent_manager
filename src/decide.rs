@@ -629,7 +629,7 @@ pub fn compress_text(count: usize, over: usize, tags: &[String]) -> String {
         .map(|(n, tag)| format!("{tag} {n}"))
         .collect();
     format!(
-        "Mailbox compression is due: the human has {count} unread emails from agents, more than {over}; pending-item notices and emails without a task tag, such as PB news, are not counted. Compress the mailbox now. Unread per task tag: {}.",
+        "Mailbox compression is due: the human has {count} unread messages from agents, more than {over}; pending-item notices and messages without a task tag, such as PB news, are not counted. Compress the mailbox now. Unread per task tag: {}.",
         listed.join(", ")
     )
 }
@@ -1096,7 +1096,7 @@ mod tests {
         let tags = ["b", "a", "b", "(no tag)"].map(str::to_owned);
         assert_eq!(
             compress_text(18, 16, &tags),
-            "Mailbox compression is due: the human has 18 unread emails from agents, more than 16; pending-item notices and emails without a task tag, such as PB news, are not counted. Compress the mailbox now. Unread per task tag: b 2, (no tag) 1, a 1."
+            "Mailbox compression is due: the human has 18 unread messages from agents, more than 16; pending-item notices and messages without a task tag, such as PB news, are not counted. Compress the mailbox now. Unread per task tag: b 2, (no tag) 1, a 1."
         );
     }
 

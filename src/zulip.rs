@@ -46,7 +46,70 @@ pub(crate) fn api(
     request(settings, method, path, fields, None)
 }
 
-/// Prompt for deliberate consolidation; retained messages are not evidence of human unread state.
+/// Whether the human has not read bot message `id`, from its Zulip read receipts.
+fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
+    let human = settings::get(settings, "zulip.human_id").parse::<u64>();
+    let human = human.map_err(|_| "invalid zulip.human_id")?;
+    let receipts = api(
+        settings,
+        "GET",
+        &format!("messages/{id}/read_receipts"),
+        &[],
+    )?;
+    let readers = receipts["user_ids"]
+        .as_array()
+        .ok_or("Zulip gave no read receipts")?;
+    Ok(!readers.iter().any(|reader| reader.as_u64() == Some(human)))
+}
+
+/// The topic of each bot message in the human's channel that the human has not read, among the newest `CHECKED`.
+///
+/// A message once read stays read, so read IDs are remembered in `amh-zulip-read.txt` and not asked about again.
+// 🧑 "I think I do have more than 16 unread messages. And so why is not the global message compression happening?"
+pub fn unread_topics(settings: &Settings, state_dir: &Path) -> Result<Vec<String>, String> {
+    const CHECKED: usize = 150;
+    let bot = api(settings, "GET", "users/me", &[])?["user_id"]
+        .as_u64()
+        .ok_or("Zulip profile has no user ID")?;
+    let stream = settings::get(settings, "zulip.stream_id").parse::<u64>();
+    let stream = stream.map_err(|_| "counting unread Zulip messages needs zulip.stream_id")?;
+    let narrow =
+        json!([{"operator":"sender","operand":bot},{"operator":"stream","operand":stream}]);
+    let result = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", CHECKED.to_string()),
+            ("num_after", "0".to_owned()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    let messages = result["messages"]
+        .as_array()
+        .ok_or("Zulip response has no messages")?;
+    let path = state_dir.join("amh-zulip-read.txt");
+    let known = fs::read_to_string(&path).unwrap_or_default();
+    let known: Vec<u64> = known.lines().filter_map(|id| id.parse().ok()).collect();
+    let (mut read, mut topics) = (Vec::new(), Vec::new());
+    for message in messages {
+        let Some(id) = message["id"].as_u64() else {
+            continue;
+        };
+        if known.contains(&id) || !unread_by_human(settings, id)? {
+            read.push(id.to_string());
+        } else {
+            topics.push(message["subject"].as_str().unwrap_or_default().to_owned());
+        }
+    }
+    fs::write(&path, read.join("\n"))
+        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    Ok(topics)
+}
+
+/// Tell an agent that just sent an update which of its task's earlier updates the human has not read, to merge them.
 // 🧑 "Do agents get notification to compress their prior julip messages when sending messages and there are existing pending things." "Implement both. Make sane decisions."
 pub fn consolidation_reminder(
     settings: &Settings,
@@ -86,16 +149,26 @@ pub fn consolidation_reminder(
     let messages = result["messages"]
         .as_array()
         .ok_or("Zulip response has no messages")?;
+    // 🧑 "some agents have more than one unread messages sitting in my inbox. Why are they not notified to compress them?"
+    const NEWEST: usize = 20;
     let prior = retained_updates(messages, bot, tag, current);
-    if prior.is_empty() {
+    let mut ids = Vec::new();
+    for id in prior
+        .iter()
+        .rev()
+        .take(NEWEST)
+        .filter_map(|message| message["id"].as_u64())
+    {
+        if unread_by_human(settings, id)? {
+            ids.push(format!("zulip:{id}"));
+        }
+    }
+    if ids.is_empty() {
         return Ok(String::new());
     }
-    let ids: Vec<String> = prior
-        .iter()
-        .filter_map(|message| message["id"].as_u64().map(|id| format!("zulip:{id}")))
-        .collect();
     Ok(format!(
-        "Earlier retained bot updates for this task (up to 100 recent messages checked): {}. Read them in the task's Zulip topic before replacing them. This does not establish whether the human read them. If they still describe pending work, consolidate their relevant details and all open requests into your next update; use --replaces for superseded IDs after preserving their content in the replacement. Human messages are never consolidation candidates. Do not resend only to satisfy this reminder.",
+        "The human has not read {} earlier update(s) of this task: {}. Merge them now: read them in the task's Zulip topic, send ONE update that holds everything still worth reading from them and from the message you just sent, with --replaces for each of these IDs and for the message you just sent. Human messages are never replaced.",
+        ids.len(),
         ids.join(", ")
     ))
 }

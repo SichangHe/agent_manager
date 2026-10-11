@@ -796,14 +796,21 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
         number("compress.unread_over", 16),
         number("compress.unread_urgent", 30),
     );
-    let unread = mail::unread_all(settings)?;
-    let counted: Vec<&mail::Header> = unread
-        .iter()
-        .filter(|header| decide::countable(&header.sender))
-        // The human manager: "the compression notice counts PB news and PB urgent emails (shown as '(no tag)'). The compression rules exclude them"
+    // The human manager: "the compression notice counts PB news and PB urgent emails (shown as '(no tag)'). The compression rules exclude them"
+    let counted: Vec<String> = if crate::zulip::enabled(settings) {
+        let topics = crate::zulip::unread_topics(settings, &store.state_dir)?;
+        let report = |topic: &String| mail::REPORT_LABELS.contains(&topic.as_str());
+        topics.into_iter().filter(|topic| !report(topic)).collect()
+    } else {
         // Every email an agent sends through `amh` has a task tag, so an untagged one is not the human manager's to compress.
-        .filter(|header| mail::tag_of(&header.subject).is_some())
-        .collect();
+        let unread = mail::unread_all(settings)?;
+        let countable = unread
+            .iter()
+            .filter(|header| decide::countable(&header.sender));
+        countable
+            .filter_map(|header| mail::tag_of(&header.subject).map(str::to_owned))
+            .collect()
+    };
     let path = store.state_dir.join(COMPRESSED);
     let noted = fs::read_to_string(&path).unwrap_or_default();
     let mut parts = noted.split_whitespace().map(str::parse::<u64>);
@@ -820,15 +827,11 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     if !decide::compress_due(counted.len(), over, urgent, last, now_s) {
         return Ok(());
     }
-    let tags: Vec<String> = counted
-        .iter()
-        .filter_map(|header| mail::tag_of(&header.subject).map(str::to_owned))
-        .collect();
     let task = store.load(name)?;
     omnigent::send(
         settings,
         task.address(),
-        &decide::compress_text(counted.len(), over, &tags),
+        &decide::compress_text(counted.len(), over, &counted),
     )?;
     fs::write(&path, format!("{now_s} {}\n", counted.len()))
         .map_err(|error| format!("cannot write {COMPRESSED}: {error}"))?;
