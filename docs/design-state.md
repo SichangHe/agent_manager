@@ -97,6 +97,13 @@ commands (names to settle)
 - `amh todo list` shows id, stage, and what each request waits for
 
 order of building, each step in production before the next
+- status on 2026-10-12: steps 1 to 4 are in production; step 6 mostly (task files are generated from SQLite snapshots)
+- step 5 in slices
+    - done: agent-to-agent notifications go through the `messages` table
+    - done: `human mail received`, `message delivered`, `message rerouted` and `message failed` events for the human's messages
+    - next: the human's messages as `messages` rows instead of `(pending)` markers in task text
+    - then: the `amh-*.txt` records in the state folder move into SQLite
+    - last: the watcher acts on events instead of scanning every 5 s
 1. event table, written by today's actions next to the markdown (no behaviour change)
 2. requests in SQLite; markdown items rendered from it; ids shown
 3. stages with approve and reject

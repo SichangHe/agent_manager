@@ -155,6 +155,14 @@ fn tell_human_once(settings: &Settings, store: &Store, task: &Task, key: &str, t
     }
 }
 
+/// Record in the event log that a message of the human was taken in for a task.
+fn received(store: &Store, task: &str, stored: &str) {
+    let data = serde_json::json!({"stored": format!("manager_mail/{stored}")});
+    if let Err(error) = crate::log::event(&store.state_dir, "human mail received", task, data) {
+        log(&error);
+    }
+}
+
 /// Store one human email and append a `(pending)` block naming it to the right task file; returns that task file's name.
 fn take_in(
     settings: &Settings,
@@ -196,7 +204,10 @@ fn take_in_mail(
         // A stored file means the email was taken in before and only marking it read failed.
         if !stored.exists() {
             match take_in(settings, store, &stored, &name, &mail) {
-                Ok(task) => log(&format!("mail {name} {subject} -> {task}")),
+                Ok(task) => {
+                    log(&format!("mail {name} {subject} -> {task}"));
+                    received(store, &task, &name);
+                }
                 Err(error) => {
                     let _ = fs::remove_file(&stored);
                     log(&format!(
@@ -252,6 +263,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
                 task.body = decide::queued(&task.body, &name);
                 store.receive_mail(&key, &task)?;
                 log(&format!("Zulip {id} -> {}", task.name));
+                received(store, &task.name, &name);
             }
         }
         cursor = id;
@@ -530,12 +542,26 @@ fn deliver_block(
             return Ok(false);
         }
     };
-    let settled = decide::settle(
-        task,
-        plan,
-        &block[0],
-        &attempt(settings, task, plan, &text, reply.as_deref()),
-    );
+    let outcome = attempt(settings, task, plan, &text, reply.as_deref());
+    let settled = decide::settle(task, plan, &block[0], &outcome);
+    // 🧑 "log all the events (resolution requested, etc.) and who did those"
+    let (kind, data) = match &outcome {
+        Outcome::Delivered => (
+            "message delivered",
+            serde_json::json!({"to": plan.target, "block": block[0]}),
+        ),
+        Outcome::Rerouted { error } => (
+            "message rerouted",
+            serde_json::json!({"to": plan.fallback, "block": block[0], "error": error}),
+        ),
+        Outcome::Unreachable { error, second } => (
+            "message failed",
+            serde_json::json!({"to": plan.target, "block": block[0], "error": error, "fallback_error": second}),
+        ),
+    };
+    if let Err(error) = crate::log::event(&store.state_dir, kind, name, data) {
+        log(&error);
+    }
     for line in &settled.logs {
         log(line);
     }
