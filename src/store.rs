@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 
 use crate::tasks::Task;
@@ -12,6 +13,9 @@ pub struct Store {
     pub root: PathBuf,
     pub state_dir: PathBuf,
 }
+
+/// A wait for the lock at least this long is logged with the holder's name.
+const LONG_LOCK_WAIT_S: u64 = 5;
 
 impl Store {
     pub fn new(values: &BTreeMap<String, String>) -> Self {
@@ -27,8 +31,40 @@ impl Store {
             format!("amh: cannot lock {}: {error}", self.state_dir.display())
         };
         fs::create_dir_all(&self.state_dir).map_err(failed)?;
-        let lock = File::create(self.state_dir.join("amh.lock")).map_err(failed)?;
-        lock.lock().map_err(failed)?;
+        let path = self.state_dir.join("amh.lock");
+        let mut lock = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(failed)?;
+        if lock.try_lock().is_err() {
+            // The lock file names its holder, so a long wait can be traced to the run that caused it.
+            let holder = fs::read_to_string(&path).unwrap_or_default();
+            let started = std::time::Instant::now();
+            lock.lock().map_err(failed)?;
+            let waited_s = started.elapsed().as_secs();
+            if waited_s >= LONG_LOCK_WAIT_S {
+                let line = format!(
+                    "{} waited {waited_s} s for the amh lock held by: {}\n",
+                    chrono::Local::now().format("%F %T"),
+                    holder.trim()
+                );
+                eprint!("amh: {line}");
+                if let Ok(mut waits) = fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(self.state_dir.join("amh-lock-waits.log"))
+                {
+                    let _ = waits.write_all(line.as_bytes());
+                }
+            }
+        }
+        let me: Vec<String> = std::env::args().take(4).collect();
+        lock.set_len(0).map_err(failed)?;
+        lock.write_all(format!("pid {} {}", std::process::id(), me.join(" ")).as_bytes())
+            .map_err(failed)?;
         let mut database = Database::open(&self.state_dir.join("amh.sqlite3"))?;
         if !database.initialized()? {
             self.recover_transfer()?;
