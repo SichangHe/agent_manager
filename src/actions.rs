@@ -969,6 +969,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             String::new()
         }
+        ("task", "list-remove") => {
+            let _lock = store.lock()?;
+            store.list_remove(need("entry"))?;
+            String::new()
+        }
         ("task", "list-add") => {
             let _lock = store.lock()?;
             store.list_add(need("entry"), need("under"))?;

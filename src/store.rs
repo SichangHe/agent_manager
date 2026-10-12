@@ -456,6 +456,17 @@ impl Store {
         self.write("TODO.md", &(lines.join("\n") + "\n"))
     }
 
+    /// Remove a plain bullet that `list_add` saved.
+    // 🧑 "How does the human add human pending items for themselves?"
+    pub fn list_remove(&self, entry: &str) -> Result<(), String> {
+        let (list, row) = (self.list()?, format!("- {}", entry.trim()));
+        let lines: Vec<_> = list.lines().filter(|line| line.trim() != row).collect();
+        if lines.len() == list.lines().count() {
+            return Err(format!("amh: the task list has no entry `{row}`"));
+        }
+        self.write("TODO.md", &(lines.join("\n") + "\n"))
+    }
+
     /// Put the task's row at the top of its section of the task list.
     pub fn place(&self, task: &Task) -> Result<(), String> {
         match taskfile::placed(&self.list()?, &task.name, task.address(), task.section())? {
