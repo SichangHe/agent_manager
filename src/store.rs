@@ -456,6 +456,20 @@ impl Store {
         self.write("TODO.md", &(lines.join("\n") + "\n"))
     }
 
+    /// The plain bullets of one section of the task list, one per line.
+    pub fn list_entries(&self, section: &str) -> Result<String, String> {
+        let list = self.list()?;
+        let rows = list
+            .lines()
+            .skip_while(|line| !line.trim().eq_ignore_ascii_case(&format!("{section}:")))
+            .skip(1)
+            .take_while(|line| !taskfile::SECTIONS.contains(&line.trim().to_lowercase().as_str()));
+        Ok(rows
+            .filter(|line| line.starts_with("- "))
+            .map(|line| format!("{line}\n"))
+            .collect())
+    }
+
     /// Remove a plain bullet that `list_add` saved.
     // 🧑 "How does the human add human pending items for themselves?"
     pub fn list_remove(&self, entry: &str) -> Result<(), String> {

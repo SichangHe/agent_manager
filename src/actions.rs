@@ -384,6 +384,18 @@ fn short(values: &Value) -> Result<u8, String> {
             serde_json::json!({"who": values["who"], "read_only": values["read_only"]}),
         ),
         "edit" => long("task", "edit", serde_json::json!({"task": name})),
+        // 🧑 "Let's call it `amh human`"
+        "human" => {
+            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
+            let store = Store::new(&settings);
+            let _lock = store.lock()?;
+            match (text("text"), values["done"] == true) {
+                (Some(item), true) => store.list_remove(item)?,
+                (Some(item), false) => store.list_add(item, "human pending")?,
+                (None, _) => say(&store.list_entries("human pending")?),
+            }
+            Ok(0)
+        }
         "say" => {
             let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
             let store = Store::new(&settings);
