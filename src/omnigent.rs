@@ -288,6 +288,10 @@ pub fn approve_prompts(settings: &Settings, address: &str) -> Result<Vec<String>
             && params["policy_name"]
                 .as_str()
                 .is_some_and(|name| name.ends_with("_permission"));
+        // A question is for the human; accepting it without an answer leaves the agent waiting in its terminal.
+        if !params["ask_user_question"].is_null() {
+            continue;
+        }
         if let (true, Some(elicitation)) = (is_permission, prompt["elicitation_id"].as_str()) {
             post_event(
                 settings,
@@ -309,6 +313,65 @@ pub fn approve_prompts(settings: &Settings, address: &str) -> Result<Vec<String>
         }
     }
     Ok(approved)
+}
+
+/// One question an agent waits on: its prompt ID, and each part's text with its choices as `(label, description)`.
+pub type Question = (String, Vec<(String, Vec<(String, String)>)>);
+
+/// The questions with choices that an agent asked through `AskUserQuestion` and still waits on.
+// 🧑 "Choices like that should have been automatically sent to me."
+pub fn pending_questions(settings: &Settings, address: &str) -> Result<Vec<Question>, String> {
+    let id = session(address)?;
+    let found = api(
+        settings,
+        "GET",
+        &format!("/v1/sessions/{id}?include_items=false"),
+        None,
+    )?;
+    let mut questions = Vec::new();
+    for prompt in found["pending_elicitations"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        let (Some(elicitation), Some(parts)) = (
+            prompt["elicitation_id"].as_str(),
+            prompt["params"]["ask_user_question"]["questions"].as_array(),
+        ) else {
+            continue;
+        };
+        let parts = parts
+            .iter()
+            .map(|part| {
+                let choices = part["options"].as_array().into_iter().flatten();
+                let choices =
+                    choices.map(|choice| (shown(&choice["label"]), shown(&choice["description"])));
+                (shown(&part["question"]), choices.collect())
+            })
+            .collect();
+        questions.push((elicitation.to_owned(), parts));
+    }
+    Ok(questions)
+}
+
+/// Give the human's answers, `(question, answer)` pairs, to the question an agent waits on.
+pub fn answer_question(
+    settings: &Settings,
+    address: &str,
+    elicitation: &str,
+    answers: &[(String, String)],
+) -> Result<(), String> {
+    let content: serde_json::Map<String, Value> = answers
+        .iter()
+        .map(|(question, answer)| (question.clone(), json!(answer)))
+        .collect();
+    post_event(
+        settings,
+        address,
+        "approval",
+        json!({"elicitation_id": elicitation, "action": "accept", "content": content}),
+    )
+    .map(|_| ())
 }
 
 /// Stop an agent by ending its session.

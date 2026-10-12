@@ -150,6 +150,59 @@ pub fn mail_text(name: &str, stored: &str, remind: bool) -> String {
     )
 }
 
+/// What the human reads when an agent asks a question with choices.
+pub fn question_text(task: &str, parts: &[(String, Vec<(String, String)>)]) -> String {
+    let mut text = format!(
+        "The agent of {task} asks and waits for your answer. Reply in this topic with a choice's number or your own words{}.\n",
+        if parts.len() > 1 {
+            ", one line per question"
+        } else {
+            ""
+        }
+    );
+    for (question, choices) in parts {
+        text.push_str(&format!("\n{question}\n"));
+        for (number, (label, description)) in choices.iter().enumerate() {
+            let description = if description.is_empty() || description == "null" {
+                String::new()
+            } else {
+                format!(": {description}")
+            };
+            text.push_str(&format!("{}. {label}{description}\n", number + 1));
+        }
+    }
+    text
+}
+
+/// The human's answer to each part of a question, from a stored message: a choice's number means that choice, other text is the answer itself.
+///
+/// With several parts, each line that is not a quote answers the next part; with one part, the whole reply does.
+pub fn question_answers(
+    parts: &[(String, Vec<(String, String)>)],
+    stored: &str,
+) -> Vec<(String, String)> {
+    let body = stored.split_once("\n\n").map_or(stored, |(_, body)| body);
+    let lines: Vec<&str> = body
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('>'))
+        .collect();
+    let whole = lines.join("\n");
+    let mut answers = Vec::new();
+    for (index, (question, choices)) in parts.iter().enumerate() {
+        let reply = if parts.len() > 1 && lines.len() >= parts.len() {
+            lines[index]
+        } else {
+            &whole
+        };
+        let number = reply.trim_end_matches('.').parse::<usize>().ok();
+        let chosen = number.and_then(|number| choices.get(number.wrapping_sub(1)));
+        let answer = chosen.map_or(reply, |(label, _)| label);
+        answers.push((question.clone(), answer.to_owned()));
+    }
+    answers
+}
+
 /// Who gets the pending blocks of one task.
 #[derive(Debug, PartialEq)]
 pub struct Plan {
@@ -684,6 +737,40 @@ mod tests {
 
     fn by_name<'a>(tasks: &'a [Task], name: &str) -> &'a Task {
         tasks.iter().find(|task| task.name == name).unwrap()
+    }
+
+    #[test]
+    fn question_goes_to_the_human_and_the_reply_comes_back() {
+        let choice = |label: &str, about: &str| (label.to_owned(), about.to_owned());
+        let parts = vec![
+            (
+                "Which way?".to_owned(),
+                vec![choice("Left", "the short one"), choice("Right", "")],
+            ),
+            (
+                "How fast?".to_owned(),
+                vec![choice("Slow", ""), choice("Fast", "")],
+            ),
+        ];
+        let text = question_text("t.md", &parts);
+        assert!(
+            text.contains("Which way?\n1. Left: the short one\n2. Right\n"),
+            "{text}"
+        );
+        let answer = |stored: &str| question_answers(&parts, stored);
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            answer("Subject: [t] Zulip message\n\n> Which way?\n\n2\nvery slow"),
+            [pair("Which way?", "Right"), pair("How fast?", "very slow")]
+        );
+        assert_eq!(
+            question_answers(&parts[..1], "Subject: x\n\n1."),
+            [pair("Which way?", "Left")]
+        );
+        assert_eq!(
+            question_answers(&parts[..1], "Subject: x\n\nNeither,\ngo back"),
+            [pair("Which way?", "Neither,\ngo back")]
+        );
     }
 
     #[test]

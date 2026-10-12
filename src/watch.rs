@@ -31,6 +31,8 @@ const COMPRESSED: &str = "amh-compress.txt";
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
 pub const AWAITING: &str = "amh-awaiting.txt";
 const TOLD_HUMAN: &str = "amh-told-human.txt";
+/// The agent questions already sent to the human: lines of prompt IDs.
+const ASKED_HUMAN: &str = "amh-asked-human.txt";
 const PROBLEM_NOTICES: &str = "amh-problem-notices.txt";
 
 type Settings = BTreeMap<String, String>;
@@ -454,8 +456,34 @@ fn delivery_text(settings: &Settings, store: &Store, block: &[String]) -> Result
 }
 
 /// Try to deliver one message: to the target, else to the fallback manager.
-fn attempt(settings: &Settings, task: &Task, plan: &Plan, text: &str) -> Outcome {
-    let (state, evidence) = omnigent::status(settings, &plan.target);
+fn attempt(
+    settings: &Settings,
+    task: &Task,
+    plan: &Plan,
+    text: &str,
+    reply: Option<&str>,
+) -> Outcome {
+    let (mut state, mut evidence) = omnigent::status(settings, &plan.target);
+    // The human's message to an agent that waits on a question it was sent is the answer to that question.
+    if let ("stuck", Some(reply)) = (state, reply) {
+        let waiting = omnigent::pending_questions(settings, &plan.target).unwrap_or_default();
+        for (elicitation, parts) in &waiting {
+            let answers = decide::question_answers(parts, reply);
+            match omnigent::answer_question(settings, &plan.target, elicitation, &answers) {
+                Ok(()) => log(&format!(
+                    "gave the human's answer to the question of {}: {answers:?}",
+                    task.name
+                )),
+                Err(error) => log(&format!(
+                    "answering the question of {} failed: {error}",
+                    task.name
+                )),
+            }
+        }
+        if !waiting.is_empty() {
+            (state, evidence) = omnigent::status(settings, &plan.target);
+        }
+    }
     // A missing or stuck agent reads no messages, so its mail goes to its manager.
     let sent = match state {
         "missing" | "stuck" | "error" => Err(format!("the agent is {state}: {evidence}")),
@@ -486,6 +514,13 @@ fn deliver_block(
         return Ok(false);
     }
     let name = &task.name;
+    let reply = match decide::source_of(&block[0]) {
+        Source::Mail(file) => {
+            let file = Path::new(file).file_name().unwrap_or_default();
+            fs::read_to_string(store.root.join("manager_mail").join(file)).ok()
+        }
+        _ => None,
+    };
     let text = match delivery_text(settings, store, block) {
         Ok(text) => decide::addressed(task, plan, &text),
         Err(error) => {
@@ -495,7 +530,12 @@ fn deliver_block(
             return Ok(false);
         }
     };
-    let settled = decide::settle(task, plan, &block[0], &attempt(settings, task, plan, &text));
+    let settled = decide::settle(
+        task,
+        plan,
+        &block[0],
+        &attempt(settings, task, plan, &text, reply.as_deref()),
+    );
     for line in &settled.logs {
         log(line);
     }
@@ -705,6 +745,7 @@ fn answer_prompts(settings: &Settings, store: &Store) -> Result<(), String> {
         if task.address() == "retired" || omnigent::status(settings, task.address()).0 != "stuck" {
             continue;
         }
+        ask_human(settings, store, &task);
         let answered = omnigent::approve_prompts(settings, task.address()).and_then(|approved| {
             for prompt in &approved {
                 log(&format!(
@@ -727,6 +768,43 @@ fn answer_prompts(settings: &Settings, store: &Store) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Send the human each question with choices that an agent waits on, once.
+// 🧑 "Choices like that should have been automatically sent to me."
+fn ask_human(settings: &Settings, store: &Store, task: &Task) {
+    let waiting = match omnigent::pending_questions(settings, task.address()) {
+        Ok(waiting) => waiting,
+        Err(error) => {
+            return log(&format!(
+                "reading the question of {} failed: {error}",
+                task.name
+            ));
+        }
+    };
+    for (elicitation, parts) in waiting {
+        if record(store, ASKED_HUMAN)
+            .lines()
+            .any(|asked| asked == elicitation)
+        {
+            continue;
+        }
+        let body = decide::question_text(&task.name, &parts);
+        let sent = mail::send(
+            settings,
+            &store.state_dir,
+            task.tag(),
+            "Agent question",
+            &body,
+            mail::WATCHER,
+            &[],
+        );
+        let noted = sent.and_then(|_| append(store, ASKED_HUMAN, &format!("{elicitation}\n")));
+        match noted {
+            Ok(()) => log(&format!("sent the human the question of {}", task.name)),
+            Err(error) => log(&format!("question of {} was not sent: {error}", task.name)),
+        }
+    }
 }
 
 /// Make sure each delivered human email gets an answer: remind the agent after `ANSWER_S`, then tell its manager and the human.
