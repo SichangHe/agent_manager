@@ -163,7 +163,7 @@ fn received(store: &Store, task: &str, stored: &str) {
     }
 }
 
-/// Store one human email and append a `(pending)` block naming it to the right task file; returns that task file's name.
+/// Store one human email and queue it for the agent of the right task file; returns that task file's name.
 fn take_in(
     settings: &Settings,
     store: &Store,
@@ -177,9 +177,10 @@ fn take_in(
     let task = &decide::route(&tasks, main_manager, &mail.subject, &mail.body)?.name;
     write_private(stored, &decide::stored_mail(&mail.subject, &mail.body))
         .map_err(|error| format!("cannot write {}: {error}", stored.display()))?;
-    let file = store.load(task)?.render();
-    store.write(task, &decide::queued(&file, name))?;
-    Ok(task.clone())
+    let mut task = store.load(task)?;
+    task.body = decide::queued(&task.body, name);
+    store.queue_mail(Some(name), &task, name)?;
+    Ok(task.name)
 }
 
 /// Take in each new human email; one that cannot be routed stays unread and unstored.
@@ -209,7 +210,14 @@ fn take_in_mail(
                     received(store, &task, &name);
                 }
                 Err(error) => {
-                    let _ = fs::remove_file(&stored);
+                    // A committed receipt means the email is queued; its stored file must stay, and the next round only marks it read.
+                    let queued =
+                        crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))
+                            .and_then(|database| database.received_mail(&name))
+                            .unwrap_or(true);
+                    if !queued {
+                        let _ = fs::remove_file(&stored);
+                    }
                     log(&format!(
                         "mail {name} {subject} left unread, not taken in: {error}"
                     ));
@@ -261,7 +269,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
                 write_private(&stored, &decide::stored_mail(&subject, body))
                     .map_err(|error| format!("cannot store Zulip message: {error}"))?;
                 task.body = decide::queued(&task.body, &name);
-                store.receive_mail(&key, &task)?;
+                store.queue_mail(Some(&key), &task, &name)?;
                 log(&format!("Zulip {id} -> {}", task.name));
                 received(store, &task.name, &name);
             }
@@ -514,16 +522,16 @@ fn attempt(
     }
 }
 
-/// Deliver one pending block of a task and delete its marker line; `false` when the task is to be retried later.
+/// Try to deliver one pending block of a task and record the outcome; `false` when the task is to be retried later.
 fn deliver_block(
     settings: &Settings,
     store: &Store,
     task: &Task,
     plan: &Plan,
     block: &[String],
-) -> Result<bool, String> {
+) -> bool {
     if omnigent::status(settings, &plan.target).0 == "paused" {
-        return Ok(false);
+        return false;
     }
     let name = &task.name;
     let reply = match decide::source_of(&block[0]) {
@@ -539,7 +547,7 @@ fn deliver_block(
             log(&format!(
                 "a block in {name} names a stored email that cannot be read: {error}"
             ));
-            return Ok(false);
+            return false;
         }
     };
     let outcome = attempt(settings, task, plan, &text, reply.as_deref());
@@ -574,13 +582,15 @@ fn deliver_block(
             log(&format!("{error}; the answer to {mail} will not be chased"));
         }
     }
-    if !settled.delivered {
-        return Ok(false);
-    }
+    settled.delivered
+}
+
+/// Delete the marker line of a delivered block; `false` when the block is gone.
+fn unmark(store: &Store, name: &str, target: &str, first: &str) -> Result<bool, String> {
     let _lock = store.lock()?;
-    crate::actions::clear_stopped(store, &plan.target)?;
+    crate::actions::clear_stopped(store, target)?;
     let mut fresh = store.load(name)?;
-    match decide::without_marker(&fresh.body, &block[0]) {
+    match decide::without_marker(&fresh.body, first) {
         Some(body) => {
             fresh.body = body;
             store.save(&fresh).map(|()| true)
@@ -661,7 +671,7 @@ impl Watcher {
         };
     }
 
-    /// Send every pending block to its task's agent, then delete the marker line.
+    /// Send every pending block and every queued message of the human to its task's agent, then delete the marker line or mark the message sent.
     ///
     /// A block in a task that has no agent (done or retired) goes to that task's manager, else to the main manager.
     fn deliver_pending(&mut self, settings: &Settings, store: &Store) -> Result<(), String> {
@@ -681,16 +691,55 @@ impl Watcher {
             let plan = decide::plan(task, &agent_at, settings::get(settings, "main_manager"));
             self.failed_at.remove(&task.name);
             for (_, block) in taskfile::pending_blocks(&task.body) {
-                if !block.is_empty() && !deliver_block(settings, store, task, &plan, &block)? {
+                if !block.is_empty()
+                    && !(deliver_block(settings, store, task, &plan, &block)
+                        && unmark(store, &task.name, &plan.target, &block[0])?)
+                {
                     self.failed_at.insert(task.name.clone(), Instant::now());
                     break;
                 }
             }
         }
+        let queued = database.pending_messages("human")?;
+        for message in &queued {
+            let (Some(id), Some(name), Some(mail)) = (
+                message["id"].as_i64(),
+                message["target"].as_str(),
+                message["text"].as_str(),
+            ) else {
+                continue;
+            };
+            if self
+                .failed_at
+                .get(name)
+                .is_some_and(|failed| failed.elapsed() < retry)
+            {
+                continue;
+            }
+            let Some(task) = tasks.iter().find(|task| task.name == name) else {
+                log(&format!(
+                    "{mail} is queued for {name}, which does not exist"
+                ));
+                continue;
+            };
+            let plan = decide::plan(task, &agent_at, settings::get(settings, "main_manager"));
+            if deliver_block(settings, store, task, &plan, &[decide::mail_line(mail)]) {
+                self.failed_at.remove(name);
+                let _lock = store.lock()?;
+                // `amh stop` may have dropped the message meanwhile; a crash before this line delivers it again.
+                if let Err(error) = database.finish_message(id, true, "") {
+                    log(&error);
+                }
+                crate::actions::clear_stopped(store, &plan.target)?;
+            } else {
+                self.failed_at.insert(name.to_owned(), Instant::now());
+            }
+        }
         self.failed_at.retain(|name, _| {
-            tasks
-                .iter()
-                .any(|task| &task.name == name && task.body.contains(MARKER))
+            queued.iter().any(|message| message["target"] == *name)
+                || tasks
+                    .iter()
+                    .any(|task| &task.name == name && task.body.contains(MARKER))
         });
         self.pending_events = Some(through);
         Ok(())

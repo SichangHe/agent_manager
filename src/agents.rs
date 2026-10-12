@@ -225,6 +225,11 @@ pub fn close_task(
         let _lock = store.lock()?;
         let mut task = store.load(name)?;
         crate::requests::can_close(&task, &store.all()?)?;
+        if !store.queued_mail(name)?.is_empty() {
+            return Err(format!(
+                "amh: {name} still has an undelivered message of the human; the watcher delivers it within seconds"
+            ));
+        }
         work::close(&mut task)?;
         store.save(&task)?;
         store.place(&task)?;

@@ -52,7 +52,7 @@ pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String>
     }
     let mut failed = Vec::new();
     let mut awakened = Vec::new();
-    for message in database.pending_messages()? {
+    for message in database.pending_messages("agent")? {
         let to = message["target"]
             .as_str()
             .ok_or("amh: notification lacks recipient")?;
@@ -316,8 +316,9 @@ fn queue_from_human(
     )
     .map_err(|error| format!("amh: cannot store what you wrote: {error}"))?;
     // The file may have changed meanwhile, so the block is appended to its current text.
-    let current = store.load(name)?.render();
-    store.write(name, &decide::queued(&current, &mail_name))?;
+    let mut task = store.load(name)?;
+    task.body = decide::queued(&task.body, &mail_name);
+    store.queue_mail(None, &task, &mail_name)?;
     Ok(format!(
         "queued for the agent of {name}; the watcher delivers it within seconds\n"
     ))
@@ -446,7 +447,8 @@ fn short(values: &Value) -> Result<u8, String> {
             let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
             let store = Store::new(&settings);
             let found = store.load(name)?;
-            let undelivered = taskfile::pending_blocks(&found.body).len();
+            let undelivered =
+                taskfile::pending_blocks(&found.body).len() + store.queued_mail(name)?.len();
             if !found.items.is_empty() || undelivered > 0 {
                 let listed: String = found
                     .items
@@ -493,6 +495,7 @@ fn short(values: &Value) -> Result<u8, String> {
                     .collect();
                 task.body = kept.join("\n");
                 store.save(&task)?;
+                store.drop_queued_mail(name)?;
                 request_effects(&settings, &store)?;
             }
             let at = agents::close_task(&settings, &store, name, true, false, false)?;

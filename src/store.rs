@@ -274,6 +274,56 @@ impl Store {
         Ok(received)
     }
 
+    /// Commit a task together with one stored message of the human queued for its agent; with a receipt `key`, at most once.
+    pub fn queue_mail(&self, key: Option<&str>, task: &Task, mail: &str) -> Result<bool, String> {
+        let mut database = self
+            .database()?
+            .ok_or_else(|| "amh: queued messages require an initialized SQLite store".to_owned())?;
+        let (task, mut events) = self.prepare(task)?;
+        events.push(log::event_value(
+            "message queued",
+            &task.name,
+            serde_json::json!({"channel": "human", "to": task.name, "text": mail}),
+        ));
+        let snapshots = [(task.name.clone(), task.render())];
+        let queued = match key {
+            Some(key) => database.receive_mail(key, &snapshots, &events)?,
+            None => database.commit(&snapshots, &events).map(|()| true)?,
+        };
+        self.export(&database)?;
+        Ok(queued)
+    }
+
+    /// The IDs of the human's messages queued for a task and not delivered yet.
+    pub fn queued_mail(&self, name: &str) -> Result<Vec<i64>, String> {
+        let Some(database) = self.database()? else {
+            return Ok(Vec::new());
+        };
+        Ok(database
+            .pending_messages("human")?
+            .iter()
+            .filter(|message| message["target"] == name)
+            .filter_map(|message| message["id"].as_i64())
+            .collect())
+    }
+
+    /// Give up delivering the human's messages still queued for a task.
+    pub fn drop_queued_mail(&self, name: &str) -> Result<(), String> {
+        let queued = self.queued_mail(name)?;
+        if let Some(database) = self.database()? {
+            for id in queued {
+                database.finish_message(id, true, "")?;
+                log::event(
+                    &self.state_dir,
+                    "message dropped",
+                    name,
+                    serde_json::json!({"id": id}),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn prepare(&self, task: &Task) -> Result<(Task, Vec<serde_json::Value>), String> {
         let mut task = task.clone();
         let current = requests::sync(&mut task)?;
@@ -532,6 +582,48 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    fn a_human_message_is_queued_once_on_its_own_channel() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let root = std::env::temp_dir().join(format!(
+            "amh-queue-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        taskfile::write(
+            &root.join("t.md"),
+            "---\nstatus: running\nrunat: omnigent://worker\n---\n\nbody\n",
+        )?;
+        taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
+        let _lock = store.lock()?;
+        let mut task = store.load("t.md")?;
+        task.body = crate::decide::queued(&task.body, "m-1.txt");
+        assert!(store.queue_mail(Some("k"), &task, "m-1.txt")?);
+        assert!(!store.queue_mail(Some("k"), &task, "m-1.txt")?);
+        assert!(store.queue_mail(None, &task, "m-2.txt")?);
+        let database = Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        assert!(database.pending_messages("agent")?.is_empty());
+        let queued = database.pending_messages("human")?;
+        assert_eq!(queued.len(), 2);
+        assert_eq!(queued[0]["target"], "t.md");
+        assert_eq!(queued[0]["text"], "m-1.txt");
+        assert!(
+            store
+                .load("t.md")?
+                .body
+                .ends_with("(record and delegate manager_mail/m-1.txt)\n")
+        );
+        store.drop_queued_mail("t.md")?;
+        assert!(store.queued_mail("t.md")?.is_empty());
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
     fn migration_transfer_and_export_repair_preserve_database_authority()
     -> Result<(), Box<dyn std::error::Error>> {
         let root = std::env::temp_dir().join(format!(
@@ -583,13 +675,13 @@ mod tests {
         assert_eq!(fs::read_to_string(root.join("TODO.md"))?, store.list()?);
         let database = store.database()?.ok_or("database was not initialized")?;
         assert!(!database.events()?.is_empty());
-        let baseline = database.pending_messages()?.len();
+        let baseline = database.pending_messages("agent")?.len();
         let mut source = store.load("source.md")?;
         requests::queue(&mut source, "target.md", "repeat")?;
         store.save(&source)?;
         requests::queue(&mut source, "target.md", "repeat")?;
         store.save(&source)?;
-        assert_eq!(database.pending_messages()?.len(), baseline + 2);
+        assert_eq!(database.pending_messages("agent")?.len(), baseline + 2);
         assert!(fs::read_to_string(root.join("amh_views/events.md"))?.contains("message queued"));
         drop(database);
         drop(lock);

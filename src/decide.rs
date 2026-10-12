@@ -5,11 +5,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::taskfile::{self, MARKER};
+use crate::taskfile;
 use crate::tasks::Task;
 use crate::work::{self, Problem};
 
-/// The start of the line under `(pending)` that names a stored human email.
+/// The start of the line that names a stored human email.
 pub const MAIL_SOURCE: &str = "(record and delegate manager_mail/";
 pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
@@ -106,11 +106,17 @@ pub fn stored_mail(subject: &str, body: &str) -> String {
     format!("Subject: {subject}\n\n{body}")
 }
 
-/// A task file's text with a `(pending)` block naming the stored human email appended.
-pub fn queued(file: &str, mail_name: &str) -> String {
+/// The line of a task body that names the stored human email.
+pub fn mail_line(mail_name: &str) -> String {
+    format!("{MAIL_SOURCE}{mail_name})")
+}
+
+/// A task body with the line naming the stored human email appended; the email itself is queued in the `messages` table.
+pub fn queued(body: &str, mail_name: &str) -> String {
     format!(
-        "{}\n\n{MARKER}\n{MAIL_SOURCE}{mail_name})\n",
-        file.trim_end_matches('\n')
+        "{}\n\n{}\n",
+        body.trim_end_matches('\n'),
+        mail_line(mail_name)
     )
 }
 
@@ -822,7 +828,7 @@ mod tests {
         );
         assert_eq!(
             queued("---\nx\n---\nbody\n\n\n", "m-11.txt"),
-            "---\nx\n---\nbody\n\n(pending)\n(record and delegate manager_mail/m-11.txt)\n"
+            "---\nx\n---\nbody\n\n(record and delegate manager_mail/m-11.txt)\n"
         );
     }
 

@@ -208,13 +208,15 @@ impl Database {
         transaction.commit().map_err(error)
     }
 
-    /// Read pending delivery records in enqueue order; failed deliveries stay pending.
-    pub fn pending_messages(&self) -> Result<Vec<Value>, String> {
+    /// Read pending delivery records of one channel in enqueue order; failed deliveries stay pending.
+    ///
+    /// Channel `agent`: `text` is a notification for the agent of task `target`. Channel `human`: `text` names the stored message of the human for the agent of task `target`.
+    pub fn pending_messages(&self, channel: &str) -> Result<Vec<Value>, String> {
         let mut query = self.0.prepare(
-            "SELECT id, channel, target, text, source, state, attempts, last_error FROM messages WHERE state = 'pending' ORDER BY id"
+            "SELECT id, channel, target, text, source, state, attempts, last_error FROM messages WHERE state = 'pending' AND channel = ?1 ORDER BY id"
         ).map_err(error)?;
         query
-            .query_map([], |row| {
+            .query_map([channel], |row| {
                 Ok(serde_json::json!({
                     "id": row.get::<_, i64>(0)?, "channel": row.get::<_, String>(1)?,
                     "target": row.get::<_, String>(2)?, "text": row.get::<_, String>(3)?,
@@ -325,10 +327,14 @@ fn enqueue(
         .get("text")
         .and_then(Value::as_str)
         .ok_or_else(|| "amh: queued message has no string text".to_owned())?;
+    let channel = data
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or("agent");
     transaction
         .execute(
-            "INSERT INTO messages (channel, target, text, source) VALUES ('agent', ?1, ?2, ?3)",
-            params![target, text, source],
+            "INSERT INTO messages (channel, target, text, source) VALUES (?1, ?2, ?3, ?4)",
+            params![channel, target, text, source],
         )
         .map_err(error)?;
     Ok(())
@@ -364,7 +370,7 @@ mod tests {
         );
         assert_eq!(db.task("task.md")?, None);
         assert!(db.events()?.is_empty());
-        assert!(db.pending_messages()?.is_empty());
+        assert!(db.pending_messages("agent")?.is_empty());
         assert!(db.receive_mail("inbox:message-id", &snapshots, std::slice::from_ref(&event))?);
         drop(db);
         let mut db = Database::open(&path)?;
@@ -376,9 +382,9 @@ mod tests {
         )?);
         assert_eq!(db.task("task.md")?, Some("received notification".into()));
         assert_eq!(db.events()?, baseline);
-        assert_eq!(db.pending_messages()?.len(), 1);
+        assert_eq!(db.pending_messages("agent")?.len(), 1);
         assert!(db.receive_mail("other-inbox:message-id", &snapshots, &[event])?);
-        assert_eq!(db.pending_messages()?.len(), 2);
+        assert_eq!(db.pending_messages("agent")?.len(), 2);
         drop(db);
         std::fs::remove_dir_all(folder)?;
         Ok(())
@@ -434,10 +440,10 @@ mod tests {
         let event = serde_json::json!({"time": "now", "actor": "agent", "kind": "message queued", "subject": "a.md", "data": {"to": "b.md", "text": "already delivered"}});
         db.import(&snapshots, std::slice::from_ref(&event))?;
         assert_eq!(db.events()?.len(), 1);
-        assert_eq!(db.pending_messages()?.len(), 1);
-        assert_eq!(db.pending_messages()?[0]["text"], "pending");
+        assert_eq!(db.pending_messages("agent")?.len(), 1);
+        assert_eq!(db.pending_messages("agent")?[0]["text"], "pending");
         db.import(&snapshots, std::slice::from_ref(&event))?;
-        assert_eq!(db.pending_messages()?.len(), 1);
+        assert_eq!(db.pending_messages("agent")?.len(), 1);
         let first = db.latest_event_id()?;
         db.set_cursor("watch", first)?;
         db.prune_events(&[first])?;
@@ -464,16 +470,16 @@ mod tests {
             db.commit(&snapshots, &[event.clone(), serde_json::json!({})])
                 .is_err()
         );
-        assert!(db.pending_messages()?.is_empty());
+        assert!(db.pending_messages("agent")?.is_empty());
         assert_eq!(db.task("a.md")?, None);
         db.commit(&snapshots, &[event])?;
-        let id = db.pending_messages()?[0]["id"]
+        let id = db.pending_messages("agent")?[0]["id"]
             .as_i64()
             .ok_or("missing message id")?;
         db.finish_message(id, false, "offline")?;
         drop(db);
         let db = Database::open(&path)?;
-        let pending = db.pending_messages()?;
+        let pending = db.pending_messages("agent")?;
         assert_eq!(pending[0]["id"], id);
         assert_eq!(pending[0]["attempts"], 1);
         assert_eq!(pending[0]["last_error"], "offline");
@@ -484,11 +490,11 @@ mod tests {
                 .is_err()
         );
         assert_eq!(db.task("a.md")?, Some("queued".into()));
-        assert_eq!(db.pending_messages()?[0]["attempts"], 1);
+        assert_eq!(db.pending_messages("agent")?[0]["attempts"], 1);
         let delivered = serde_json::json!({"time": "now", "actor": "agent", "kind": "message delivered", "subject": "a.md", "data": {"id": id}});
         db.complete_message(id, &snapshots, &[delivered])?;
         assert_eq!(db.task("a.md")?, Some("delivered".into()));
-        assert!(db.pending_messages()?.is_empty());
+        assert!(db.pending_messages("agent")?.is_empty());
         assert!(db.finish_message(id, true, "").is_err());
         drop(db);
         std::fs::remove_dir_all(folder)?;

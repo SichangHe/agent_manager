@@ -101,8 +101,8 @@ order of building, each step in production before the next
 - step 5 in slices
     - done: agent-to-agent notifications go through the `messages` table
     - done: `human mail received`, `message delivered`, `message rerouted` and `message failed` events for the human's messages
-    - next: the human's messages as `messages` rows instead of `(pending)` markers in task text
-    - then: the `amh-*.txt` records in the state folder move into SQLite
+    - done: the human's messages (email, Zulip, `amh say`, `amh edit`) are `messages` rows of channel `human`; `(pending)` markers remain for text typed into a task file and for guest mail
+    - next: the `amh-*.txt` records in the state folder move into SQLite
     - last: the watcher acts on events instead of scanning every 5 s
 1. event table, written by today's actions next to the markdown (no behaviour change)
 2. requests in SQLite; markdown items rendered from it; ids shown

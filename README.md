@@ -107,7 +107,7 @@ modules
     - the rule (WHAT is the thing waited for, never just who) and examples are in the help of the `task` group, of `task status`, and of `--on`; no instruction file says it
 - `amh task edit TASK.md` (the human): opens `$VISUAL`/`$EDITOR`/`vi` on a copy of the task file, like `crontab -e`
     - 🧑 "Should be append-only. If the edit changed other things, offer to reopen the file and ask for fix"
-    - what was added at the end is stored as `manager_mail/PREFIX-edit-EPOCH.txt` and queued with a `(pending)` block, so it reaches the agent exactly like an email from the human
+    - what was added at the end is stored as `manager_mail/PREFIX-edit-EPOCH.txt` and queued as a `messages` row, so it reaches the agent exactly like an email from the human
     - `amh tell human --attach PATH` attaches files (20 MB in total at most), e.g. a figure the human asked to see
     - crates: `imap` + `native-tls` (IMAP), `lettre` (building and SMTP), `mail-parser` (parsing), `mime_guess` (attachment type from the file name)
     - of a repeated header the first counts; the parser's own lookup would take the last, which the sender controls for `Authentication-Results`
@@ -126,10 +126,10 @@ modules
         - a failure to write `amh-awaiting.txt` is logged and the delivered block's marker is still deleted, so the block is not delivered twice
         - a malformed row of `amh-awaiting.txt` or `amh-sent.txt` is dropped
         - stored human mail is created with mode 0600, not created and then restricted
-    - mail intake: store, route, append `(pending)` + source line, mark read
+    - mail intake: store, route, append the source line and insert a `messages` row (channel `human`) in one transaction, mark read
         - route: `[tag]` task; `for manager`/`for a manager`/`for the manager` starting or ending the body -> its manager; done task -> its manager; else main manager
         - stored file exists = already taken in
-    - delivery: each `(pending)` block -> the task's agent; then the marker line is deleted, the source line stays
+    - delivery: each pending `human` row and each `(pending)` block (text typed into a task file, guest mail) -> the task's agent; then the row is marked sent or the marker line is deleted, the source line stays
         - a block in a task with no agent (done or retired) goes to that task's manager, else the main manager
         - an idle Omnigent session whose runner is offline is reachable: the next message brings the runner back
         - stored email is inlined verbatim in `<human_instruction>`
