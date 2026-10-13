@@ -538,7 +538,7 @@ pub fn nudges(
                     task: task.name.clone(),
                     address: task.address().to_owned(),
                     text: format!(
-                        "You have {} open items. See them with `amh todo list`. Continue until each is finished or cancelled.",
+                        "You have {} open items. See them with `amh todo list`. Continue until each is finished or cancelled. This reminder is automatic: send nobody a message because of it; if you are waiting for a subagent, keep waiting.",
                         task.items.len()
                     ),
                 });
@@ -1101,7 +1101,7 @@ mod tests {
                 Nudge::Remind {
                     task: "t_work.md".to_owned(),
                     address: "omnigent://s1".to_owned(),
-                    text: "You have 1 open items. See them with `amh todo list`. Continue until each is finished or cancelled.".to_owned(),
+                    text: "You have 1 open items. See them with `amh todo list`. Continue until each is finished or cancelled. This reminder is automatic: send nobody a message because of it; if you are waiting for a subagent, keep waiting.".to_owned(),
                 },
             ]
         );
