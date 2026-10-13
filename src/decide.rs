@@ -518,6 +518,7 @@ pub fn nudges(
     active: &[Task],
     reminded_s: &BTreeMap<String, u64>,
     now_s: u64,
+    remind_every_s: impl Fn(&Task) -> u64,
 ) -> Option<(Vec<Nudge>, BTreeSet<String>)> {
     if found
         .iter()
@@ -531,7 +532,7 @@ pub fn nudges(
         if *problem == Problem::Idle {
             let due = reminded_s
                 .get(&task.name)
-                .is_none_or(|at| now_s - at >= REMINDER_S);
+                .is_none_or(|at| now_s - at >= remind_every_s(task));
             if due {
                 nudges.push(Nudge::Remind {
                     task: task.name.clone(),
@@ -1080,7 +1081,7 @@ mod tests {
         ];
         let none = BTreeSet::new();
         let mut reminded = BTreeMap::new();
-        let (first, now) = nudges(&found, &none, &tasks, &reminded, 5000).unwrap();
+        let (first, now) = nudges(&found, &none, &tasks, &reminded, 5000, |_| REMINDER_S).unwrap();
         let failure = "The agent working on task file t_sub.md has failed and is not working any more.\nTool: codex, running at omnigent://s2\nIts manager: t_work.md\nOpen items on the task: 1\nThe error its harness reported:\nmodel overloaded\n";
         let key = "t_sub.md omnigent://s2 error model overloaded";
         assert_eq!(
@@ -1114,15 +1115,31 @@ mod tests {
         // Reported and reminded: nothing more until the reminder period is over.
         reminded.insert("t_work.md".to_owned(), 5000);
         assert_eq!(
-            nudges(&found, &now, &tasks, &reminded, 5000 + REMINDER_S - 1).unwrap(),
+            nudges(
+                &found,
+                &now,
+                &tasks,
+                &reminded,
+                5000 + REMINDER_S - 1,
+                |_| REMINDER_S
+            )
+            .unwrap(),
             (vec![], now.clone())
         );
-        let (again, _) = nudges(&found, &now, &tasks, &reminded, 5000 + REMINDER_S).unwrap();
+        let (again, _) = nudges(&found, &now, &tasks, &reminded, 5000 + REMINDER_S, |_| {
+            REMINDER_S
+        })
+        .unwrap();
         assert!(matches!(&again[..], [Nudge::Remind { .. }]));
         // The problem goes away and is forgotten; a new one is reported, to the manager only.
-        assert_eq!(nudges(&[], &now, &tasks, &reminded, 0).unwrap().1, none);
+        assert_eq!(
+            nudges(&[], &now, &tasks, &reminded, 0, |_| REMINDER_S)
+                .unwrap()
+                .1,
+            none
+        );
         let gone = vec![(sub.clone(), Problem::Missing, "runner offline".to_owned())];
-        let (second, now) = nudges(&gone, &none, &tasks, &reminded, 0).unwrap();
+        let (second, now) = nudges(&gone, &none, &tasks, &reminded, 0, |_| REMINDER_S).unwrap();
         let [
             Nudge::Report {
                 key,
@@ -1145,13 +1162,16 @@ mod tests {
             Problem::Missing,
             "Omnigent is unreachable at http://x".to_owned(),
         )];
-        assert_eq!(nudges(&down, &now, &tasks, &reminded, 0), None);
+        assert_eq!(
+            nudges(&down, &now, &tasks, &reminded, 0, |_| REMINDER_S),
+            None
+        );
         let stuck = vec![(
             sub.clone(),
             Problem::Stuck,
             "session_status=waiting waiting_on=Allow Bash: rm x".to_owned(),
         )];
-        let (third, _) = nudges(&stuck, &none, &tasks, &reminded, 0).unwrap();
+        let (third, _) = nudges(&stuck, &none, &tasks, &reminded, 0, |_| REMINDER_S).unwrap();
         let [
             Nudge::Report {
                 text,

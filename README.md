@@ -140,7 +140,7 @@ modules
             - no email from that task within 15 min -> the agent is reminded; within 30 min -> its manager is told and the human is emailed
             - 🧑 "No need to email me for this, just handle it": `amh mail handled MAIL --because WORDS` takes the caller's row out of `amh-awaiting.txt` and notes the human's words in the task file
             - human notices are sent once per message and outcome, keys in `amh-told-human.txt`
-    - nudges: idle agent with open items is reminded at most every 30 min
+    - nudges: idle agent with open items is reminded at most every 30 min; the settings `remind.idle_s` and, per tool, `remind.TOOL_idle_s` (e.g. `[remind] codex_idle_s = 300`) change that
     - mailbox compression notice, every 5 min
         - 🧑 "do a dedicated agent “human manager” who directly gets notification to compress the mailbox and does it"
         - counts the unread emails from the agent account in the human's inbox, without the item notices (read-only)

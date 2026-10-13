@@ -744,7 +744,22 @@ impl Watcher {
             .collect();
         let found = agents::problems(settings, store)?;
         let now_s = self.started.elapsed().as_secs();
-        let decided = decide::nudges(&found, &reported, &store.active()?, &self.reminded_s, now_s);
+        // 🧑 "We have 96% quota left for Codex and it resets in 5 days. Try to use them up in those days": Codex workers stop after each small step, so the setting `remind.codex_idle_s` wakes them sooner than the default.
+        let remind_every_s = |task: &Task| {
+            let tool = task.field("tool").unwrap_or_default();
+            [format!("remind.{tool}_idle_s"), "remind.idle_s".to_owned()]
+                .iter()
+                .find_map(|key| settings::get(settings, key).parse().ok())
+                .unwrap_or(decide::REMINDER_S)
+        };
+        let decided = decide::nudges(
+            &found,
+            &reported,
+            &store.active()?,
+            &self.reminded_s,
+            now_s,
+            remind_every_s,
+        );
         let Some((nudges, mut now)) = decided else {
             return Ok(());
         };
