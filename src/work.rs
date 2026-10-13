@@ -11,7 +11,7 @@ const MANAGER_GUIDES: [&str; 3] = ["agent_work", "agent_manager", "agent_manager
 const MANAGER_MESSAGE_CHARS_MAX: usize = 600;
 
 /// Ends the request of a task that quotes no human email, so its agent does not acknowledge to the human.
-const MANAGER_ONLY: &str = "Your manager gave you this task: acknowledge it and report on it to your manager with `amh tell manager`, not to the human. Message the human only about what the human asked for themselves, or when your manager asks you to.\n";
+const MANAGER_ONLY: &str = "Your manager gave you this task: do not acknowledge it to anyone. Report results and blockers to your manager with `amh tell manager`, not to the human, unless your task text says to report elsewhere or not at all. Message the human only about what the human asked for themselves, or when your manager asks you to.\n";
 
 /// Mark text as coming from an agent, so the reader does not take it for the human's words.
 pub fn envelope(sender: &str, text: &str) -> String {

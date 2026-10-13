@@ -39,3 +39,7 @@
 - failed sends retain private payloads in `amh-zulip-pending`
   - verify delivery before retrying because a lost network response may conceal a successful send
   - these payloads are not automatically retried
+
+manager reports
+- `report_sink.TAG = "FILE"`: `amh tell manager` from a worker of the task with tag TAG, and that worker's closing notice, are appended to FILE and do not wake the manager; for workers started by a script
+    - the watcher's failure reports still wake the manager

@@ -624,8 +624,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 _ => return Err("amh: give TEXT or --file, not both".to_owned()),
             };
             let (manager, message) = work::manager_message(&task, &body, state)?;
-            omnigent::send(&settings, manager, &message).map_err(failed)?;
-            "message sent to your manager; do not send it again\n".to_owned()
+            match agents::report(&settings, &store, manager, &message).map_err(failed)? {
+                Some(sink) => format!(
+                    "recorded in {sink}, which your manager reads; it is not woken. Do not send it again\n"
+                ),
+                None => "message sent to your manager; do not send it again\n".to_owned(),
+            }
         }
         ("tell", "human") => {
             let body = match (text("text"), text("file")) {

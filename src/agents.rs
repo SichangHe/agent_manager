@@ -210,6 +210,36 @@ pub fn address_of(store: &Store, who: &str) -> Result<String, String> {
     }
 }
 
+/// Give `text` to the manager at `manager`: wake it, or, when `report_sink.TAG` names a file for the manager's task, append there. Returns the file used.
+// vl_catchup.md: "each Codex reader that vl_lit_dig.md's dispatcher script starts sends it an acknowledgement and a done message ... each waking an Opus agent for nothing ... let a task name a sink (a file or script) in place of its manager for such reports"
+pub fn report(
+    settings: &Settings,
+    store: &Store,
+    manager: &str,
+    text: &str,
+) -> Result<Option<String>, String> {
+    let tasks = store.all()?;
+    let owner = tasks.iter().find(|task| task.address() == manager);
+    let sink = owner.map_or("", |task| {
+        settings::get(settings, &format!("report_sink.{}", task.tag()))
+    });
+    if sink.is_empty() {
+        omnigent::send(settings, manager, text)?;
+        return Ok(None);
+    }
+    let entry = format!(
+        "{}\n{text}\n\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    );
+    fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(sink)
+        .and_then(|mut file| file.write_all(entry.as_bytes()))
+        .map_err(|error| format!("cannot write {sink}: {error}"))?;
+    Ok(Some(sink.to_owned()))
+}
+
 /// Mark a task done, move it to `previous`, tell the human, stop its agent last, and return the agent's address.
 ///
 /// `own` means the agent closes itself: its manager is told, and stopping the session ends the caller.
@@ -246,7 +276,7 @@ pub fn close_task(
     if own {
         let _ = writeln!(io::stdout(), "closed {name}; stopping your own session now");
         let manager = task.field("managerat").unwrap_or_default();
-        let _ = omnigent::send(settings, manager, &work::self_closed(&task));
+        let _ = report(settings, store, manager, &work::self_closed(&task));
     }
     match omnigent::stop(settings, at) {
         Err(error) if !agent_gone => Err(format!(
