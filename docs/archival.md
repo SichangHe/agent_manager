@@ -27,6 +27,6 @@ git
     - includes Markdown working-tree content even when that Markdown was partially staged
     - leaves new Markdown intent-to-add entries if the commit fails
     - no push
-- watcher archives daily and commits hourly
+- watcher archives daily and commits every 10 min; only `*.md`, so no artifact or binary is committed
     - `[archive] commit = false` disables commits
     - runs commands with a 30-second timeout

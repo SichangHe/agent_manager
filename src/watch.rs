@@ -29,6 +29,9 @@ const COMPRESS_EVERY: Duration = Duration::from_secs(300);
 /// The record of the last notice to compress: `EPOCH COUNT`.
 const COMPRESSED: &str = "amh-compress.txt";
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
+/// How often the generated Markdown of the work logs is committed.
+// 🧑 "Why is work_logs not a clean repo? Since it is fully generated, should we auto-commit too? Do avoid committing huge files and artifacts, binaries, tho."
+const COMMIT_EVERY: Duration = Duration::from_secs(600);
 pub const AWAITING: &str = "amh-awaiting.txt";
 const TOLD_HUMAN: &str = "amh-told-human.txt";
 /// The agent questions already sent to the human: lines of prompt IDs.
@@ -1055,7 +1058,7 @@ pub fn run() -> u8 {
             }
         }
         if settings::get(&settings, "archive.commit") != "false"
-            && last_commit.is_none_or(|last| last.elapsed().as_secs() >= 3600)
+            && last_commit.is_none_or(|last| last.elapsed() >= COMMIT_EVERY)
         {
             match crate::archive::commit_markdown(&store.root) {
                 Ok(_) => last_commit = Some(Instant::now()),
