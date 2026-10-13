@@ -1065,12 +1065,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("mail", "handled") => {
             let _lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
-            let path = store.state_dir.join(watch::AWAITING);
-            let (kept, n) = decide::without_awaiting(
-                &fs::read_to_string(&path).unwrap_or_default(),
-                &task.name,
-                need("mail"),
-            );
+            let (kept, n) =
+                decide::without_awaiting(&store.record(watch::AWAITING)?, &task.name, need("mail"));
             if n == 0 {
                 return Err(format!(
                     "amh: no email {} of the human is waiting for an answer from {}",
@@ -1078,8 +1074,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     task.name
                 ));
             }
-            taskfile::write(&path, &kept)
-                .map_err(|error| format!("amh: cannot update the waiting list: {error}"))?;
+            store.set_record(watch::AWAITING, &kept)?;
             tasks::add_note(
                 &mut task,
                 &format!(

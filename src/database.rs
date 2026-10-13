@@ -38,7 +38,8 @@ impl Database {
                  text TEXT NOT NULL, source TEXT NOT NULL,
                  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'sent')),
                  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
-             );"
+             );
+             CREATE TABLE IF NOT EXISTS records (name TEXT PRIMARY KEY, text TEXT NOT NULL);"
         ).map_err(error)?;
         Ok(Self(connection))
     }
@@ -165,6 +166,21 @@ impl Database {
         }
         commit_records(&transaction, snapshots, events)?;
         transaction.commit().map_err(error)
+    }
+
+    /// The text of a small named record of the watcher; `None` when it was never written.
+    pub fn record(&self, name: &str) -> Result<Option<String>, String> {
+        self.0
+            .query_row("SELECT text FROM records WHERE name = ?1", [name], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)
+    }
+
+    pub fn set_record(&self, name: &str, text: &str) -> Result<(), String> {
+        self.0.execute("INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = excluded.text", params![name, text]).map_err(error)?;
+        Ok(())
     }
 
     pub fn latest_event_id(&self) -> Result<i64, String> {

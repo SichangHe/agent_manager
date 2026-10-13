@@ -294,6 +294,29 @@ impl Store {
         Ok(queued)
     }
 
+    /// The text of a small named record of the watcher, kept in the `records` table; empty when there is none.
+    ///
+    /// A record file of that name left in the state folder by an older version is taken over on first use.
+    pub fn record(&self, name: &str) -> Result<String, String> {
+        let database = Database::open(&self.state_dir.join("amh.sqlite3"))?;
+        if let Some(text) = database.record(name)? {
+            return Ok(text);
+        }
+        let legacy = self.state_dir.join(name);
+        let Ok(text) = fs::read_to_string(&legacy) else {
+            return Ok(String::new());
+        };
+        database.set_record(name, &text)?;
+        let _ = fs::remove_file(&legacy);
+        Ok(text)
+    }
+
+    pub fn set_record(&self, name: &str, text: &str) -> Result<(), String> {
+        Database::open(&self.state_dir.join("amh.sqlite3"))?.set_record(name, text)?;
+        let _ = fs::remove_file(self.state_dir.join(name));
+        Ok(())
+    }
+
     /// The IDs of the human's messages queued for a task and not delivered yet.
     pub fn queued_mail(&self, name: &str) -> Result<Vec<i64>, String> {
         let Some(database) = self.database()? else {

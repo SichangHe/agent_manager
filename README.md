@@ -118,7 +118,7 @@ modules
     - `src/decide.rs`, pure: `route`, `for_manager`; `plan` (who gets a task's blocks), the message texts, `settle` (what follows from a delivery `Outcome`), `without_marker`; `nudges` (reminders and problem reports); `chase` (unanswered email)
     - `src/watch.rs`, input and output: the kept mailbox connection (`Link`), files, agents, the clock, the log; remembers only retry and reminder times between polls
     - log: one line per event on stdout, `YYYY-MM-DD HH:MM:SS TEXT`; an error is shown as its message
-    - records in the state folder, same formats as the Python watcher wrote: `amh-awaiting.txt` (`EPOCH TASK MAIL STAGE`), `amh-told-human.txt`, `amh-problem-notices.txt`; reads `amh-sent.txt`
+    - records in the `records` table of the database, named and formatted as the files the Python watcher wrote: `amh-awaiting.txt` (`EPOCH TASK MAIL STAGE`), `amh-told-human.txt`, `amh-asked-human.txt`, `amh-problem-notices.txt`, `amh-compress.txt`; reads the file `amh-sent.txt`
     - checked against the Python watcher on a frozen copy of the live root with the agents and mail replaced: same routing and delivery text of the 200 newest stored emails, same targets for every task file, same messages, log lines, notices, and records for deliveries, problem reports, and chasing
     - unlike the Python watcher
         - nothing is reminded or reported in a minute in which any agent's state could not be read; before, agents listed ahead of the unreadable one were still reminded

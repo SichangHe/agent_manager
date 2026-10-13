@@ -26,7 +26,7 @@ const RECONNECT: Duration = Duration::from_secs(30);
 const FLUSH_EVERY: Duration = Duration::from_secs(600);
 /// How often the human's unread agent emails are counted.
 const COMPRESS_EVERY: Duration = Duration::from_secs(300);
-/// The record in the state folder of the last notice to compress: `EPOCH COUNT`.
+/// The record of the last notice to compress: `EPOCH COUNT`.
 const COMPRESSED: &str = "amh-compress.txt";
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
 pub const AWAITING: &str = "amh-awaiting.txt";
@@ -90,25 +90,16 @@ fn hour_minute(epoch_s: f64) -> String {
         .unwrap_or_default()
 }
 
-/// The text of a record in the state folder; empty when there is none yet.
+/// The text of a record of the watcher; empty when there is none yet or it cannot be read.
 fn record(store: &Store, name: &str) -> String {
-    fs::read_to_string(store.state_dir.join(name)).unwrap_or_default()
+    store.record(name).unwrap_or_else(|error| {
+        log(&format!("cannot read the record {name}: {error}"));
+        String::new()
+    })
 }
 
 fn append(store: &Store, name: &str, line: &str) -> Result<(), String> {
-    let mut options = fs::OpenOptions::new();
-    let opened = options
-        .create(true)
-        .append(true)
-        .open(store.state_dir.join(name));
-    opened
-        .and_then(|mut file| file.write_all(line.as_bytes()))
-        .map_err(|error| format!("cannot write {name}: {error}"))
-}
-
-fn rewrite(store: &Store, name: &str, text: &str) -> Result<(), String> {
-    taskfile::write(&store.state_dir.join(name), text)
-        .map_err(|error| format!("cannot write {name}: {error}"))
+    store.set_record(name, &(store.record(name)? + line))
 }
 
 /// Write a file only its owner can read.
@@ -809,7 +800,7 @@ impl Watcher {
             }
         }
         let keys: String = now.iter().map(|key| format!("{key}\n")).collect();
-        rewrite(store, PROBLEM_NOTICES, &keys)
+        store.set_record(PROBLEM_NOTICES, &keys)
     }
 }
 
@@ -885,11 +876,12 @@ fn ask_human(settings: &Settings, store: &Store, task: &Task) {
 /// Make sure each delivered human email gets an answer: remind the agent after `ANSWER_S`, then tell its manager and the human.
 // 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
 fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
-    if !store.state_dir.join(AWAITING).exists() {
+    let awaiting = record(store, AWAITING);
+    if awaiting.is_empty() {
         return Ok(());
     }
     let active = store.active()?;
-    let (awaiting, sent) = (record(store, AWAITING), record(store, mail::SENT_LOG));
+    let sent = fs::read_to_string(store.state_dir.join(mail::SENT_LOG)).unwrap_or_default();
     let paused: BTreeSet<&str> = active
         .iter()
         .filter(|task| omnigent::status(settings, task.address()).0 == "paused")
@@ -934,7 +926,7 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
         }
     }
     let rows: String = keep.iter().map(|row| format!("{row}\n")).collect();
-    rewrite(store, AWAITING, &rows)
+    store.set_record(AWAITING, &rows)
 }
 
 /// Tell the task named by `compress.task` to compress the human's mailbox when too many agent emails wait unread there.
@@ -966,8 +958,7 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
             .filter_map(|header| mail::tag_of(&header.subject).map(str::to_owned))
             .collect()
     };
-    let path = store.state_dir.join(COMPRESSED);
-    let noted = fs::read_to_string(&path).unwrap_or_default();
+    let noted = record(store, COMPRESSED);
     let mut parts = noted.split_whitespace().map(str::parse::<u64>);
     let last = match (parts.next(), parts.next()) {
         (Some(Ok(at)), Some(Ok(count))) => Some((at, count as usize)),
@@ -976,7 +967,9 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     let now_s = epoch_s() as u64;
     if counted.len() <= over {
         // Below the threshold the record goes, so the next pile-up is noticed at once.
-        let _ = fs::remove_file(&path);
+        if !noted.is_empty() {
+            store.set_record(COMPRESSED, "")?;
+        }
         return Ok(());
     }
     if !decide::compress_due(counted.len(), over, urgent, last, now_s) {
@@ -988,8 +981,7 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
         task.address(),
         &decide::compress_text(counted.len(), over, &counted),
     )?;
-    fs::write(&path, format!("{now_s} {}\n", counted.len()))
-        .map_err(|error| format!("cannot write {COMPRESSED}: {error}"))?;
+    store.set_record(COMPRESSED, &format!("{now_s} {}\n", counted.len()))?;
     log(&format!(
         "told {name} to compress the mailbox: {} unread",
         counted.len()
