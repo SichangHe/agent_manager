@@ -771,8 +771,9 @@ impl Watcher {
                     address,
                     text,
                 } => {
-                    if let Err(error) = omnigent::send(settings, &address, &text) {
-                        log(&format!("reminder to {task} failed: {error}"));
+                    match omnigent::send(settings, &address, &text) {
+                        Ok(()) => log(&format!("reminded idle {task} of its open items")),
+                        Err(error) => log(&format!("reminder to {task} failed: {error}")),
                     }
                     self.reminded_s.insert(task, now_s);
                 }
