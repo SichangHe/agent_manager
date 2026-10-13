@@ -272,6 +272,12 @@ pub fn transfer(source: &mut Task, to: &mut Task, id: &str) -> Result<(), String
     Ok(())
 }
 
+/// Whether the human gave this task a request themselves; only then do automatic notices about the task go to the human.
+// The human manager: "automatic 'Closed omnigent://...' notices, worker acknowledgements, and 'agent has failed' notices sent to the human (dozens tonight ...) Could those go to the worker's manager only, not the human?"
+pub fn from_human(task: &Task) -> bool {
+    read(task).is_ok_and(|records| records.iter().any(|request| request.creator == "human"))
+}
+
 pub fn can_close(task: &Task, all: &[Task]) -> Result<(), String> {
     for owner in all {
         let mut owner = owner.clone();

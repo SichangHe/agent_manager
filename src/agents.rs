@@ -237,7 +237,7 @@ pub fn close_task(
     };
     let at = task.address();
     // 🧑 "When closing an agent, use the last email chain the agent used to send an automatic email ‘Closed xx:n’ with the agent’s window."
-    if email {
+    if email && crate::requests::from_human(&task) {
         let body = format!("Closed {at}\n");
         mail::send(settings, &store.state_dir, task.tag(), "", &body, at, &[])
             .map_err(|error| format!("amh: {error}"))?;

@@ -963,8 +963,16 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     // The human manager: "the compression notice counts PB news and PB urgent emails (shown as '(no tag)'). The compression rules exclude them"
     let counted: Vec<String> = if crate::zulip::enabled(settings) {
         let waiting = crate::zulip::unread(settings, &store.state_dir)?;
-        let topics = waiting.into_iter().map(|(_, topic, _)| topic);
-        topics
+        // The human manager: "the watcher counts 'pending item deleted' notices although its text says it does not."
+        let notice = |content: &str| {
+            let body = content.split_once("\n\n").map_or("", |(_, body)| body);
+            body.starts_with("pending item ")
+        };
+        let counted = waiting
+            .into_iter()
+            .filter(|(_, _, content)| !notice(content));
+        counted
+            .map(|(_, topic, _)| topic)
             .filter(|topic| !mail::REPORT_LABELS.contains(&topic.as_str()))
             .collect()
     } else {

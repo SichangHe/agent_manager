@@ -555,7 +555,8 @@ pub fn nudges(
         );
         if now.insert(key.clone()) && !reported.contains(&key) {
             let text = failure_text(task, *problem, &error, active);
-            let emailed = matches!(problem, Problem::Error | Problem::Stuck);
+            let emailed = matches!(problem, Problem::Error | Problem::Stuck)
+                && crate::requests::from_human(task);
             nudges.push(Nudge::Report {
                 key,
                 log: format!(
@@ -1073,13 +1074,22 @@ mod tests {
     #[test]
     fn a_problem_is_reported_once_and_again_after_recovery() {
         let tasks: Vec<Task> = tasks().into_iter().filter(Task::is_active).collect();
-        let (sub, worker) = (by_name(&tasks, "t_sub.md"), by_name(&tasks, "t_work.md"));
+        let (plain, worker) = (by_name(&tasks, "t_sub.md"), by_name(&tasks, "t_work.md"));
         let error = "session_status=failed last_task_error=model  overloaded; pane_tail: junk";
+        let none = BTreeSet::new();
+        // The human hears of a failure only on a task they gave a request themselves.
+        let unasked = vec![(plain.clone(), Problem::Error, error.to_owned())];
+        let (quiet, _) =
+            nudges(&unasked, &none, &tasks, &BTreeMap::new(), 0, |_| REMINDER_S).unwrap();
+        assert!(matches!(&quiet[..], [Nudge::Report { email: None, .. }]));
+        let mut sub = plain.clone();
+        sub.items = vec![format!("{}x", taskfile::HUMAN_MARK)];
+        crate::requests::sync(&mut sub).unwrap();
+        let sub = &sub;
         let found = vec![
             (sub.clone(), Problem::Error, error.to_owned()),
             (worker.clone(), Problem::Idle, "idle".to_owned()),
         ];
-        let none = BTreeSet::new();
         let mut reminded = BTreeMap::new();
         let (first, now) = nudges(&found, &none, &tasks, &reminded, 5000, |_| REMINDER_S).unwrap();
         let failure = "The agent working on task file t_sub.md has failed and is not working any more.\nTool: codex, running at omnigent://s2\nIts manager: t_work.md\nOpen items on the task: 1\nThe error its harness reported:\nmodel overloaded\n";
