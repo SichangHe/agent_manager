@@ -638,6 +638,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
             };
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
+            let tool = task.field("tool").unwrap_or_default();
+            if !settings::allows(&settings, "human.writers", tool) {
+                return Err(format!(
+                    "amh: nothing sent: the human reads only agents running on {}, and you run on {tool}. Send what the human should hear to your manager with `amh tell manager` (details in a file); your manager writes to the human. Change your items with `amh todo`.",
+                    settings::get(&settings, "human.writers")
+                ));
+            }
             // 🧑 "fix the messages to come through pb new and pb urgent instead of this tag"
             if text("report_label").is_some() && task.tag() != "stock_news_watch" {
                 return Err("amh: --report-label requires stock_news_watch".to_owned());

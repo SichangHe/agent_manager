@@ -88,3 +88,10 @@ pub fn work_logs(values: &BTreeMap<String, String>) -> PathBuf {
         _ => PathBuf::from(env::var_os("HOME").unwrap_or_default()).join("work_logs"),
     }
 }
+
+/// Whether `tool` is in the comma-separated list under `key`; an unset or empty list allows every tool.
+// 🧑 "I want a setup where I only talk to Claude agents and only Claude writes and make top level decisions."
+pub fn allows(settings: &BTreeMap<String, String>, key: &str, tool: &str) -> bool {
+    let listed = get(settings, key);
+    listed.is_empty() || listed.split(',').any(|allowed| allowed.trim() == tool)
+}

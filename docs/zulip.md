@@ -3,6 +3,9 @@
 
 - 🧑 "Set it up s.t. we do Zulip instead of emails, and start messaging me with Zulip"
 - `human.transport = "zulip"` switches all human updates from SMTP to Zulip
+- 🧑 "I want a setup where I only talk to Claude agents and only Claude writes and make top level decisions."
+    - `human.writers = "claude"`: `amh tell human` refuses a task on any other tool and tells it to report to its manager; unset allows every tool
+    - `manager.tools = "claude"`: `amh task start --manager` refuses any other tool
   - `zulip.human_id` identifies the human by numeric Zulip user ID
   - `zulip.env_file` points to a private credential file
     - `ZULIP_SITE`, `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY`

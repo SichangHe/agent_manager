@@ -326,6 +326,12 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
         }
     }
     let tool = given(new.tool).unwrap_or(work::default_tool(new.as_manager));
+    if new.as_manager && !settings::allows(settings, "manager.tools", tool) {
+        return Err(format!(
+            "amh: a manager must run on {}, not {tool}: the human wants only those to make top-level decisions",
+            settings::get(settings, "manager.tools")
+        ));
+    }
     let (model, effort) = omnigent::launch_default(settings, tool, new.as_manager)
         .map_err(|error| format!("amh: {error}"))?;
     let quoted = match given(new.email) {
