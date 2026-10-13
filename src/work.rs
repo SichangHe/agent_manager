@@ -10,6 +10,9 @@ const MANAGER_GUIDES: [&str; 3] = ["agent_work", "agent_manager", "agent_manager
 // 🧑 "make the manager reporting sound more like messaging the manager, to discourage agents to dump info to manager"
 const MANAGER_MESSAGE_CHARS_MAX: usize = 600;
 
+/// Ends the request of a task that quotes no human email, so its agent does not acknowledge to the human.
+const MANAGER_ONLY: &str = "Your manager gave you this task: acknowledge it and report on it to your manager with `amh tell manager`, not to the human. Message the human only about what the human asked for themselves, or when your manager asks you to.\n";
+
 /// Mark text as coming from an agent, so the reader does not take it for the human's words.
 pub fn envelope(sender: &str, text: &str) -> String {
     format!(
@@ -139,6 +142,9 @@ pub fn request(
             "<human_instruction authoritative=\"true\" source=\"manager_mail/{email}:{lines}\">\n{}\n</human_instruction>\n",
             excerpt.join("\n")
         );
+    } else {
+        // The human manager: "All are Codex workers under tt_impl_mgr with no request from the human, sent with amh tell human."
+        request += MANAGER_ONLY;
     }
     Ok(request)
 }
@@ -514,7 +520,7 @@ pub mod tests {
         );
         assert_eq!(
             request("m", "goal", None).unwrap(),
-            "<manager_delegation from=\"m\">\ngoal\n</manager_delegation>\n"
+            format!("<manager_delegation from=\"m\">\ngoal\n</manager_delegation>\n{MANAGER_ONLY}")
         );
         for bad in ["0-2", "2", "a-b", "1-", "-3", "01-2", "1-2-3"] {
             assert!(span(bad).is_err(), "{bad}");
