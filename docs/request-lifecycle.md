@@ -27,6 +27,7 @@ transitions
     - human: resolves immediately, with one email for the batch
     - agent: requests resolution, retains the item, queues a message to its creator
 - `todo approve ID` resolves a request created by the caller
+    - also before the owner asked for resolution: that withdraws the request, so a creator whose worker is gone can still close
 - `todo reject ID --reason REASON` returns it to added
 - resolution requested freezes rewording, dependencies, transfer and repeated completion
 - `task move` offers ownership; `todo take ID` performs the transfer

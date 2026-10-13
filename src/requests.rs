@@ -199,8 +199,12 @@ pub fn decide(
             request.creator
         ));
     }
-    if request.stage != Stage::Requested {
+    // The creator may also approve a request its owner never finished, which withdraws it; else a creator whose worker is gone could never close.
+    if request.stage == Stage::Resolved || (!approve && request.stage != Stage::Requested) {
         return Err("amh: request is not awaiting a resolution decision".to_owned());
+    }
+    if request.stage == Stage::Added {
+        request.evidence = "withdrawn by its creator".to_owned();
     }
     if !approve && reason.trim().is_empty() {
         return Err("amh: rejection needs --reason".to_owned());
@@ -276,8 +280,8 @@ pub fn can_close(task: &Task, all: &[Task]) -> Result<(), String> {
                 && (owner.name == task.name || request.creator == task.name)
             {
                 return Err(format!(
-                    "amh: {} must stay alive for unresolved request {}",
-                    task.name, request.id
+                    "amh: {} must stay alive for unresolved request {}; {} resolves it with `amh todo done`, then {} with `amh todo approve`, which also works alone to withdraw it",
+                    task.name, request.id, owner.name, request.creator
                 ));
             }
         }

@@ -89,7 +89,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("old").required(true).value_name("OLD"))
                 .arg(Arg::new("new").required(true).value_name("NEW"))
             )
-            .subcommand(Command::new("approve").about("Approve resolution of a request you created.")
+            .subcommand(Command::new("approve").about("Approve resolution of a request you created; before its owner asked for that, this withdraws the request.")
                 .arg(Arg::new("id").required(true).value_name("ID"))
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when amh cannot tell who you are"))
             )
