@@ -122,8 +122,54 @@ impl Store {
             }
             database.import(&snapshots, &events)?;
         }
+        self.take_in_edits(&database)?;
         self.export(&database)?;
         Ok(lock)
+    }
+
+    /// Keep body lines someone typed into an exported task file, which the next export would overwrite.
+    ///
+    /// A typed line is one in the file's body that is not in the text amh last exported there; it is appended to the task's body in the database.
+    // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
+    fn take_in_edits(&self, database: &Database) -> Result<(), String> {
+        for (name, text) in database.tasks()? {
+            let Ok(file) = fs::read_to_string(self.root.join(&name)) else {
+                continue;
+            };
+            let Some(last) = database.record(&format!("export:{name}"))? else {
+                continue;
+            };
+            if file == text || file == last || name == "TODO.md" {
+                continue;
+            }
+            let (Ok(typed), Ok(exported)) = (Task::parse(&name, &file), Task::parse(&name, &last))
+            else {
+                continue;
+            };
+            let mut known: Vec<&str> = exported.body.lines().collect();
+            let added: Vec<&str> = typed
+                .body
+                .lines()
+                .filter(|line| match known.iter().position(|seen| seen == line) {
+                    Some(at) => {
+                        known.remove(at);
+                        false
+                    }
+                    None => true,
+                })
+                .collect();
+            if added.iter().all(|line| line.trim().is_empty()) {
+                continue;
+            }
+            let mut task = Task::parse(&name, &text)?;
+            task.body = format!(
+                "{}\n{}\n",
+                task.body.trim_end_matches('\n'),
+                added.join("\n")
+            );
+            self.save(&task)?;
+        }
+        Ok(())
     }
 
     fn database(&self) -> Result<Option<Database>, String> {
@@ -141,6 +187,10 @@ impl Store {
             if fs::read_to_string(self.root.join(&name)).ok().as_deref() != Some(&text) {
                 taskfile::write(&self.root.join(&name), &text)
                     .map_err(|error| format!("amh: cannot export {name}: {error}"))?;
+            }
+            let key = format!("export:{name}");
+            if database.record(&key)?.as_deref() != Some(&text) {
+                database.set_record(&key, &text)?;
             }
         }
         let mut text =
@@ -603,6 +653,41 @@ impl Store {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn a_line_typed_into_a_task_file_survives_the_next_export()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "amh-typed-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        taskfile::write(
+            &root.join("t.md"),
+            "---\nstatus: running\nrunat: omnigent://worker\n---\n\nbody\n",
+        )?;
+        taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
+        drop(store.lock()?);
+        let path = root.join("t.md");
+        fs::write(&path, fs::read_to_string(&path)? + "typed by a manager\n")?;
+        let lock = store.lock()?;
+        let mut task = store.load("t.md")?;
+        task.fields.push(("tool".to_owned(), "codex".to_owned()));
+        store.save(&task)?;
+        drop(lock);
+        let text = fs::read_to_string(&path)?;
+        assert!(text.contains("typed by a manager") && text.contains("tool: codex"));
+        assert_eq!(text.matches("typed by a manager").count(), 1);
+        drop(store.lock()?);
+        assert_eq!(fs::read_to_string(&path)?, text);
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
 
     #[test]
     fn a_human_message_is_queued_once_on_its_own_channel() -> Result<(), Box<dyn std::error::Error>>

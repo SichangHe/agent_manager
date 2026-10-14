@@ -10,6 +10,7 @@ scope
     - task snapshots, domain events and queued notifications commit together
     - ownership transfer updates both owners in one transaction
     - markdown is regenerated after commits and repaired on the next locked operation
+        - body lines typed into a task file since the last export are appended to the task in SQLite first, so a regenerate never drops them; the last export is the record `export:NAME`
     - current events are rendered into `amh_views/events.md`; archived events remain in dated Markdown
     - legacy resolved requests without completion dates start retention at migration
         - this is a retention date, not a claim about their historical completion time
