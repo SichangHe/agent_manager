@@ -6,7 +6,8 @@
 - `quota::paused` persists provider session-limit evidence per Omnigent session
   - named reset timezone determines the next reset, including midnight and daylight saving changes
   - session `updated_at` anchors historical failures; absent timestamps use first observation
-  - one send after reset consumes the retry; unchanged quota evidence then waits for a meaningful session state or error change
+  - one send after reset consumes the retry; while the session still shows the same limit error, another send is allowed every 15 min (`RETRY_S`)
+    - lost_work_mgr.md: "the stale pause lived in amh's state" ... "PB news skipped ticks for about 5.5 hours": a session can keep its old error after the reset, so waiting for changed evidence alone never ended the pause
   - explicit HTTP rejection or a nonqueued response releases the reserved retry; uncertain transport outcomes retain it
   - a newer failure timestamp recalculates reset even when the error text repeats; stale releases cannot alter that new pause
   - unknown reset waits for changed evidence

@@ -1,4 +1,4 @@
-//! Durable session quota pauses; one retry after a known reset, then wait for changed evidence.
+//! Durable session quota pauses; after a known reset, a retry every `RETRY_S` until the session changes.
 
 use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
 use serde_json::{Value, json};
@@ -51,6 +51,9 @@ fn reset(error: &str, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
 
 // 🧑 "Claude is getting \"Session limit reached”. Let the config agent handle this gracefully instead of keep spamming those agents"
 /// Keep a pause across watcher restarts. Changed session evidence clears it; an unchanged error gets only one reset retry.
+/// Seconds after an attempt past the reset before the next one, while the session still shows the same limit error.
+const RETRY_S: i64 = 900;
+
 pub fn paused(
     path: &Path,
     id: &str,
@@ -100,9 +103,15 @@ pub fn paused(
         let due = records[id]["reset_s"]
             .as_i64()
             .is_some_and(|at| now.timestamp() >= at);
-        let blocked = !due || records[id]["attempted"] == true;
+        // An attempt that left the session failed with the same error may be stale evidence, not a new limit, so another attempt follows after `RETRY_S`.
+        // lost_work_mgr.md: "the stale pause lived in amh's state" ... "PB news skipped ticks for about 5.5 hours"
+        let retry_due = records[id]["attempted_s"]
+            .as_i64()
+            .is_none_or(|at| now.timestamp() >= at + RETRY_S);
+        let blocked = !due || (records[id]["attempted"] == true && !retry_due);
         if !blocked && matches!(attempt, Attempt::Reserve) {
             records[id]["attempted"] = json!(true);
+            records[id]["attempted_s"] = json!(now.timestamp());
         }
         blocked
     };
@@ -152,6 +161,24 @@ mod tests {
             "claude",
             error,
             after,
+            None,
+            Attempt::Reserve
+        )?);
+        // The same stale error after the attempt gets another attempt once `RETRY_S` has passed.
+        let later = after + Duration::seconds(RETRY_S);
+        assert!(!paused(
+            &path,
+            "claude",
+            error,
+            later,
+            None,
+            Attempt::Reserve
+        )?);
+        assert!(paused(
+            &path,
+            "claude",
+            error,
+            later,
             None,
             Attempt::Reserve
         )?);
