@@ -240,7 +240,12 @@ fn tell_agent_resolves_task_sender_without_native_identity()
         )?;
         let server = std::thread::spawn(move || -> Result<String, std::io::Error> {
             let mut message = String::new();
-            for response in ["{\"status\":\"idle\"}", "{\"queued\":true}"] {
+            // The first answer is the move check, which finds no move.
+            for response in [
+                "{\"status\":\"idle\"}",
+                "{\"status\":\"idle\"}",
+                "{\"queued\":true}",
+            ] {
                 let (mut stream, _) = listener.accept()?;
                 stream.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
                 let mut reader = std::io::BufReader::new(stream.try_clone()?);
