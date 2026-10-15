@@ -10,6 +10,44 @@ pub const PREFIX: &str = "omnigent://";
 /// Sent after a multi-line message: Claude Code shows such a message as pasted text and acts on it only when a typed line says to.
 const FOLLOW_UP: &str = "The message above reached you through `amh`, the helper that carries the human's and your manager's requests to you; act on it.";
 const WAIT: Duration = Duration::from_secs(90);
+/// Agent starts, including wakes of a session whose runner is offline, allowed per minute on the whole machine.
+// The main manager: "make amh enforce the safe rate itself: queue amh task start and session resumes (including the watcher's own retries) so the whole machine starts at most 2 agents per minute, whoever asks"
+const STARTS_PER_MIN: usize = 2;
+
+/// Wait until starting one more agent keeps the machine within `STARTS_PER_MIN`, then record the start.
+///
+/// The start times of the last minute live in `amh-starts.json` in the state folder, under a lock shared by every amh process.
+fn start_slot() -> Result<(), String> {
+    let path = crate::settings::state_dir().join("amh-starts.json");
+    let given_up = Instant::now() + Duration::from_secs(1800);
+    loop {
+        let lock = std::fs::File::create(path.with_extension("lock"))
+            .map_err(|e| format!("cannot open the start lock: {e}"))?;
+        lock.lock()
+            .map_err(|e| format!("cannot lock the start record: {e}"))?;
+        let now_s = chrono::Utc::now().timestamp();
+        let mut starts: Vec<i64> = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        starts.retain(|at| now_s - at < 60);
+        if starts.len() < STARTS_PER_MIN {
+            starts.push(now_s);
+            crate::taskfile::write(&path, &json!(starts).to_string())
+                .map_err(|e| format!("cannot write the start record: {e}"))?;
+            return Ok(());
+        }
+        drop(lock);
+        if Instant::now() >= given_up {
+            return Err(
+                "waited 30 min for a start slot; the machine allows 2 agent starts per minute"
+                    .to_owned(),
+            );
+        }
+        let wait_s = (starts.iter().min().copied().unwrap_or(now_s) + 60 - now_s).max(1);
+        std::thread::sleep(Duration::from_secs(wait_s as u64));
+    }
+}
 
 type Settings = BTreeMap<String, String>;
 
@@ -108,6 +146,10 @@ pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String
         return Err(format!(
             "{address} is paused for its provider session quota; keep requests pending"
         ));
+    }
+    // A message to a session whose runner is offline starts that runner again.
+    if current["runner_online"] != true {
+        start_slot()?;
     }
     let answer = match post_message(settings, address, text) {
         Ok(answer) => answer,
@@ -449,6 +491,7 @@ pub fn launch(
     workdir: &str,
     title: &str,
 ) -> Result<String, String> {
+    start_slot()?;
     let wanted = format!("{tool}-native-ui");
     let agents = api(settings, "GET", "/v1/agents?limit=1000", None)?;
     let hosts = api(settings, "GET", "/v1/hosts", None)?;
