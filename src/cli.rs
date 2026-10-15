@@ -182,6 +182,9 @@ pub fn command() -> Command {
             .subcommand(Command::new("stop").about("Stop one agent without closing its task.")
                 .arg(Arg::new("who").required(true).value_name("WHO").help("its task file name, or its address"))
             )
+            .subcommand(Command::new("retire").about("Close for good an old session an agent left, e.g. after a partial-compaction move; its history stays readable.")
+                .arg(Arg::new("who").required(true).value_name("ADDRESS").help("the old session's address, omnigent://ID; never a task's current agent"))
+            )
             .subcommand(
                 Command::new("view")
                     .about("Open an agent's live terminal in yours; detach to leave it running.")

@@ -31,3 +31,5 @@ partial-compaction moves
 - `omnigent::moved_to` follows the chain (at most 20 steps)
 - every send goes to the end of the chain
 - the watcher's minute pass (`agents::follow_moves`) rewrites the task's `runat` and `session_id`, and its workers' `managerat`
+- after following a move the watcher retires every session the chain left (`omnigent::retire`: stop event, then `archived: true`; history kept)
+- `amh agent retire ADDRESS` does the same by hand; refused for a task's current agent

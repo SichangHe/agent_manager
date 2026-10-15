@@ -76,9 +76,19 @@ pub fn follow_moves(settings: &Settings, store: &Store) -> Result<Vec<String>, S
         if !old.starts_with(omnigent::PREFIX) {
             continue;
         }
-        let Some(new) = omnigent::moved_to(settings, &old) else {
+        let chain = omnigent::moves(settings, &old);
+        let Some(new) = chain.last().cloned() else {
             continue;
         };
+        // lost_work_mgr.md asked that amh "close a task's superseded sessions itself when it follows a moved_to move"
+        for left in std::iter::once(&old).chain(&chain[..chain.len() - 1]) {
+            if let Err(error) = omnigent::retire(settings, left) {
+                followed.push(format!(
+                    "{}: closing its old session {left} failed: {error}",
+                    task.name
+                ));
+            }
+        }
         let _lock = store.lock()?;
         let mut fresh = store.load(&task.name)?;
         if fresh.address() != old {

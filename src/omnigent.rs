@@ -91,7 +91,12 @@ pub fn api(
         .map(|token| format!("Bearer {token}"));
     let sent = match body {
         Some(body) => {
-            let mut request = agent.post(&url).header("Content-Type", "application/json");
+            let request = if method == "PATCH" {
+                agent.patch(&url)
+            } else {
+                agent.post(&url)
+            };
+            let mut request = request.header("Content-Type", "application/json");
             if let Some(token) = &token {
                 request = request.header("Authorization", token);
             }
@@ -147,25 +152,61 @@ pub const MOVED_LABEL: &str = "omnigent_partial_compact.moved_to";
 /// Where an agent at `address` lives now: the end of the chain of `MOVED_LABEL` moves, or `None` when it has not moved.
 // 🧑 "Can we have an additional ID of some sort that would be consistent across partial compaction that amh would use? Otherwise we can let managers refer to agents by their task file names and do hooks to correct session ID mapping"
 pub fn moved_to(settings: &Settings, address: &str) -> Option<String> {
-    let mut id = session(address).ok()?.to_owned();
-    let mut moved = false;
+    moves(settings, address).last().cloned()
+}
+
+/// Every session a move chain passes through after `address`, in order; empty when it has not moved.
+pub fn moves(settings: &Settings, address: &str) -> Vec<String> {
+    let mut chain = Vec::new();
+    let Ok(start) = session(address) else {
+        return chain;
+    };
+    let mut id = start.to_owned();
     for _ in 0..20 {
-        let found = api(
+        let Ok(found) = api(
             settings,
             "GET",
             &format!("/v1/sessions/{id}?include_items=false"),
             None,
-        )
-        .ok()?;
+        ) else {
+            break;
+        };
         match found["labels"][MOVED_LABEL].as_str() {
-            Some(next) if !next.is_empty() && next != id => {
+            Some(next)
+                if !next.is_empty()
+                    && next != id
+                    && !chain.iter().any(|seen: &String| seen.ends_with(next)) =>
+            {
                 id = next.to_owned();
-                moved = true;
+                chain.push(format!("{PREFIX}{id}"));
             }
             _ => break,
         }
     }
-    moved.then(|| format!("{PREFIX}{id}"))
+    chain
+}
+
+/// Close a session an agent left for good: stop it and archive it, keeping its history for reading.
+// lost_work_mgr.md: "no manager tool can close vd_lit_venues' old session b5c6fae6 ... It kept writing after the 09:13 fork into the same files as the new session."
+pub fn retire(settings: &Settings, address: &str) -> Result<(), String> {
+    let id = session(address)?;
+    let _ = post_event(settings, address, "stop_session", json!({}));
+    api(
+        settings,
+        "PATCH",
+        &format!("/v1/sessions/{id}"),
+        Some(&json!({"archived": true})),
+    )?;
+    let after = api(
+        settings,
+        "GET",
+        &format!("/v1/sessions/{id}?include_items=false"),
+        None,
+    )?;
+    if after["runner_online"] == true && after["status"] == "running" {
+        return Err(format!("{address} is archived but still running"));
+    }
+    Ok(())
 }
 
 pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String> {

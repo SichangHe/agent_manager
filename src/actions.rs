@@ -1052,6 +1052,20 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             said.to_owned()
         }
+        ("agent", "retire") => {
+            let at = need("who").to_owned();
+            if store
+                .all()?
+                .iter()
+                .any(|task| task.address() == at && task.status() != "done")
+            {
+                return Err(format!(
+                    "amh: {at} is a task's current agent; use amh agent stop or amh task close"
+                ));
+            }
+            omnigent::retire(&settings, &at).map_err(failed)?;
+            format!("{at} is stopped and archived; its history stays readable\n")
+        }
         ("agent", "compact") => {
             let at = agents::address_of(&store, need("who"))?;
             omnigent::send(&settings, &at, "/compact").map_err(failed)?;
