@@ -501,13 +501,15 @@ fn attempt(
     // A missing or stuck agent reads no messages, so its mail goes to its manager.
     let sent = match state {
         "missing" | "stuck" | "error" => Err(format!("the agent is {state}: {evidence}")),
-        _ => omnigent::send(settings, &plan.target, text),
+        _ => omnigent::send_now(settings, &plan.target, text),
     };
     let Err(error) = sent else {
         return Outcome::Delivered;
     };
     let second = match &plan.fallback {
-        Some(manager) => omnigent::send(settings, manager, &decide::rerouted(task, &error, text)),
+        Some(manager) => {
+            omnigent::send_now(settings, manager, &decide::rerouted(task, &error, text))
+        }
         None => Err("no manager to fall back to".to_owned()),
     };
     match second {

@@ -23,3 +23,4 @@ start rate
 - `omnigent::start_slot` gates `launch` and any `send` to a session whose runner is offline (that send restarts the runner)
     - start times of the last minute in `amh-starts.json` in the state folder, under `amh-starts.lock`; a caller over the limit sleeps until a slot frees, giving up after 30 min
     - the watcher waits too, so its other work pauses while it waits
+    - except the delivery of the human's messages and typed blocks (`send_now`), which never waits

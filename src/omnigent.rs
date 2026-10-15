@@ -133,6 +133,16 @@ fn post_message(settings: &Settings, address: &str, text: &str) -> Result<Value,
 
 /// Deliver `text` to an agent as its next user message.
 pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
+    send_gated(settings, address, text, true)
+}
+
+/// `send` without waiting for a start slot, for the human's own messages.
+// The main manager: "Make the watcher deliver the human's messages without waiting behind start slots"
+pub fn send_now(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
+    send_gated(settings, address, text, false)
+}
+
+fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Result<(), String> {
     let current = api(
         settings,
         "GET",
@@ -148,7 +158,7 @@ pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String
         ));
     }
     // A message to a session whose runner is offline starts that runner again.
-    if current["runner_online"] != true {
+    if gated && current["runner_online"] != true {
         start_slot()?;
     }
     let answer = match post_message(settings, address, text) {
