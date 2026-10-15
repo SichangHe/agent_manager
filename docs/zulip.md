@@ -43,3 +43,4 @@
 manager reports
 - `report_sink.TAG = "FILE"`: `amh tell manager` from a worker of the task with tag TAG, and that worker's closing notice, are appended to FILE and do not wake the manager; for workers started by a script
     - the watcher's failure reports still wake the manager
+    - so do `amh tell manager --blocked` and `--done`, and a worker's own close

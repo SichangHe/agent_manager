@@ -210,20 +210,22 @@ pub fn address_of(store: &Store, who: &str) -> Result<String, String> {
     }
 }
 
-/// Give `text` to the manager at `manager`: wake it, or, when `report_sink.TAG` names a file for the manager's task, append there. Returns the file used.
+/// Give `text` to the manager at `manager`: wake it, or, when `report_sink.TAG` names a file for the manager's task and the report is not `urgent` (a blocker or a final result), append there. Returns the file used.
 // vl_catchup.md: "each Codex reader that vl_lit_dig.md's dispatcher script starts sends it an acknowledgement and a done message ... each waking an Opus agent for nothing ... let a task name a sink (a file or script) in place of its manager for such reports"
 pub fn report(
     settings: &Settings,
     store: &Store,
     manager: &str,
     text: &str,
+    urgent: bool,
 ) -> Result<Option<String>, String> {
     let tasks = store.all()?;
     let owner = tasks.iter().find(|task| task.address() == manager);
     let sink = owner.map_or("", |task| {
         settings::get(settings, &format!("report_sink.{}", task.tag()))
     });
-    if sink.is_empty() {
+    // The main manager: "make sure a blocker or a final result still wakes the manager"
+    if sink.is_empty() || urgent {
         omnigent::send(settings, manager, text)?;
         return Ok(None);
     }
@@ -276,7 +278,7 @@ pub fn close_task(
     if own {
         let _ = writeln!(io::stdout(), "closed {name}; stopping your own session now");
         let manager = task.field("managerat").unwrap_or_default();
-        let _ = report(settings, store, manager, &work::self_closed(&task));
+        let _ = report(settings, store, manager, &work::self_closed(&task), true);
     }
     match omnigent::stop(settings, at) {
         Err(error) if !agent_gone => Err(format!(
