@@ -1039,6 +1039,7 @@ pub fn run() -> u8 {
     let mut last_archive: Option<Instant> = None;
     let mut last_zulip_cleanup: Option<Instant> = None;
     let mut last_commit: Option<Instant> = None;
+    omnigent::NO_WAIT.store(true, std::sync::atomic::Ordering::Relaxed);
     log("watcher started");
     loop {
         let settings = match settings::load() {

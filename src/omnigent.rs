@@ -17,6 +17,9 @@ const STARTS_PER_MIN: usize = 2;
 /// Wait until starting one more agent keeps the machine within `STARTS_PER_MIN`, then record the start.
 ///
 /// The start times of the last minute live in `amh-starts.json` in the state folder, under a lock shared by every amh process.
+/// Set by the watcher: it must never sleep for a slot, since that would hold up the human's mail; a send over the limit fails and is retried on a later poll.
+pub static NO_WAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn start_slot() -> Result<(), String> {
     let path = crate::settings::state_dir().join("amh-starts.json");
     let given_up = Instant::now() + Duration::from_secs(1800);
@@ -38,6 +41,12 @@ fn start_slot() -> Result<(), String> {
             return Ok(());
         }
         drop(lock);
+        if NO_WAIT.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(
+                "no agent start slot free this minute (2 per minute on the machine); retried later"
+                    .to_owned(),
+            );
+        }
         if Instant::now() >= given_up {
             return Err(
                 "waited 30 min for a start slot; the machine allows 2 agent starts per minute"
