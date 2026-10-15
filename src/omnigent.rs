@@ -220,7 +220,8 @@ pub fn classify(session: &Value) -> (&'static str, String) {
         );
     }
     // Omnigent takes an idle session's runner offline and brings it back on the next message, so that session is `ready`.
-    let parked = state == "idle" && session["host_online"] == true;
+    // lost_work_mgr.md: "the problem check reported eng_tasks_mgr, pb_lost_three and stock_news_watch as 'gone' (runner_online=False), but all three were idle sessions; one message woke each". At 18:23 Oct 14 host_online was not true for them either.
+    let parked = state == "idle";
     if session["runner_online"] != true && !parked {
         return ("missing", evidence);
     }
