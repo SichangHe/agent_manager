@@ -68,6 +68,43 @@ pub fn problems(
     Ok(found)
 }
 
+/// Point each task whose agent moved to a partial-compaction fork at the fork, and its workers' manager address with it.
+pub fn follow_moves(settings: &Settings, store: &Store) -> Result<Vec<String>, String> {
+    let mut followed = Vec::new();
+    for task in store.active()? {
+        let old = task.address().to_owned();
+        if !old.starts_with(omnigent::PREFIX) {
+            continue;
+        }
+        let Some(new) = omnigent::moved_to(settings, &old) else {
+            continue;
+        };
+        let _lock = store.lock()?;
+        let mut fresh = store.load(&task.name)?;
+        if fresh.address() != old {
+            continue;
+        }
+        let session = new
+            .strip_prefix(omnigent::PREFIX)
+            .unwrap_or(&new)
+            .to_owned();
+        for (key, value) in &mut fresh.fields {
+            match key.as_str() {
+                "runat" => *value = new.clone(),
+                "session_id" => *value = session.clone(),
+                _ => {}
+            }
+        }
+        store.save(&fresh)?;
+        store.place(&fresh)?;
+        for report in work::repointed(store.active()?, &old, &new) {
+            store.save(&report)?;
+        }
+        followed.push(format!("{} moved from {old} to {new}", task.name));
+    }
+    Ok(followed)
+}
+
 /// Whether a task's record names an agent and something still runs there.
 pub fn has_live_agent(settings: &Settings, task: &Task) -> bool {
     // 🧑 "Make restarting a failed or stopped task on another tool work, keeping the task file and its open items"

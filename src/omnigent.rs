@@ -141,6 +141,33 @@ fn post_message(settings: &Settings, address: &str, text: &str) -> Result<Value,
 }
 
 /// Deliver `text` to an agent as its next user message.
+/// The label opc sets on a session it left for a partial-compaction fork; its value is the fork's session ID.
+pub const MOVED_LABEL: &str = "omnigent_partial_compact.moved_to";
+
+/// Where an agent at `address` lives now: the end of the chain of `MOVED_LABEL` moves, or `None` when it has not moved.
+// 🧑 "Can we have an additional ID of some sort that would be consistent across partial compaction that amh would use? Otherwise we can let managers refer to agents by their task file names and do hooks to correct session ID mapping"
+pub fn moved_to(settings: &Settings, address: &str) -> Option<String> {
+    let mut id = session(address).ok()?.to_owned();
+    let mut moved = false;
+    for _ in 0..20 {
+        let found = api(
+            settings,
+            "GET",
+            &format!("/v1/sessions/{id}?include_items=false"),
+            None,
+        )
+        .ok()?;
+        match found["labels"][MOVED_LABEL].as_str() {
+            Some(next) if !next.is_empty() && next != id => {
+                id = next.to_owned();
+                moved = true;
+            }
+            _ => break,
+        }
+    }
+    moved.then(|| format!("{PREFIX}{id}"))
+}
+
 pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
     send_gated(settings, address, text, true)
 }
@@ -152,6 +179,9 @@ pub fn send_now(settings: &Settings, address: &str, text: &str) -> Result<(), St
 }
 
 fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Result<(), String> {
+    // A message to a session that moved goes to where the agent lives now; the watcher updates the task file soon after.
+    let moved = moved_to(settings, address);
+    let address = moved.as_deref().unwrap_or(address);
     let current = api(
         settings,
         "GET",

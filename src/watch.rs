@@ -747,6 +747,9 @@ impl Watcher {
             .lines()
             .map(str::to_owned)
             .collect();
+        for line in agents::follow_moves(settings, store)? {
+            log(&line);
+        }
         let found = agents::problems(settings, store)?;
         let now_s = self.started.elapsed().as_secs();
         // 🧑 "We have 96% quota left for Codex and it resets in 5 days. Try to use them up in those days": Codex workers stop after each small step, so the setting `remind.codex_idle_s` wakes them sooner than the default.

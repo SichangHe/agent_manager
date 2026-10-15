@@ -24,3 +24,10 @@ start rate
     - start times of the last minute in `amh-starts.json` in the state folder, under `amh-starts.lock`; a caller over the limit sleeps until a slot frees, giving up after 30 min
     - the watcher never waits (`NO_WAIT`): its send over the limit fails and is retried on a later poll
     - except the delivery of the human's messages and typed blocks (`send_now`), which never waits
+
+partial-compaction moves
+- 🧑 "Can we have an additional ID of some sort that would be consistent across partial compaction that amh would use? Otherwise we can let managers refer to agents by their task file names and do hooks to correct session ID mapping"
+- opc labels a session it left with `omnigent_partial_compact.moved_to` = the fork's session ID; moves can chain
+- `omnigent::moved_to` follows the chain (at most 20 steps)
+- every send goes to the end of the chain
+- the watcher's minute pass (`agents::follow_moves`) rewrites the task's `runat` and `session_id`, and its workers' `managerat`
