@@ -372,6 +372,84 @@ pub fn rotate(
     Ok(new)
 }
 
+/// Replace the agent of a task on the human's order: start a fresh agent on the same tool, model, effort, and folder with the original request, a replacement note, the human's `message`, and the open items; then stop the old agent and tell the manager. Returns the new address.
+// 🧑 "I see \"replace this agent\" does not trigger automatic replacement. It should"
+pub fn replace(
+    settings: &Settings,
+    store: &Store,
+    name: &str,
+    message: &str,
+) -> Result<String, String> {
+    let agent = |error: String| format!("amh: {error}");
+    let mut task = store.load(name)?;
+    let old = task.address().to_owned();
+    let Some(id) = old.strip_prefix(omnigent::PREFIX) else {
+        return Err(format!(
+            "amh: {name} does not run on Omnigent, so it cannot be replaced"
+        ));
+    };
+    let session = omnigent::api(
+        settings,
+        "GET",
+        &format!("/v1/sessions/{id}?include_items=false"),
+        None,
+    )
+    .map_err(agent)?;
+    let [tool, model, effort, workdir] = work::relaunch(&session, None, None, None)?;
+    let open = crate::requests::listed(&mut task)?;
+    let root = store.root.display().to_string();
+    let request = work::replacement(&task, &old, &root, message, &open);
+    let is_manager = task.field("is_manager") == Some("true");
+    let mut guides = work::guides(is_manager);
+    if old == settings::get(settings, "main_manager") {
+        guides = work::handover(name, &old, &root, true).0;
+    }
+    let record =
+        format!("(agent replaced on the human's order: {old} handed over to a fresh agent)\n");
+    let started = start_agent(
+        settings,
+        store,
+        &Start {
+            name,
+            fields: &[],
+            tool: &tool,
+            model: &model,
+            effort: &effort,
+            workdir: &workdir,
+            guides: &guides,
+            request: &request,
+            record: &record,
+        },
+    );
+    // An agent that launched but did not show its first prompt in time is still the replacement: stop the old one regardless.
+    let new = match started {
+        Ok(new) => new,
+        Err(error) => match store.load(name).map(|fresh| fresh.address().to_owned()) {
+            Ok(new) if new != old => {
+                eprintln!("{error}");
+                new
+            }
+            _ => return Err(error),
+        },
+    };
+    if let Err(error) = omnigent::stop(settings, &old) {
+        eprintln!("amh: {name}: the replaced agent {old} was not stopped: {error}");
+    }
+    if let Some(manager) = task
+        .field("managerat")
+        .filter(|manager| *manager != old && !manager.is_empty())
+    {
+        let text = work::envelope(
+            &new,
+            &format!(
+                "{name}: on the human's order, amh replaced its agent {old} with {new}, which got the original request, the human's message and the open items; nothing to do."
+            ),
+        );
+        let _ = report(settings, store, manager, &text, false);
+    }
+    Ok(new)
+}
+
 /// A value the caller gave; an empty one counts as not given.
 fn given(value: Option<&str>) -> Option<&str> {
     value.filter(|text| !text.is_empty())

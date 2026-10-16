@@ -336,6 +336,41 @@ pub fn handover(
     )
 }
 
+/// The request a task's first agent started with, as recorded in its task file: the first manager delegation and the human message or note that followed it.
+pub fn original_request(body: &str) -> Option<String> {
+    let start = body.find("<manager_delegation")?;
+    let rest = &body[start..];
+    let close = "</manager_delegation>\n";
+    let mut end = rest.find(close)? + close.len();
+    let after = &rest[end..];
+    if after.starts_with("<human_instruction") {
+        let done = "</human_instruction>\n";
+        end += after.find(done).map_or(0, |at| at + done.len());
+    } else if after.starts_with(MANAGER_ONLY) {
+        end += MANAGER_ONLY.len();
+    }
+    Some(rest[..end].to_owned())
+}
+
+/// The request of an agent that replaces the one at `old` on the human's order: the original starter request, a note that it replaces an agent, the human's message, and the open items.
+// 🧑 "should give the new agent the original starter prompt the replaced agent was given, plus a short explanation that they replace a previous agent, the human message, the pending item list; instead of the manager prompting them"
+pub fn replacement(task: &Task, old: &str, root: &str, message: &str, open: &str) -> String {
+    let original = original_request(&task.body).unwrap_or_else(|| {
+        "(The original request is not recorded in the task file; read the task file for it.)\n"
+            .to_owned()
+    });
+    let open = if open.trim().is_empty() {
+        "(none)\n"
+    } else {
+        open
+    };
+    format!(
+        "{original}\nYou replace the agent that ran this task at {old}; the human asked for its replacement in the message below. Its task file {} in {root} holds its history; continue from there. The previous agent is stopped.\n\n{}\n\nThe task's pending items (`amh todo list`):\n{open}",
+        task.name,
+        message.trim_end()
+    )
+}
+
 /// The tool, model, effort, and folder a manager's replacement runs with: what was asked for, else what the old Omnigent session has.
 pub fn relaunch(
     session: &Value,
@@ -893,6 +928,35 @@ pub mod tests {
         assert_eq!(
             task_log(watch, actions, "t_a.md", "omnigent://a", 2),
             "2026-10-06 10:00:05 mail m-1.txt 'x' -> t_a.md\n2026-10-06 10:00:07 omnigent://a exit=0 {\"action\":\"human\"}\n"
+        );
+    }
+
+    #[test]
+    fn a_replacement_gets_the_original_request_the_message_and_open_items() {
+        let mut task = new_task("t.md");
+        let first = request("omnigent://m", "Do X.", None).unwrap();
+        task.body = format!(
+            "intro\n\n{first}\nlater\n<manager_delegation from=\"omnigent://m\">\nDo Y.\n</manager_delegation>\n"
+        );
+        assert_eq!(
+            original_request(&task.body).as_deref(),
+            Some(first.as_str())
+        );
+        let text = replacement(
+            &task,
+            "omnigent://old",
+            "/r",
+            "<human_instruction>replace this agent</human_instruction>",
+            "",
+        );
+        assert!(
+            text.starts_with(&first)
+                && text.contains("You replace the agent that ran this task at omnigent://old")
+        );
+        assert!(
+            text.contains("replace this agent</human_instruction>")
+                && text.ends_with("(none)\n")
+                && !text.contains("Do Y.")
         );
     }
 }

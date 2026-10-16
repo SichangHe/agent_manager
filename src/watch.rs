@@ -719,6 +719,59 @@ impl Watcher {
                 continue;
             };
             let plan = decide::plan(task, &agent_at, settings::get(settings, "main_manager"));
+            let file = Path::new(mail).file_name().unwrap_or_default();
+            let stored =
+                fs::read_to_string(store.root.join("manager_mail").join(file)).unwrap_or_default();
+            let (_, own) = stored.split_once("\n\n").unwrap_or_default();
+            let own = if mail.starts_with("zulip-") {
+                crate::zulip::own_text(own)
+            } else {
+                own.to_owned()
+            };
+            if decide::replace_order(&own)
+                && plan.target == task.address()
+                && task.address().starts_with(omnigent::PREFIX)
+            {
+                match crate::agents::replace(
+                    settings,
+                    store,
+                    name,
+                    &decide::mail_text(mail, &stored, false),
+                ) {
+                    Ok(new) => {
+                        log(&format!(
+                            "{name}: replaced its agent with {new} on the human's order {mail}"
+                        ));
+                        let _lock = store.lock()?;
+                        if let Err(error) = database.finish_message(id, true, "") {
+                            log(&error);
+                        }
+                    }
+                    Err(error) => {
+                        // A fresh agent that started but did not show its prompt is the replacement; never start a second one.
+                        let started = store
+                            .load(name)
+                            .is_ok_and(|fresh| fresh.address() != task.address());
+                        log(&format!(
+                            "{name}: replacing its agent on {mail} failed{}: {error}",
+                            if started {
+                                " after the new agent started; not retried"
+                            } else {
+                                ", retried later"
+                            }
+                        ));
+                        if started {
+                            let _lock = store.lock()?;
+                            if let Err(error) = database.finish_message(id, true, "") {
+                                log(&error);
+                            }
+                        } else {
+                            self.failed_at.insert(name.to_owned(), Instant::now());
+                        }
+                    }
+                }
+                continue;
+            }
             if deliver_block(settings, store, task, &plan, &[decide::mail_line(mail)]) {
                 self.failed_at.remove(name);
                 let _lock = store.lock()?;

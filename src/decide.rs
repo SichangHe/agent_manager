@@ -69,6 +69,18 @@ pub fn for_manager(body: &str) -> bool {
         || first.starts_with("replace this agent")
 }
 
+/// Whether the human's own text starts by asking to replace the agent.
+pub fn replace_order(body: &str) -> bool {
+    body.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('>'))
+        .is_some_and(|line| {
+            line.trim_start_matches(['*', '_'])
+                .to_lowercase()
+                .starts_with("replace this agent")
+        })
+}
+
 /// Whether an agent works on the task: it is active and not retired.
 fn staffed(task: &Task) -> bool {
     task.is_active() && task.address() != "retired"
@@ -91,6 +103,14 @@ pub fn route<'a>(
         .map(crate::zulip::task_topic)
         .and_then(|tag| tasks.iter().find(|task| task.tag() == tag));
     let chosen = match tagged {
+        // 🧑 "\"replace this agent\" ... should trigger automatic replacement": amh replaces the agent when delivering to its own task.
+        Some(tagged)
+            if staffed(tagged)
+                && replace_order(body)
+                && tagged.address().starts_with(crate::omnigent::PREFIX) =>
+        {
+            Some(tagged)
+        }
         Some(tagged) if staffed(tagged) && for_manager(body) => manager_of(tagged).or(Some(tagged)),
         Some(tagged) if staffed(tagged) => Some(tagged),
         Some(tagged) => manager_of(tagged),
@@ -796,7 +816,7 @@ mod tests {
             (
                 "[t_sub] hello",
                 "replace this agent, it is stuck",
-                "t_work.md",
+                "t_sub.md",
             ),
             ("[t_sub] hello", "not for manager really\nok", "t_sub.md"),
             ("[t_sub] hello", "please\nterminate this agent", "t_sub.md"),
@@ -820,6 +840,8 @@ mod tests {
                 && for_manager("park it.\nThis is for the manager.")
         );
         assert!(!for_manager("for managers in general") && !for_manager("a platform manager"));
+        assert!(replace_order("> quoted\n\n**Replace this agent** please"));
+        assert!(!replace_order("please\nreplace this agent"));
     }
 
     #[test]

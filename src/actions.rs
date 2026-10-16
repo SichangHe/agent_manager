@@ -1052,6 +1052,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             said.to_owned()
         }
+        ("agent", "replace") => {
+            let name = work::task_name(need("who"));
+            let message = text("message").unwrap_or_default();
+            let new = agents::replace(&settings, &store, &name, message)?;
+            format!("{name} now runs at {new}\n")
+        }
         ("agent", "retire") => {
             let at = need("who").to_owned();
             if store
