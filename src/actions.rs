@@ -215,7 +215,7 @@ fn tell_human(
         say(&format!("Zulip message sent.\nMessage-ID: {message_id}\n"));
         if let Err(error) = crate::zulip::replace(settings, replaces) {
             eprintln!(
-                "amh: replacement was sent; earlier message deletion failed: {error}. Do not send the replacement again."
+                "amh: replacement was sent; earlier message not deleted: {error}. Do not send the replacement again."
             );
         }
         match crate::zulip::consolidation_reminder(settings, tag, &message_id) {

@@ -168,7 +168,7 @@ pub fn consolidation_reminder(
         return Ok(String::new());
     }
     Ok(format!(
-        "The human has not read {} earlier update(s) of this task: {}. Merge them now: read them with `amh mail unread`, send ONE update that holds everything still worth reading from them and from the message you just sent, with --replaces for each of these IDs and for the message you just sent. Human messages are never replaced.",
+        "The human has not read {} earlier update(s) of this task: {}. Merge them now: read them with `amh mail unread`, send ONE update that holds everything still worth reading from them and from the message you just sent, with --replaces for each of these IDs and for the message you just sent. Human messages, and yours that the human replied after, are never replaced.",
         ids.len(),
         ids.join(", ")
     ))
@@ -398,10 +398,15 @@ pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
             .ok()
             .and_then(|raw| serde_json::from_slice(&raw).ok())
             .unwrap_or_default();
+    let mut kept = Vec::new();
     for id in ids {
         let id = aliases.get(id).unwrap_or(id);
         if let Some(id) = id.strip_prefix("zulip:") {
             let id: u64 = id.parse().map_err(|_| "invalid Zulip replacement ID")?;
+            if answered(settings, id)? {
+                kept.push(format!("zulip:{id}"));
+                continue;
+            }
             fs::write(folder.join(id.to_string()), "")
                 .map_err(|error| format!("cannot queue Zulip deletion: {error}"))?;
         }
@@ -429,11 +434,51 @@ pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
             Err(error) => failures.push(error),
         }
     }
+    if !kept.is_empty() {
+        failures.push(format!(
+            "kept {} because the human replied after it; messages the human answered are never deleted",
+            kept.join(", ")
+        ));
+    }
     if failures.is_empty() {
         Ok(())
     } else {
         Err(failures.join("; "))
     }
+}
+
+// 🧑 "disable agent' absility to replace an old message after which I send an N reply"
+/// Whether the human sent a message in bot message `id`'s topic after it.
+fn answered(settings: &Settings, id: u64) -> Result<bool, String> {
+    let message = match api(settings, "GET", &format!("messages/{id}"), &[]) {
+        Err(error) if error.contains("Invalid message") => return Ok(false),
+        message => message?,
+    };
+    let message = &message["message"];
+    let human: u64 = settings::get(settings, "zulip.human_id")
+        .parse()
+        .map_err(|_| "invalid zulip.human_id")?;
+    let narrow = match message["stream_id"].as_u64() {
+        Some(stream) => json!([
+            {"operator":"stream","operand":stream},
+            {"operator":"topic","operand":message["subject"].as_str().unwrap_or_default()},
+            {"operator":"sender","operand":human}
+        ]),
+        None => json!([{"operator":"dm","operand":human},{"operator":"sender","operand":human}]),
+    };
+    let after = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", id.to_string()),
+            ("num_before", "0".to_owned()),
+            ("num_after", "1".to_owned()),
+            ("include_anchor", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    Ok(after["messages"].as_array().is_some_and(|found| !found.is_empty()))
 }
 
 pub fn incoming(settings: &Settings, cursor: u64) -> Result<Vec<Value>, String> {
