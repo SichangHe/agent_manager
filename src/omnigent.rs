@@ -365,13 +365,8 @@ pub fn classify(session: &Value) -> (&'static str, String) {
         shown(&session["harness"]),
         shown(&session["runner_online"])
     );
-    if state == "failed" {
-        let error: String = shown(&session["last_task_error"])
-            .chars()
-            .take(300)
-            .collect();
-        return ("error", format!("{evidence} last_task_error={error}"));
-    }
+    // vl_catchup.md: vl_anvil_steer "shows session_status=failed ('Answer the pending Claude question...') but its terminal has no prompt"
+    // Omnigent marks the session failed when a message meets an open prompt; it is stuck on that prompt, which the watcher answers, not broken.
     // A session waiting for someone to answer a prompt reads no messages until it is answered.
     if let Some(prompt) = session["pending_elicitations"]
         .as_array()
@@ -389,6 +384,23 @@ pub fn classify(session: &Value) -> (&'static str, String) {
             "stuck",
             format!("{evidence} waiting_on={message}: {preview}"),
         );
+    }
+    // With the prompt answered, Omnigent still shows the failure, though the agent reads messages again.
+    if state == "failed"
+        && session["runner_online"] == true
+        && shown(&session["last_task_error"]).contains("Answer the pending Claude question")
+    {
+        return (
+            "ready",
+            format!("{evidence} (a message was refused while a prompt was open; none is open now)"),
+        );
+    }
+    if state == "failed" {
+        let error: String = shown(&session["last_task_error"])
+            .chars()
+            .take(300)
+            .collect();
+        return ("error", format!("{evidence} last_task_error={error}"));
     }
     // Omnigent takes an idle session's runner offline and brings it back on the next message, so that session is `ready`.
     // lost_work_mgr.md: "the problem check reported eng_tasks_mgr, pb_lost_three and stock_news_watch as 'gone' (runner_online=False), but all three were idle sessions; one message woke each". At 18:23 Oct 14 host_online was not true for them either.
