@@ -215,6 +215,42 @@ pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String
 
 /// `send` without waiting for a start slot, for the human's own messages.
 // The main manager: "Make the watcher deliver the human's messages without waiting behind start slots"
+// 🧑 "Make it s.t. it uses the company account while available, and pause VL experiments when not and switch to personal"
+/// Agents held on purpose, by session id, with the reason; a held agent gets no messages and counts as paused.
+fn holds_path() -> std::path::PathBuf {
+    crate::settings::state_dir().join("amh-holds.json")
+}
+
+fn holds() -> serde_json::Map<String, Value> {
+    std::fs::read_to_string(holds_path())
+        .ok()
+        .and_then(|text| serde_json::from_str::<Value>(&text).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// Why the agent at `address` is held, if it is.
+pub fn held(address: &str) -> Option<String> {
+    let id = session(address).ok()?;
+    holds().get(id).map(|why| why.as_str().unwrap_or("held").to_owned())
+}
+
+/// Hold the agent at `address` with `reason`, or release it when `reason` is `None`.
+pub fn set_hold(address: &str, reason: Option<&str>) -> Result<(), String> {
+    let id = session(address)?;
+    let mut all = holds();
+    match reason {
+        Some(reason) => {
+            all.insert(id.to_owned(), json!(reason));
+        }
+        None => {
+            all.remove(id);
+        }
+    }
+    crate::taskfile::write(&holds_path(), &Value::Object(all).to_string())
+        .map_err(|e| format!("cannot write holds: {e}"))
+}
+
 pub fn send_now(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
     send_gated(settings, address, text, false)
 }
@@ -223,6 +259,9 @@ fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Re
     // A message to a session that moved goes to where the agent lives now; the watcher updates the task file soon after.
     let moved = moved_to(settings, address);
     let address = moved.as_deref().unwrap_or(address);
+    if let Some(why) = held(address) {
+        return Err(format!("{address} is held ({why}); keep requests pending"));
+    }
     let current = api(
         settings,
         "GET",
@@ -367,6 +406,9 @@ pub fn classify(session: &Value) -> (&'static str, String) {
 
 /// The state of the agent at `address` and one line of evidence.
 pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
+    if let Some(why) = held(address) {
+        return ("paused", format!("held: {why}"));
+    }
     let found = session(address).and_then(|id| {
         api(
             settings,

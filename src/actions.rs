@@ -1052,6 +1052,23 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             said.to_owned()
         }
+        ("agent", "hold") => {
+            let at = agents::address_of(&store, need("who"))?;
+            omnigent::set_hold(&at, Some(need("reason")))?;
+            let said = omnigent::stop(&settings, &at).map_err(failed)?;
+            format!("{at} is held: stopped, and messages wait until amh agent release\n{said}")
+        }
+        ("agent", "release") => {
+            let at = agents::address_of(&store, need("who"))?;
+            if omnigent::held(&at).is_none() {
+                return Err(format!("amh: {at} is not held"));
+            }
+            omnigent::set_hold(&at, None)?;
+            clear_stopped(&store, &at)?;
+            let message = text("message").unwrap_or("You were paused on purpose and are released now: resume the work you were doing.");
+            omnigent::send(&settings, &at, message).map_err(failed)?;
+            format!("{at} is released and told to resume\n")
+        }
         ("agent", "replace") => {
             let name = work::task_name(need("who"));
             let message = text("message").unwrap_or_default();
