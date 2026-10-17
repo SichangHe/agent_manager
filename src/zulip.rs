@@ -160,7 +160,8 @@ pub fn consolidation_reminder(
         .take(NEWEST)
         .filter_map(|message| message["id"].as_u64())
     {
-        if unread_by_human(settings, id)? {
+        // A message the human replied after cannot be replaced, so asking to merge it only repeats.
+        if unread_by_human(settings, id)? && !answered(settings, id)? {
             ids.push(format!("zulip:{id}"));
         }
     }
