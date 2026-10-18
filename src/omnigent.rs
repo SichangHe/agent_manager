@@ -7,8 +7,9 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 pub const PREFIX: &str = "omnigent://";
-/// Sent after a multi-line message: Claude Code shows such a message as pasted text and acts on it only when a typed line says to.
-const FOLLOW_UP: &str = "The message above reached you through `amh`, the helper that carries the human's and your manager's requests to you; act on it.";
+/// Ends a multi-line message to Claude Code, which shows such a message as pasted text and acts on it only when told to.
+// 🧑 "I think you just shorten the notice and append it to the message itself."
+const FOLLOW_UP: &str = "(Sent to you through amh; act on it.)";
 const WAIT: Duration = Duration::from_secs(90);
 /// Agent starts, including wakes of a session whose runner is offline, allowed per minute on the whole machine.
 // The main manager: "make amh enforce the safe rate itself: queue amh task start and session resumes (including the watcher's own retries) so the whole machine starts at most 2 agents per minute, whoever asks"
@@ -280,6 +281,14 @@ fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Re
     if gated && current["runner_online"] != true {
         start_slot()?;
     }
+    let claude = current["harness"]
+        .as_str()
+        .is_some_and(|harness| harness.contains("claude"));
+    let text = &if claude && text.trim().contains('\n') {
+        format!("{}\n\n{FOLLOW_UP}", text.trim_end())
+    } else {
+        text.to_owned()
+    };
     let answer = match post_message(settings, address, text) {
         Ok(answer) => answer,
         Err(error) => {
@@ -294,13 +303,6 @@ fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Re
             quota_paused(address, &current, crate::quota::Attempt::Release)?;
         }
         return Err(format!("{address} did not queue the message: {answer}"));
-    }
-    if text.trim().contains('\n')
-        && current["harness"]
-            .as_str()
-            .is_some_and(|harness| harness.contains("claude"))
-    {
-        let _ = post_message(settings, address, FOLLOW_UP);
     }
     Ok(())
 }
