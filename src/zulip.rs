@@ -261,25 +261,11 @@ pub fn send(
     sender: &str,
     attachments: &[std::path::PathBuf],
 ) -> Result<String, String> {
-    let pending_folder = state.join("amh-zulip-pending");
-    match fs::read_dir(&pending_folder) {
-        Ok(entries) => {
-            for entry in entries {
-                let path = entry.map_err(|error| error.to_string())?.path();
-                let pending: Value =
-                    serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
-                        .map_err(|error| format!("invalid pending Zulip send: {error}"))?;
-                if pending["tag"] == tag && pending["body"] == body && pending["subject"] == subject
-                {
-                    return Err(format!(
-                        "the same Zulip send has uncertain delivery, retained at {}; verify delivery and resolve that payload before retrying",
-                        path.display()
-                    ));
-                }
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(format!("cannot check pending Zulip sends: {error}")),
+    if let Some(path) = pending_match(&state.join("amh-zulip-pending"), tag, subject, body)? {
+        return Err(format!(
+            "the same Zulip send has uncertain delivery, retained at {}; verify delivery and resolve that payload before retrying",
+            path.display()
+        ));
     }
     let recipient = settings::get(settings, "zulip.human_id");
     let id: u64 = recipient
@@ -575,8 +561,42 @@ pub fn own_text(body: &str) -> String {
         .join("\n")
 }
 
+/// The retained payload of an uncertain send with the same tag, subject and body, if any.
+fn pending_match(folder: &Path, tag: &str, subject: &str, body: &str) -> Result<Option<std::path::PathBuf>, String> {
+    let entries = match fs::read_dir(folder) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("cannot check pending Zulip sends: {error}")),
+    };
+    for entry in entries {
+        let path = entry.map_err(|error| error.to_string())?.path();
+        // Only payload files count; a folder or note someone put there must not block every send.
+        if !path.is_file() || path.extension().is_none_or(|extension| extension != "json") {
+            continue;
+        }
+        let pending: Value = serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+            .map_err(|error| format!("invalid pending Zulip send: {error}"))?;
+        if pending["tag"] == tag && pending["body"] == body && pending["subject"] == subject {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pending_check_skips_folders_and_other_files() -> Result<(), Box<dyn std::error::Error>> {
+        let folder = std::env::temp_dir().join(format!("amh-pending-{}", std::process::id()));
+        fs::create_dir_all(folder.join("done"))?;
+        fs::write(folder.join("note.txt"), "x")?;
+        assert_eq!(super::pending_match(&folder, "t", "s", "b")?, None);
+        fs::write(folder.join("1.json"), json!({"tag":"t","subject":"s","body":"b"}).to_string())?;
+        assert_eq!(super::pending_match(&folder, "t", "s", "b")?, Some(folder.join("1.json")));
+        fs::remove_dir_all(&folder)?;
+        Ok(())
+    }
+
     use super::*;
     #[test]
     fn disabled_consolidation_needs_no_credentials() -> Result<(), String> {
