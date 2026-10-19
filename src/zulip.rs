@@ -339,7 +339,28 @@ pub fn send(
             ("topic", tag.to_owned()),
         ]);
     }
-    let result = match api(settings, "POST", "messages", &fields) {
+    // 🧑 (via the manager) "make amh handle a non-JSON Zulip reply by checking delivery and retrying itself"
+    let content = fields.iter().find(|(name, _)| *name == "content").map(|(_, value)| value.clone()).unwrap_or_default();
+    let narrow = match fields.iter().find(|(name, _)| *name == "type").map(|(_, value)| value.as_str()) {
+        Some("stream") => {
+            let value = |key| fields.iter().find(|(name, _)| *name == key).map(|(_, value)| value.clone()).unwrap_or_default();
+            json!([{"operator":"stream","operand":value("to").parse::<u64>().unwrap_or_default()},{"operator":"topic","operand":value("topic")}])
+        }
+        _ => json!([{"operator":"dm","operand":fields.iter().find(|(name, _)| *name == "to").map(|(_, value)| value.clone()).unwrap_or_default()}]),
+    };
+    let mut sent = api(settings, "POST", "messages", &fields);
+    for wait_s in [5, 20] {
+        let Err(error) = &sent else { break };
+        std::thread::sleep(std::time::Duration::from_secs(wait_s));
+        sent = match delivered(settings, &narrow, &content) {
+            Some(id) => Ok(json!({"id": id})),
+            None if error.contains("invalid Zulip response") || error.contains("error sending request") => {
+                api(settings, "POST", "messages", &fields)
+            }
+            None => Err(error.clone()),
+        };
+    }
+    let result = match sent {
         Ok(result) => result,
         Err(error) => {
             use std::io::Write;
@@ -623,4 +644,27 @@ mod tests {
         assert_eq!(own_text(text), "replace this agent");
         assert!(crate::decide::for_manager(&own_text(text)));
     }
+}
+
+/// The ID of a recent message with exactly `content` in `narrow`, when an uncertain send did arrive.
+fn delivered(settings: &Settings, narrow: &Value, content: &str) -> Option<u64> {
+    let recent = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "10".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )
+    .ok()?;
+    recent["messages"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|message| message["content"].as_str().map(str::trim) == Some(content.trim()))
+        .and_then(|message| message["id"].as_u64())
 }
