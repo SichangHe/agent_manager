@@ -423,6 +423,55 @@ pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
     if let Some(why) = held(address) {
         return ("paused", format!("held: {why}"));
     }
+    if let Some(known) = SCAN.with_borrow(|scan| scan.as_ref().and_then(|known| known.get(address).cloned())) {
+        return known;
+    }
+    fetched_status(settings, address)
+}
+
+// 🧑 "Zulip delay feels very large now": the watcher's minute scan asked ~600 sessions one by one three times,
+// about 2 minutes in which no Zulip message was picked up.
+// Statuses fetched once for one watcher scan, per thread; `status` answers from them until `end_scan`.
+thread_local! {
+    static SCAN: std::cell::RefCell<Option<BTreeMap<String, (&'static str, String)>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Fetch the status of every address in parallel and serve `status` from it until `end_scan`.
+pub fn begin_scan(settings: &Settings, addresses: &[String]) {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let known = std::sync::Mutex::new(BTreeMap::new());
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            scope.spawn(|| {
+                while let Some(address) = addresses.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                    let found = fetched_status(settings, address);
+                    if let Ok(mut known) = known.lock() {
+                        known.insert(address.clone(), found);
+                    }
+                }
+            });
+        }
+    });
+    if let Ok(known) = known.into_inner() {
+        SCAN.set(Some(known));
+    }
+}
+
+/// Ask Omnigent again for `address` in this scan, after amh changed its state (e.g. answered its prompt).
+pub fn forget(address: &str) {
+    SCAN.with_borrow_mut(|scan| {
+        if let Some(known) = scan.as_mut() {
+            known.remove(address);
+        }
+    });
+}
+
+/// Stop answering `status` from the scan's statuses.
+pub fn end_scan() {
+    SCAN.set(None);
+}
+
+fn fetched_status(settings: &Settings, address: &str) -> (&'static str, String) {
     let found = session(address).and_then(|id| {
         api(
             settings,

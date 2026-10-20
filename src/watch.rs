@@ -59,16 +59,24 @@ enum IntakeError {
 
 /// What the watcher remembers between polls; a restart forgets it, which only repeats a retry or a reminder early.
 struct Watcher {
-    started: Instant,
     link: Link,
     human_link: Link,
     /// When the delivery of a task's blocks last reached nobody.
     failed_at: BTreeMap<String, Instant>,
-    /// When each task's idle agent was last reminded, in seconds since `started`.
-    reminded_s: BTreeMap<String, u64>,
-    last_nudge: Option<Instant>,
     pending_events: Option<i64>,
 }
+
+// 🧑 "Zulip delay feels very large now": the agent scan asks Omnigent about every agent, which takes about a
+// minute with ~600 agents, so it runs on its own thread and never holds up taking in and delivering messages.
+/// What the agent scan remembers between scans.
+struct Scanner {
+    started: Instant,
+    /// When each task's idle agent was last reminded, in seconds since `started`.
+    reminded_s: BTreeMap<String, u64>,
+}
+
+/// Serializes changes to the awaited-answers record, which delivery appends to while the scan rewrites it.
+static AWAITING_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn log(text: &str) {
     println!(
@@ -118,6 +126,94 @@ fn write_private(path: &Path, text: &str) -> std::io::Result<()> {
 }
 
 /// Email the human about one of their messages, at most once per `key`.
+impl Scanner {
+    /// Remind idle agents of their open items; report each agent failure once to its manager and, for harness errors, to the human.
+    fn nudge(&mut self, settings: &Settings, store: &Store) -> Result<(), String> {
+        let reported: BTreeSet<String> = record(store, PROBLEM_NOTICES)
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        for line in agents::follow_moves(settings, store)? {
+            log(&line);
+        }
+        let found = agents::problems(settings, store)?;
+        let now_s = self.started.elapsed().as_secs();
+        // 🧑 "We have 96% quota left for Codex and it resets in 5 days. Try to use them up in those days": Codex workers stop after each small step, so the setting `remind.codex_idle_s` wakes them sooner than the default.
+        let remind_every_s = |task: &Task| {
+            let tool = task.field("tool").unwrap_or_default();
+            [format!("remind.{tool}_idle_s"), "remind.idle_s".to_owned()]
+                .iter()
+                .find_map(|key| settings::get(settings, key).parse().ok())
+                .unwrap_or(decide::REMINDER_S)
+        };
+        let decided = decide::nudges(
+            &found,
+            &reported,
+            &store.active()?,
+            &self.reminded_s,
+            now_s,
+            remind_every_s,
+        );
+        let Some((nudges, mut now)) = decided else {
+            return Ok(());
+        };
+        let mut by_manager: Vec<(String, Vec<String>)> = Vec::new();
+        for nudge in nudges {
+            match nudge {
+                Nudge::Remind {
+                    task,
+                    address,
+                    text,
+                } => {
+                    match omnigent::send(settings, &address, &text) {
+                        Ok(()) => log(&format!("reminded idle {task} of its open items")),
+                        Err(error) => log(&format!("reminder to {task} failed: {error}")),
+                    }
+                    self.reminded_s.insert(task, now_s);
+                }
+                Nudge::Report {
+                    key,
+                    log: line,
+                    task,
+                    manager,
+                    text,
+                    email,
+                } => {
+                    log(&line);
+                    match by_manager.iter_mut().find(|(known, _)| *known == manager) {
+                        Some((_, texts)) => texts.push(text),
+                        None => by_manager.push((manager, vec![text])),
+                    }
+                    let Some((tag, body)) = email else {
+                        continue;
+                    };
+                    let sent = mail::send(
+                        settings,
+                        &store.state_dir,
+                        &tag,
+                        "",
+                        &body,
+                        mail::WATCHER,
+                        &[],
+                    );
+                    if let Err(error) = sent {
+                        log(&format!("failure email for {task} was not sent: {error}"));
+                        // Not remembered, so the problem is reported again once email works.
+                        now.remove(&key);
+                    }
+                }
+            }
+        }
+        for (manager, texts) in by_manager {
+            if let Err(error) = omnigent::send(settings, &manager, &decide::problems_text(&texts)) {
+                log(&format!("problem notice to {manager} failed: {error}"));
+            }
+        }
+        let keys: String = now.iter().map(|key| format!("{key}\n")).collect();
+        store.set_record(PROBLEM_NOTICES, &keys)
+    }
+}
+
 // 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
 fn tell_human_once(settings: &Settings, store: &Store, task: &Task, key: &str, text: &str) {
     let key = decide::told_key(task, key);
@@ -574,6 +670,7 @@ fn deliver_block(
     }
     if let Some(mail) = &settled.awaiting {
         let row = format!("{:.0} {name} {mail} 0\n", epoch_s());
+        let _awaiting = AWAITING_LOCK.lock();
         if let Err(error) = append(store, AWAITING, &row) {
             log(&format!("{error}; the answer to {mail} will not be chased"));
         }
@@ -794,91 +891,6 @@ impl Watcher {
         Ok(())
     }
 
-    /// Remind idle agents of their open items; report each agent failure once to its manager and, for harness errors, to the human.
-    fn nudge(&mut self, settings: &Settings, store: &Store) -> Result<(), String> {
-        let reported: BTreeSet<String> = record(store, PROBLEM_NOTICES)
-            .lines()
-            .map(str::to_owned)
-            .collect();
-        for line in agents::follow_moves(settings, store)? {
-            log(&line);
-        }
-        let found = agents::problems(settings, store)?;
-        let now_s = self.started.elapsed().as_secs();
-        // 🧑 "We have 96% quota left for Codex and it resets in 5 days. Try to use them up in those days": Codex workers stop after each small step, so the setting `remind.codex_idle_s` wakes them sooner than the default.
-        let remind_every_s = |task: &Task| {
-            let tool = task.field("tool").unwrap_or_default();
-            [format!("remind.{tool}_idle_s"), "remind.idle_s".to_owned()]
-                .iter()
-                .find_map(|key| settings::get(settings, key).parse().ok())
-                .unwrap_or(decide::REMINDER_S)
-        };
-        let decided = decide::nudges(
-            &found,
-            &reported,
-            &store.active()?,
-            &self.reminded_s,
-            now_s,
-            remind_every_s,
-        );
-        let Some((nudges, mut now)) = decided else {
-            return Ok(());
-        };
-        let mut by_manager: Vec<(String, Vec<String>)> = Vec::new();
-        for nudge in nudges {
-            match nudge {
-                Nudge::Remind {
-                    task,
-                    address,
-                    text,
-                } => {
-                    match omnigent::send(settings, &address, &text) {
-                        Ok(()) => log(&format!("reminded idle {task} of its open items")),
-                        Err(error) => log(&format!("reminder to {task} failed: {error}")),
-                    }
-                    self.reminded_s.insert(task, now_s);
-                }
-                Nudge::Report {
-                    key,
-                    log: line,
-                    task,
-                    manager,
-                    text,
-                    email,
-                } => {
-                    log(&line);
-                    match by_manager.iter_mut().find(|(known, _)| *known == manager) {
-                        Some((_, texts)) => texts.push(text),
-                        None => by_manager.push((manager, vec![text])),
-                    }
-                    let Some((tag, body)) = email else {
-                        continue;
-                    };
-                    let sent = mail::send(
-                        settings,
-                        &store.state_dir,
-                        &tag,
-                        "",
-                        &body,
-                        mail::WATCHER,
-                        &[],
-                    );
-                    if let Err(error) = sent {
-                        log(&format!("failure email for {task} was not sent: {error}"));
-                        // Not remembered, so the problem is reported again once email works.
-                        now.remove(&key);
-                    }
-                }
-            }
-        }
-        for (manager, texts) in by_manager {
-            if let Err(error) = omnigent::send(settings, &manager, &decide::problems_text(&texts)) {
-                log(&format!("problem notice to {manager} failed: {error}"));
-            }
-        }
-        let keys: String = now.iter().map(|key| format!("{key}\n")).collect();
-        store.set_record(PROBLEM_NOTICES, &keys)
-    }
 }
 
 /// Answer yes to permission prompts that agents wait on, and tell each agent's manager what was approved.
@@ -889,6 +901,7 @@ fn answer_prompts(settings: &Settings, store: &Store) -> Result<(), String> {
             continue;
         }
         ask_human(settings, store, &task);
+        omnigent::forget(task.address());
         let answered = omnigent::approve_prompts(settings, task.address()).and_then(|approved| {
             for prompt in &approved {
                 log(&format!(
@@ -953,7 +966,8 @@ fn ask_human(settings: &Settings, store: &Store, task: &Task) {
 /// Make sure each delivered human email gets an answer: remind the agent after `ANSWER_S`, then tell its manager and the human.
 // 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
 fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
-    let awaiting = record(store, AWAITING);
+    let all_rows = record(store, AWAITING);
+    let awaiting = all_rows.clone();
     if awaiting.is_empty() {
         return Ok(());
     }
@@ -1002,8 +1016,42 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
             }
         }
     }
+    let _awaiting = AWAITING_LOCK.lock();
+    // Rows delivery added while this chase ran stay.
+    let original: BTreeSet<String> = record(store, AWAITING).lines().map(str::to_owned).collect();
+    let before: BTreeSet<&str> = all_rows.lines().collect();
+    keep.extend(original.into_iter().filter(|row| !before.contains(row.as_str())));
     let rows: String = keep.iter().map(|row| format!("{row}\n")).collect();
     store.set_record(AWAITING, &rows)
+}
+
+/// Every minute: answer permission prompts, nudge idle or failed agents, chase awaited answers.
+fn scan_agents() {
+    let mut scanner = Scanner {
+        started: Instant::now(),
+        reminded_s: BTreeMap::new(),
+    };
+    loop {
+        let began = Instant::now();
+        let scanned = settings::load().and_then(|settings| {
+            let store = Store::new(&settings);
+            let addresses: Vec<String> = store
+                .active()?
+                .iter()
+                .map(|task| task.address().to_owned())
+                .collect();
+            omnigent::begin_scan(&settings, &addresses);
+            let scanned = answer_prompts(&settings, &store)
+                .and_then(|()| scanner.nudge(&settings, &store))
+                .and_then(|()| chase_answers(&settings, &store));
+            omnigent::end_scan();
+            scanned
+        });
+        if let Err(error) = scanned {
+            log(&format!("agent scan failed: {error}"));
+        }
+        thread::sleep(NUDGE_EVERY.saturating_sub(began.elapsed()));
+    }
 }
 
 /// Tell the task named by `compress.task` to compress the human's mailbox when too many agent emails wait unread there.
@@ -1077,7 +1125,6 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
 /// Loop forever; the service manager restarts the process if it dies. Returns the exit status when the settings cannot be read.
 pub fn run() -> u8 {
     let mut watcher = Watcher {
-        started: Instant::now(),
         link: Link::Down {
             retry_at: Instant::now(),
         },
@@ -1085,8 +1132,6 @@ pub fn run() -> u8 {
             retry_at: Instant::now(),
         },
         failed_at: BTreeMap::new(),
-        reminded_s: BTreeMap::new(),
-        last_nudge: None,
         pending_events: None,
     };
     let mut jobs = crate::jobs::Jobs::default();
@@ -1097,6 +1142,7 @@ pub fn run() -> u8 {
     let mut last_commit: Option<Instant> = None;
     omnigent::NO_WAIT.store(true, std::sync::atomic::Ordering::Relaxed);
     log("watcher started");
+    std::thread::spawn(scan_agents);
     loop {
         let settings = match settings::load() {
             Ok(settings) => settings,
@@ -1147,17 +1193,7 @@ pub fn run() -> u8 {
         if let Err(error) = request_effects {
             log(&format!("request notifications failed: {error}"));
         }
-        let mut scanned = watcher.deliver_pending(&settings, &store);
-        if scanned.is_ok()
-            && watcher
-                .last_nudge
-                .is_none_or(|last| last.elapsed() > NUDGE_EVERY)
-        {
-            watcher.last_nudge = Some(Instant::now());
-            scanned = answer_prompts(&settings, &store)
-                .and_then(|()| watcher.nudge(&settings, &store))
-                .and_then(|()| chase_answers(&settings, &store));
-        }
+        let scanned = watcher.deliver_pending(&settings, &store);
         if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
             last_compress = Some(Instant::now());
             if let Err(error) = notify_compression(&settings, &store) {
