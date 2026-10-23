@@ -604,9 +604,55 @@ pub fn deliver(settings: &BTreeMap<String, String>, to: &str, raw: &[u8]) -> Res
         .credentials(Credentials::new(from.to_owned(), password))
         .timeout(Some(TIMEOUT))
         .build();
+    // Only the login is retried; the message itself goes out once, so a retry never sends it twice.
+    with_retries(
+        || match smtp.test_connection() {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(failed(&"no connection")),
+            Err(error) => Err(failed(&error)),
+        },
+        std::thread::sleep,
+    )?;
     smtp.send_raw(&envelope, raw)
         .map(|_| ())
         .map_err(|error| failed(&error))
+}
+
+// 🧑 (via the manager) "make amh retry transient IMAP/SMTP login errors itself (e.g. 3 tries with backoff, only on EAGAIN/timeouts, never resending a message that was already sent)"
+/// Waits before the second and third login attempts.
+const RETRY_WAITS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
+
+/// Whether a login error is a passing network fault worth another try, not e.g. a wrong password.
+fn transient(error: &str) -> bool {
+    [
+        "Resource temporarily unavailable",
+        "os error 11",
+        "timed out",
+        "Timeout",
+        "no connection",
+        "Connection reset",
+        "Temporary failure in name resolution",
+        "transient error (",
+    ]
+    .iter()
+    .any(|sign| error.contains(sign))
+}
+
+/// Run `attempt` up to three times, waiting with `sleep` between tries, while it fails transiently.
+fn with_retries<T>(
+    mut attempt: impl FnMut() -> Result<T, String>,
+    mut sleep: impl FnMut(Duration),
+) -> Result<T, String> {
+    let mut waits = RETRY_WAITS.iter();
+    loop {
+        match attempt() {
+            Err(error) if transient(&error) => match waits.next() {
+                Some(wait) => sleep(*wait),
+                None => return Err(format!("{error} (after 3 tries)")),
+            },
+            done => return done,
+        }
+    }
 }
 
 /// One logged-in IMAP connection.
@@ -660,6 +706,13 @@ impl Mailbox {
     }
 
     fn login(host: &str, user: &str, password: &str) -> Result<Self, String> {
+        with_retries(
+            || Self::login_once(host, user, password),
+            std::thread::sleep,
+        )
+    }
+
+    fn login_once(host: &str, user: &str, password: &str) -> Result<Self, String> {
         let failed = |error: &dyn std::fmt::Display| format!("cannot log in to {host}: {error}");
         let mut addresses = (host, 993)
             .to_socket_addrs()
@@ -1109,5 +1162,51 @@ mod tests {
         replace_queued(&state, replacement, &ids)?;
         assert_eq!(bare_id(old), bare_id(" blocked@gmail.com "));
         fs::remove_dir_all(state).map_err(|error| error.to_string())
+    }
+
+    #[test]
+    fn login_retries_only_passing_faults() {
+        let busy =
+            "cannot log in to imap.gmail.com: Resource temporarily unavailable (os error 11)";
+        let mut tries = 0;
+        let mut waited = Vec::new();
+        let done = with_retries(
+            || {
+                tries += 1;
+                if tries < 3 {
+                    Err(busy.to_owned())
+                } else {
+                    Ok(tries)
+                }
+            },
+            |wait| waited.push(wait),
+        );
+        assert_eq!(done, Ok(3));
+        assert_eq!(waited, RETRY_WAITS.to_vec());
+
+        let mut tries = 0;
+        let done: Result<(), String> = with_retries(
+            || {
+                tries += 1;
+                Err(busy.to_owned())
+            },
+            |_| {},
+        );
+        assert_eq!(tries, 3);
+        assert!(done.unwrap_err().ends_with("(after 3 tries)"));
+
+        let mut tries = 0;
+        let done: Result<(), String> = with_retries(
+            || {
+                tries += 1;
+                Err(
+                    "cannot log in to imap.gmail.com: [AUTHENTICATIONFAILED] Invalid credentials"
+                        .to_owned(),
+                )
+            },
+            |_| panic!("a wrong password is not retried"),
+        );
+        assert_eq!(tries, 1);
+        assert!(done.is_err());
     }
 }
