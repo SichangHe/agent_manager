@@ -5,6 +5,8 @@
 - `human.transport = "zulip"` switches all human updates from SMTP to Zulip
 - 🧑 "I want a setup where I only talk to Claude agents and only Claude writes and make top level decisions."
     - `human.writers = "claude"`: `amh tell human` refuses a task on any other tool and tells it to report to its manager; unset allows every tool
+    - `human.writer_sessions.SESSION_ID = "TASK_TAG:TOOL:MODEL"` permits one exact task/session/tool/model combination after checking the live session model
+      - an API failure, model change, replacement session, or different task does not match
     - `manager.tools = "claude"`: `amh task start --manager` refuses any other tool
   - `zulip.human_id` identifies the human by numeric Zulip user ID
   - `zulip.env_file` points to a private credential file

@@ -652,7 +652,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     .split(',')
                     .filter_map(|entry| entry.trim().strip_prefix(&format!("{tool}:")))
                     .collect();
-                !wanted.is_empty()
+                let exception = settings::get(
+                    &settings,
+                    &format!(
+                        "human.writer_sessions.{}",
+                        task.address()
+                            .strip_prefix(omnigent::PREFIX)
+                            .unwrap_or_default()
+                    ),
+                );
+                (!wanted.is_empty() || !exception.is_empty())
                     && task
                         .address()
                         .strip_prefix(omnigent::PREFIX)
@@ -661,6 +670,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                         .is_ok_and(|session| {
                             let model = session["model_override"].as_str().unwrap_or_default();
                             wanted.iter().any(|part| model.contains(part))
+                                // 🧑 "Try 6 Sol" for this direct-human writing role.
+                                || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag()))
                         })
             };
             if !settings::allows(&settings, "human.writers", tool) && !model_allowed() {
