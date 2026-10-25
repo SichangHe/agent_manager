@@ -591,7 +591,7 @@ pub mod tests {
         );
         assert_eq!(
             (default_tool(true), default_tool(false)),
-            ("claude", "codex")
+            ("codex", "codex")
         );
     }
 
