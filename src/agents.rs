@@ -353,6 +353,16 @@ pub fn rotate(
     let path = format!("/v1/sessions/{id}?include_items=false");
     let session = omnigent::api(settings, "GET", &path, None).map_err(agent)?;
     let is_main = old == settings::get(settings, "main_manager");
+    // 🧑 (via the main manager) "make main-manager rotation start the main manager on Codex Astra, so I (Claude) can rotate out"
+    let (tool, model, effort) = if is_main && tool.is_none() && model.is_none() {
+        (
+            Some("codex"),
+            Some(settings::get(settings, "launch.codex.manager_model")).filter(|m| !m.is_empty()),
+            effort.or(Some(settings::get(settings, "launch.codex.manager_effort")).filter(|e| !e.is_empty())),
+        )
+    } else {
+        (tool, model, effort)
+    };
     let [tool, model, effort, workdir] = work::relaunch(&session, tool, model, effort)?;
     let root = store.root.display().to_string();
     let (guides, request, record) = work::handover(name, &old, &root, is_main);

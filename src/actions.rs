@@ -645,7 +645,25 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
             let tool = task.field("tool").unwrap_or_default();
-            if !settings::allows(&settings, "human.writers", tool) {
+            // 🧑 (via the main manager) "Allow Codex Astra agents to message the human": an entry `TOOL:MODEL_PART` admits that tool on matching models only.
+            let model_allowed = || {
+                let listed = settings::get(&settings, "human.writers");
+                let wanted: Vec<&str> = listed
+                    .split(',')
+                    .filter_map(|entry| entry.trim().strip_prefix(&format!("{tool}:")))
+                    .collect();
+                !wanted.is_empty()
+                    && task
+                        .address()
+                        .strip_prefix(omnigent::PREFIX)
+                        .ok_or_else(String::new)
+                        .and_then(|id| omnigent::api(&settings, "GET", &format!("/v1/sessions/{id}?include_items=false"), None))
+                        .is_ok_and(|session| {
+                            let model = session["model_override"].as_str().unwrap_or_default();
+                            wanted.iter().any(|part| model.contains(part))
+                        })
+            };
+            if !settings::allows(&settings, "human.writers", tool) && !model_allowed() {
                 return Err(format!(
                     "amh: nothing sent: the human reads only agents running on {}, and you run on {tool}. Send what the human should hear to your manager with `amh tell manager` (details in a file); your manager writes to the human. Change your items with `amh todo`.",
                     settings::get(&settings, "human.writers")
@@ -1065,7 +1083,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             omnigent::set_hold(&at, None)?;
             clear_stopped(&store, &at)?;
-            let message = text("message").unwrap_or("You were paused on purpose and are released now: resume the work you were doing.");
+            let message = text("message").unwrap_or(
+                "You were paused on purpose and are released now: resume the work you were doing.",
+            );
             omnigent::send(&settings, &at, message).map_err(failed)?;
             format!("{at} is released and told to resume\n")
         }
