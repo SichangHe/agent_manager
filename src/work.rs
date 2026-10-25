@@ -75,8 +75,9 @@ pub fn problem_of(task: &Task, state: &str) -> Option<Problem> {
 }
 
 /// The tool a new agent runs when none is named.
-pub fn default_tool(as_manager: bool) -> &'static str {
-    if as_manager { "claude" } else { "codex" }
+// 🧑 (via the main manager) "Make Codex use Astra low by default instead of Sol ... shift management work from Claude to it"
+pub fn default_tool(_as_manager: bool) -> &'static str {
+    "codex"
 }
 
 /// The `getagentsmd` guides a new agent of a task starts with.
