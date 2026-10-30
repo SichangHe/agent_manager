@@ -213,17 +213,12 @@ fn tell_human(
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
     if crate::zulip::enabled(settings) {
         say(&format!("Zulip message sent.\nMessage-ID: {message_id}\n"));
-        if let Err(error) = crate::zulip::replace(settings, replaces) {
-            eprintln!(
-                "amh: replacement was sent; earlier message not deleted: {error}. Do not send the replacement again."
-            );
-        }
-        match crate::zulip::consolidation_reminder(settings, tag, &message_id) {
+        match zulip_sent_followup(crate::zulip::replace(settings, replaces), || {
+            crate::zulip::consolidation_reminder(settings, tag, &message_id)
+        }) {
             Ok(reminder) if !reminder.is_empty() => say(&reminder),
             Ok(_) => {}
-            Err(error) => eprintln!(
-                "amh: message sent, but checking earlier Zulip updates failed: {error}; do not resend it"
-            ),
+            Err(error) => eprintln!("amh: message {message_id} was sent; {error}"),
         }
         return Ok(());
     }
@@ -242,6 +237,19 @@ fn tell_human(
         Err(error) => mail::unread_check_failed(&error),
     });
     Ok(())
+}
+
+/// Cleanup failure never changes delivery success or requests another copy.
+fn zulip_sent_followup(
+    cleanup: Result<(), String>,
+    reminder: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    cleanup.map_err(|error| format!(
+        "earlier-message cleanup failed: {error}. Do not resend or send a merged copy. Report only new information in future updates; retain successful Message-IDs."
+    ))?;
+    reminder().map_err(|error| {
+        format!("checking earlier Zulip updates failed: {error}; do not resend it")
+    })
 }
 
 /// Run the human's editor on `path` and wait for it to exit.
@@ -1197,4 +1205,34 @@ pub fn run(values: &Value) -> Result<u8, String> {
     };
     say(&output);
     Ok(0)
+}
+
+#[cfg(test)]
+mod zulip_followup_tests {
+    #[test]
+    fn delivered_message_with_cleanup_failure_does_not_request_merge() {
+        let result = super::zulip_sent_followup(
+            Err("You don't have permission to delete this message".to_owned()),
+            || panic!("must not request consolidation after failed cleanup"),
+        );
+        let Err(error) = result else {
+            panic!("cleanup failure must be reported")
+        };
+        assert!(error.contains("permission to delete"));
+        assert!(error.contains("Do not resend or send a merged copy"));
+        assert!(error.contains("Report only new information"));
+        assert!(!error.contains("Merge them now"));
+    }
+
+    #[test]
+    fn successful_cleanup_keeps_normal_reminder() {
+        assert_eq!(
+            super::zulip_sent_followup(Ok(()), || Ok("normal reminder".to_owned())),
+            Ok("normal reminder".to_owned())
+        );
+        assert_eq!(
+            super::zulip_sent_followup(Ok(()), || Ok(String::new())),
+            Ok(String::new())
+        );
+    }
 }
