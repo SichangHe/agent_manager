@@ -321,9 +321,8 @@ fn take_in_mail(
 }
 
 fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
-    let path = store.state_dir.join("amh-zulip-cursor.txt");
-    let mut cursor = fs::read_to_string(&path)
-        .unwrap_or_default()
+    let mut cursor = store
+        .record("amh-zulip-cursor.txt")?
         .trim()
         .parse::<u64>()
         .unwrap_or(0);
@@ -365,8 +364,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
             }
         }
         cursor = id;
-        write_private(&path, &cursor.to_string())
-            .map_err(|error| format!("cannot save Zulip cursor: {error}"))?;
+        store.set_record("amh-zulip-cursor.txt", &cursor.to_string())?;
     }
     Ok(())
 }
@@ -890,7 +888,6 @@ impl Watcher {
         self.pending_events = Some(through);
         Ok(())
     }
-
 }
 
 /// Answer yes to permission prompts that agents wait on, and tell each agent's manager what was approved.
@@ -972,7 +969,7 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
         return Ok(());
     }
     let active = store.active()?;
-    let sent = fs::read_to_string(store.state_dir.join(mail::SENT_LOG)).unwrap_or_default();
+    let sent = store.record(mail::SENT_LOG)?;
     let paused: BTreeSet<&str> = active
         .iter()
         .filter(|task| omnigent::status(settings, task.address()).0 == "paused")
@@ -1020,7 +1017,11 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
     // Rows delivery added while this chase ran stay.
     let original: BTreeSet<String> = record(store, AWAITING).lines().map(str::to_owned).collect();
     let before: BTreeSet<&str> = all_rows.lines().collect();
-    keep.extend(original.into_iter().filter(|row| !before.contains(row.as_str())));
+    keep.extend(
+        original
+            .into_iter()
+            .filter(|row| !before.contains(row.as_str())),
+    );
     let rows: String = keep.iter().map(|row| format!("{row}\n")).collect();
     store.set_record(AWAITING, &rows)
 }

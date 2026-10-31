@@ -353,18 +353,26 @@ impl Store {
             return Ok(text);
         }
         let legacy = self.state_dir.join(name);
-        let Ok(text) = fs::read_to_string(&legacy) else {
-            return Ok(String::new());
+        let text = match fs::read_to_string(&legacy) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(format!("cannot import {name}: {error}")),
         };
-        database.set_record(name, &text)?;
+        database.import_record(name, &text)?;
         let _ = fs::remove_file(&legacy);
-        Ok(text)
+        Ok(database.record(name)?.unwrap_or_default())
     }
 
     pub fn set_record(&self, name: &str, text: &str) -> Result<(), String> {
         Database::open(&self.state_dir.join("amh.sqlite3"))?.set_record(name, text)?;
         let _ = fs::remove_file(self.state_dir.join(name));
         Ok(())
+    }
+
+    /// Import a legacy file first, then atomically append without losing other writers' lines.
+    pub fn append_record(&self, name: &str, text: &str) -> Result<(), String> {
+        self.record(name)?;
+        Database::open(&self.state_dir.join("amh.sqlite3"))?.append_record(name, text)
     }
 
     /// The IDs of the human's messages queued for a task and not delivered yet.
@@ -653,6 +661,70 @@ impl Store {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn concurrent_record_migration_keeps_legacy_and_appended_lines()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "amh-records-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.clone(),
+        };
+        Database::open(&root.join("amh.sqlite3"))?;
+        fs::write(root.join("sent"), "legacy\n")?;
+        let barrier = std::sync::Barrier::new(4);
+        std::thread::scope(|scope| -> Result<(), String> {
+            let mut writers = Vec::new();
+            for writer in 0..4 {
+                let store = &store;
+                let barrier = &barrier;
+                writers.push(scope.spawn(move || -> Result<(), String> {
+                    barrier.wait();
+                    for line in 0..20 {
+                        store.append_record("sent", &format!("{writer}:{line}\n"))?;
+                        Database::open(&store.state_dir.join("amh.sqlite3"))?.remember_ids(
+                            "read",
+                            &[writer * 20 + line],
+                            150,
+                        )?;
+                    }
+                    Ok(())
+                }));
+            }
+            for writer in writers {
+                writer.join().map_err(|_| "record writer panicked")??;
+            }
+            Ok(())
+        })?;
+        let text = store.record("sent")?;
+        assert_eq!(text.lines().count(), 81);
+        assert_eq!(
+            text.lines()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            81
+        );
+        assert!(text.starts_with("legacy\n"));
+        let mut database = Database::open(&root.join("amh.sqlite3"))?;
+        assert_eq!(database.remember_ids("read", &[], 150)?.len(), 80);
+        assert_eq!(database.remember_ids("read", &[100], 3)?, vec![100, 79, 78]);
+        assert!(!root.join("sent").exists());
+        fs::write(root.join("sent"), "stale\n")?;
+        assert_eq!(store.record("sent")?, text);
+        fs::create_dir(root.join("unreadable"))?;
+        assert!(store.record("unreadable").is_err());
+        assert_eq!(
+            Database::open(&root.join("amh.sqlite3"))?.record("unreadable")?,
+            None
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn a_line_typed_into_a_task_file_survives_the_next_export()

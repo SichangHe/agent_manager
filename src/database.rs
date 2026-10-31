@@ -183,6 +183,55 @@ impl Database {
         Ok(())
     }
 
+    /// Import a legacy record without replacing a concurrent import or update.
+    pub fn import_record(&self, name: &str, text: &str) -> Result<(), String> {
+        self.0
+            .execute(
+                "INSERT OR IGNORE INTO records (name, text) VALUES (?1, ?2)",
+                params![name, text],
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// Append to a record atomically so concurrent senders retain every line.
+    pub fn append_record(&self, name: &str, text: &str) -> Result<(), String> {
+        self.0.execute("INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = records.text || excluded.text", params![name, text]).map_err(error)?;
+        Ok(())
+    }
+
+    /// Merge remembered message IDs atomically, retaining the newest `limit` IDs.
+    pub fn remember_ids(
+        &mut self,
+        name: &str,
+        ids: &[u64],
+        limit: usize,
+    ) -> Result<Vec<u64>, String> {
+        let tx = self
+            .0
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let known: String = tx
+            .query_row("SELECT text FROM records WHERE name = ?1", [name], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?
+            .unwrap_or_default();
+        let mut known: std::collections::BTreeSet<u64> =
+            known.lines().filter_map(|id| id.parse().ok()).collect();
+        known.extend(ids);
+        let ids: Vec<u64> = known.into_iter().rev().take(limit).collect();
+        let text = ids
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join("\n");
+        tx.execute("INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = excluded.text", params![name, text]).map_err(error)?;
+        tx.commit().map_err(error)?;
+        Ok(ids)
+    }
+
     pub fn latest_event_id(&self) -> Result<i64, String> {
         self.0
             .query_row(

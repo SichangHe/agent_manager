@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,7 +23,7 @@ use crate::settings;
 
 /// The sender name of the watcher's own emails, which are not recorded as an agent's answer.
 pub const WATCHER: &str = "amh watcher";
-/// The record in the state folder of every email an agent sent: lines `EPOCH TAG`.
+/// The SQLite record of agent messages sent to the human: lines `EPOCH TAG`.
 pub const SENT_LOG: &str = "amh-sent.txt";
 const ALL_MAIL: &str = "[Gmail]/All Mail";
 const TRASH: &str = "[Gmail]/Trash";
@@ -853,6 +852,22 @@ fn attached(paths: &[PathBuf]) -> Result<Vec<Attached>, String> {
     paths.iter().map(read).collect()
 }
 
+/// Record an agent's answer for the watcher, preserving legacy and concurrent entries.
+pub fn record_sent(
+    settings: &BTreeMap<String, String>,
+    state_dir: &Path,
+    tag: &str,
+) -> Result<(), String> {
+    let store = crate::store::Store {
+        root: settings::work_logs(settings),
+        state_dir: state_dir.to_owned(),
+    };
+    store.append_record(
+        SENT_LOG,
+        &format!("{} {tag}\n", chrono::Utc::now().timestamp()),
+    )
+}
+
 /// Email the human on the tag's thread and return the new Message-ID.
 ///
 /// An empty `subject` reuses the subject of the newest email carrying the tag. Unless the watcher sends, the email is recorded in `SENT_LOG` under `state_dir`.
@@ -892,19 +907,10 @@ pub fn send(
             .map_err(|failure| format!("{error}; and it could not be queued: {failure}"))?;
         eprintln!("amh: {error}; the email is queued and will be sent when Gmail allows");
     }
-    if sender != WATCHER {
-        let epoch_s = SystemTime::now().duration_since(UNIX_EPOCH);
-        let line = format!("{} {tag}\n", epoch_s.unwrap_or_default().as_secs());
-        let mut log = fs::OpenOptions::new();
-        log.create(true)
-            .append(true)
-            .open(state_dir.join(SENT_LOG))
-            .and_then(|mut log| log.write_all(line.as_bytes()))
-            .map_err(|error| {
-                format!(
-                    "the email {message_id} is sent, but recording it in {SENT_LOG} failed: {error}"
-                )
-            })?;
+    if sender != WATCHER
+        && let Err(error) = record_sent(settings, state_dir, tag)
+    {
+        eprintln!("amh: email {message_id} sent or queued, but recording it failed: {error}");
     }
     Ok(message_id)
 }

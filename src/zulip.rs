@@ -64,7 +64,7 @@ fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
 
 /// Each bot message in the human's channel that the human has not read, among the newest `CHECKED`, oldest first: its ID, topic, and text.
 ///
-/// A message once read stays read, so read IDs are remembered in `amh-zulip-read.txt` and not asked about again.
+/// A message once read stays read, so read IDs are remembered in SQLite record `amh-zulip-read.txt` and not asked about again.
 // 🧑 "I think I do have more than 16 unread messages. And so why is not the global message compression happening?"
 pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String, String)>, String> {
     const CHECKED: usize = 150;
@@ -90,8 +90,11 @@ pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String,
     let messages = result["messages"]
         .as_array()
         .ok_or("Zulip response has no messages")?;
-    let path = state_dir.join("amh-zulip-read.txt");
-    let known = fs::read_to_string(&path).unwrap_or_default();
+    let store = crate::store::Store {
+        root: settings::work_logs(settings),
+        state_dir: state_dir.to_owned(),
+    };
+    let known = store.record("amh-zulip-read.txt")?;
     let known: Vec<u64> = known.lines().filter_map(|id| id.parse().ok()).collect();
     let (mut read, mut waiting) = (Vec::new(), Vec::new());
     let text = |value: &Value| value.as_str().unwrap_or_default().to_owned();
@@ -100,13 +103,17 @@ pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String,
             continue;
         };
         if known.contains(&id) || !unread_by_human(settings, id)? {
-            read.push(id.to_string());
+            read.push(id);
         } else {
             waiting.push((id, text(&message["subject"]), text(&message["content"])));
         }
     }
-    fs::write(&path, read.join("\n"))
-        .map_err(|error| format!("cannot write {}: {error}", path.display()))?;
+    let read = crate::database::Database::open(&state_dir.join("amh.sqlite3"))?.remember_ids(
+        "amh-zulip-read.txt",
+        &read,
+        CHECKED,
+    )?;
+    waiting.retain(|(id, _, _)| !read.contains(id));
     Ok(waiting)
 }
 
@@ -394,23 +401,10 @@ pub fn send(
     let id = result["id"]
         .as_u64()
         .ok_or("Zulip response has no message ID")?;
-    if sender != mail::WATCHER {
-        use std::io::Write;
-        if let Err(error) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(state.join(mail::SENT_LOG))
-            .and_then(|mut log| {
-                writeln!(
-                    log,
-                    "{} {}",
-                    chrono::Utc::now().timestamp(),
-                    task_topic(tag)
-                )
-            })
-        {
-            eprintln!("amh: Zulip message {id} sent, but recording it failed: {error}");
-        }
+    if sender != mail::WATCHER
+        && let Err(error) = mail::record_sent(settings, state, task_topic(tag))
+    {
+        eprintln!("amh: Zulip message {id} sent, but recording it failed: {error}");
     }
     Ok(format!("zulip:{id}"))
 }

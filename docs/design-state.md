@@ -104,8 +104,9 @@ order of building, each step in production before the next
     - done: the human's messages (email, Zulip, `amh say`, `amh edit`) are `messages` rows of channel `human`; `(pending)` markers remain for text typed into a task file and for guest mail
     - done: the watcher's records (awaiting answers, told human, asked human, problem notices, compress notice) are rows of the `records` table, text as it was in the `amh-*.txt` files; a left-over file is taken over on first use
     - done: scheduled-job attempt times use the `records` table; legacy `amh-jobs.txt` is imported on first use
-    - open: `amh-sent.txt` and the Zulip cursor and read files are still files
-    - last: the watcher acts on events instead of scanning every 5 s
+    - done: sent-message records and Zulip intake/read cursors use the `records` table; legacy files import on first use
+    - partial: event sequence changes trigger pending-message scans; connector intake and retries still poll every 5 s
+    - open: replace remaining typed/guest `(pending)` markers with queued message rows; finish event-driven coordination
 1. event table, written by today's actions next to the markdown (no behaviour change)
 2. requests in SQLite; markdown items rendered from it; ids shown
 3. stages with approve and reject

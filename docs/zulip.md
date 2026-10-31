@@ -21,7 +21,8 @@
   - reply with that header or quote the message to address its task
   - untagged replies go to the main manager
   - incoming messages use the existing persisted task delivery queue
-  - `amh-zulip-cursor.txt` remembers the last captured message across restarts
+  - SQLite record `amh-zulip-cursor.txt` remembers the last captured message across restarts
+  - SQLite record `amh-zulip-read.txt` remembers messages already read; legacy files import on first use
 - `amh tell human --replaces zulip:ID` deletes the indicated bot message after the replacement is sent
   - a later human reply in the same topic prevents replacement deletion, including queued retries
   - a failed reply check preserves the message for a later retry

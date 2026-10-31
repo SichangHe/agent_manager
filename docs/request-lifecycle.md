@@ -57,6 +57,10 @@ observability
     - `amh log TASK` includes matching domain events
 - `amh-actions.log` retains failed command diagnostics
 - SQLite snapshots are state authority; events support coordination and diagnosis
+- watcher records import legacy files once; concurrent imports cannot overwrite newer records
+    - sent-message lines append atomically for concurrent senders
+    - failed imports preserve their files and return errors
+    - failure to record a sent message keeps its successful send result, avoiding duplicate retries
 - rolling archival and periodic Markdown commits: `archival.md`
 
 validation
