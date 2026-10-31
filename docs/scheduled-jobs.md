@@ -39,7 +39,9 @@ operation
 - an interval job first runs immediately; a daily job first seen after its time waits until tomorrow
     - schedules run on the next watcher poll after becoming due; missed intervals are not replayed
     - `every` takes precedence over `at`; `tell` takes precedence over `run`
-- the state folder holds `amh-jobs.txt` with the last attempt time and appended `job-NAME.log` command output
+- SQLite record `amh-jobs.txt` holds the last attempt time; command output remains appended to `job-NAME.log` in the state folder
+    - a legacy `amh-jobs.txt` file is imported on first use, preserving attempt times across upgrade
+    - a database read failure skips scheduling rather than treating existing jobs as never run
     - an unsuccessful start also advances the attempt time to avoid retrying every poll
     - the watcher retains attempt times in memory if writing the record fails
     - an active command is not started again in the same watcher process

@@ -18,7 +18,7 @@ use crate::{decide, omnigent, settings, tasks, work};
 
 type Settings = BTreeMap<String, String>;
 
-/// The record in the state folder of when each job last ran: `NAME EPOCH` per line.
+/// The SQLite record of when each job last ran: `NAME EPOCH` per line.
 const RECORD: &str = "amh-jobs.txt";
 const KEEP_EVERY: Duration = Duration::from_secs(60);
 
@@ -54,15 +54,20 @@ impl Jobs {
                 false
             }
         });
-        let path = store.state_dir.join(RECORD);
-        let mut last = self.last.take().unwrap_or_else(|| {
-            fs::read_to_string(&path)
-                .unwrap_or_default()
-                .lines()
-                .filter_map(|line| line.split_once(' '))
-                .filter_map(|(name, at)| Some((name.to_owned(), at.parse().ok()?)))
-                .collect()
-        });
+        let mut last = match self.last.take() {
+            Some(last) => last,
+            None => match store.record(RECORD) {
+                Ok(text) => text
+                    .lines()
+                    .filter_map(|line| line.split_once(' '))
+                    .filter_map(|(name, at)| Some((name.to_owned(), at.parse().ok()?)))
+                    .collect(),
+                Err(error) => {
+                    lines.push(format!("cannot read {RECORD}: {error}"));
+                    return lines;
+                }
+            },
+        };
         let now_s = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |since| since.as_secs());
@@ -94,7 +99,7 @@ impl Jobs {
                 .iter()
                 .map(|(name, at)| format!("{name} {at}\n"))
                 .collect();
-            if let Err(error) = fs::write(&path, text) {
+            if let Err(error) = store.set_record(RECORD, &text) {
                 lines.push(format!("cannot write {RECORD}: {error}"));
             }
         }
@@ -239,23 +244,29 @@ mod tests {
             .ok_or("command was not started")?;
         assert!(child.wait()?.success());
         assert_eq!(fs::read_to_string(dir.join("job-check.log"))?, "check");
-        assert!(fs::read_to_string(dir.join(RECORD))?.starts_with("check "));
+        assert!(store.record(RECORD)?.starts_with("check "));
+        assert!(!dir.join(RECORD).exists());
         assert!(Jobs::default().tick(&settings, &store).is_empty());
-        fs::remove_file(dir.join(RECORD))?;
-        fs::create_dir(dir.join(RECORD))?;
-        let mut unwritable = Jobs::default();
-        assert!(
-            unwritable
-                .tick(&settings, &store)
-                .iter()
-                .any(|line| line.starts_with("cannot write"))
-        );
-        let mut child = unwritable
-            .running
-            .remove("check")
-            .ok_or("command was not started")?;
-        assert!(child.wait()?.success());
-        assert!(unwritable.tick(&settings, &store).is_empty());
+        let legacy = dir.join("legacy");
+        fs::create_dir(&legacy)?;
+        fs::write(legacy.join(RECORD), store.record(RECORD)?)?;
+        let migrated = Store {
+            root: legacy.clone(),
+            state_dir: legacy.clone(),
+        };
+        assert!(Jobs::default().tick(&settings, &migrated).is_empty());
+        assert!(!legacy.join(RECORD).exists());
+        assert_eq!(store.record(RECORD)?, migrated.record(RECORD)?);
+        assert!(!legacy.join("job-check.log").exists());
+        let failed = dir.join("failed");
+        fs::create_dir(&failed)?;
+        fs::create_dir(failed.join("amh.sqlite3"))?;
+        let unavailable = Store {
+            root: failed.clone(),
+            state_dir: failed,
+        };
+        assert!(Jobs::default().tick(&settings, &unavailable)[0].starts_with("cannot read"));
+        assert!(!unavailable.state_dir.join("job-check.log").exists());
         fs::remove_dir_all(dir)?;
         Ok(())
     }
