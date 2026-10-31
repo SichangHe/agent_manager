@@ -1,4 +1,4 @@
-//! The one background watcher: takes in the human's and the guest's email, delivers `(pending)` blocks, and nudges managers and idle agents.
+//! The one background watcher: takes in human/guest mail, delivers queued messages, and nudges managers and idle agents.
 //!
 //! Every decision and text is a pure function of `decide`, `guest`, or `work`; this module does the mail, the agents, the files, and the clock around them.
 
@@ -15,7 +15,6 @@ use crate::agents::{self, NewTask};
 use crate::decide::{self, Chase, Nudge, Outcome, Plan, Source};
 use crate::mail::{self, Mailbox};
 use crate::store::Store;
-use crate::taskfile::{self, MARKER};
 use crate::tasks::Task;
 use crate::{guest, omnigent, settings};
 
@@ -485,6 +484,24 @@ fn store_guest_mail(
     stored: &str,
 ) -> Result<(), String> {
     let mail_dir = guest::mail_dir(settings);
+    let key = format!("guest:{mail_dir}/{stored}");
+    {
+        let _lock = store.lock()?;
+        if crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+            .received_mail(&key)?
+        {
+            return Ok(());
+        }
+        let name = guest::task_name(settings);
+        if store.contains(&name)? {
+            let task = store.load(&name)?;
+            let source = format!("{}{mail_dir}/{stored})", guest::SOURCE);
+            if task.body.lines().any(|line| line == source) {
+                store.receive_mail(&key, &task)?;
+                return Ok(());
+            }
+        }
+    }
     let folder = store.root.join(&mail_dir);
     let failed = |error: std::io::Error| format!("cannot write in {}: {error}", folder.display());
     if !folder.is_dir() {
@@ -507,7 +524,7 @@ fn store_guest_mail(
     let _lock = store.lock()?;
     let mut task = store.load(&guest::task_name(settings))?;
     guest::queue(&mut task, &mail_dir, stored);
-    store.save(&task)
+    store.receive_mail(&key, &task).map(|_| ())
 }
 
 /// Take in each new guest email; one whose sender is not verified is dropped.
@@ -530,12 +547,7 @@ fn take_in_guest_mail(
         let stored = guest::stored_name(settings, &uid);
         if !guest::verified(&mail, address) {
             println!("guest mail uid {uid} rejected: the sender is not verified as {address}");
-        } else if !store
-            .root
-            .join(guest::mail_dir(settings))
-            .join(&stored)
-            .exists()
-        {
+        } else {
             store_guest_mail(settings, store, address, &mail, &stored)
                 .map_err(IntakeError::Other)?;
         }
@@ -676,25 +688,6 @@ fn deliver_block(
     settled.delivered
 }
 
-/// Delete the marker line of a delivered block; `false` when the block is gone.
-fn unmark(store: &Store, name: &str, target: &str, first: &str) -> Result<bool, String> {
-    let _lock = store.lock()?;
-    crate::actions::clear_stopped(store, target)?;
-    let mut fresh = store.load(name)?;
-    match decide::without_marker(&fresh.body, first) {
-        Some(body) => {
-            fresh.body = body;
-            store.save(&fresh).map(|()| true)
-        }
-        None => {
-            log(&format!(
-                "delivered block is no longer in {name}; its marker was not deleted"
-            ));
-            Ok(false)
-        }
-    }
-}
-
 impl Watcher {
     /// Take in the human's and the guest's unread mail on the kept connection, logging in again after a failure.
     fn take_in(&mut self, settings: &Settings, store: &Store) {
@@ -762,7 +755,7 @@ impl Watcher {
         };
     }
 
-    /// Send every pending block and every queued message of the human to its task's agent, then delete the marker line or mark the message sent.
+    /// Deliver queued typed/guest blocks and stored human messages, then mark their rows sent.
     ///
     /// A block in a task that has no agent (done or retired) goes to that task's manager, else to the main manager.
     fn deliver_pending(&mut self, settings: &Settings, store: &Store) -> Result<(), String> {
@@ -774,24 +767,8 @@ impl Watcher {
         let tasks = store.all()?;
         let agent_at = decide::agent_addresses(&tasks);
         let retry = Duration::from_secs(decide::RETRY_S);
-        for task in &tasks {
-            let waits = |failed: &Instant| failed.elapsed() < retry;
-            if !task.body.contains(MARKER) || self.failed_at.get(&task.name).is_some_and(waits) {
-                continue;
-            }
-            let plan = decide::plan(task, &agent_at, settings::get(settings, "main_manager"));
-            self.failed_at.remove(&task.name);
-            for (_, block) in taskfile::pending_blocks(&task.body) {
-                if !block.is_empty()
-                    && !(deliver_block(settings, store, task, &plan, &block)
-                        && unmark(store, &task.name, &plan.target, &block[0])?)
-                {
-                    self.failed_at.insert(task.name.clone(), Instant::now());
-                    break;
-                }
-            }
-        }
-        let queued = database.pending_messages("human")?;
+        let mut queued = database.pending_messages("block")?;
+        queued.extend(database.pending_messages("human")?);
         for message in &queued {
             let (Some(id), Some(name), Some(mail)) = (
                 message["id"].as_i64(),
@@ -814,6 +791,11 @@ impl Watcher {
                 continue;
             };
             let plan = decide::plan(task, &agent_at, settings::get(settings, "main_manager"));
+            let block: Vec<String> = if message["channel"] == "block" {
+                mail.split('\n').map(str::to_owned).collect()
+            } else {
+                vec![decide::mail_line(mail)]
+            };
             let file = Path::new(mail).file_name().unwrap_or_default();
             let stored =
                 fs::read_to_string(store.root.join("manager_mail").join(file)).unwrap_or_default();
@@ -823,7 +805,8 @@ impl Watcher {
             } else {
                 own.to_owned()
             };
-            if decide::replace_order(&own)
+            if message["channel"] == "human"
+                && decide::replace_order(&own)
                 && plan.target == task.address()
                 && task.address().starts_with(omnigent::PREFIX)
             {
@@ -867,7 +850,7 @@ impl Watcher {
                 }
                 continue;
             }
-            if deliver_block(settings, store, task, &plan, &[decide::mail_line(mail)]) {
+            if deliver_block(settings, store, task, &plan, &block) {
                 self.failed_at.remove(name);
                 let _lock = store.lock()?;
                 // `amh stop` may have dropped the message meanwhile; a crash before this line delivers it again.
@@ -876,15 +859,16 @@ impl Watcher {
                 }
                 crate::actions::clear_stopped(store, &plan.target)?;
             } else {
+                database.finish_message(
+                    id,
+                    false,
+                    "delivery did not settle; see delivery events",
+                )?;
                 self.failed_at.insert(name.to_owned(), Instant::now());
             }
         }
-        self.failed_at.retain(|name, _| {
-            queued.iter().any(|message| message["target"] == *name)
-                || tasks
-                    .iter()
-                    .any(|task| &task.name == name && task.body.contains(MARKER))
-        });
+        self.failed_at
+            .retain(|name, _| queued.iter().any(|message| message["target"] == *name));
         self.pending_events = Some(through);
         Ok(())
     }
@@ -1141,6 +1125,16 @@ pub fn run() -> u8 {
     let mut last_archive: Option<Instant> = None;
     let mut last_zulip_cleanup: Option<Instant> = None;
     let mut last_commit: Option<Instant> = None;
+    let mut last_poll: Option<Instant> = None;
+    let wake = match crate::wake::listen(&settings::state_dir()) {
+        Ok(socket) => Some(socket),
+        Err(error) => {
+            log(&format!(
+                "event wakeups unavailable; using polling: {error}"
+            ));
+            None
+        }
+    };
     omnigent::NO_WAIT.store(true, std::sync::atomic::Ordering::Relaxed);
     log("watcher started");
     std::thread::spawn(scan_agents);
@@ -1182,11 +1176,14 @@ pub fn run() -> u8 {
                 }
             }
         }
-        watcher.take_in(&settings, &store);
-        if crate::zulip::enabled(&settings)
-            && let Err(error) = take_in_zulip(&settings, &store)
-        {
-            log(&format!("Zulip intake failed: {error}"));
+        if last_poll.is_none_or(|last| last.elapsed() >= MAIL_POLL) {
+            watcher.take_in(&settings, &store);
+            if crate::zulip::enabled(&settings)
+                && let Err(error) = take_in_zulip(&settings, &store)
+            {
+                log(&format!("Zulip intake failed: {error}"));
+            }
+            last_poll = Some(Instant::now());
         }
         let request_effects = store
             .lock()
@@ -1227,6 +1224,15 @@ pub fn run() -> u8 {
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));
         }
-        thread::sleep(MAIL_POLL);
+        let timeout = last_poll.map_or(MAIL_POLL, |last| MAIL_POLL.saturating_sub(last.elapsed()));
+        match &wake {
+            Some(socket) => {
+                if let Err(error) = crate::wake::wait(socket, timeout) {
+                    log(&format!("event wakeup failed; polling: {error}"));
+                    thread::sleep(timeout);
+                }
+            }
+            None => thread::sleep(timeout),
+        }
     }
 }

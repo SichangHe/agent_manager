@@ -123,6 +123,23 @@ impl Store {
             database.import(&snapshots, &events)?;
         }
         self.take_in_edits(&database)?;
+        if database.record("pending-block-queue-v1")?.is_none() {
+            let mut snapshots = Vec::new();
+            let mut events = Vec::new();
+            for (name, text) in database.tasks()? {
+                if name == "TODO.md" {
+                    continue;
+                }
+                let task = Task::parse(&name, &text)?;
+                if !taskfile::pending_blocks(&task.body).is_empty() {
+                    let (task, queued) = self.prepare(&task)?;
+                    snapshots.push((name, task.render()));
+                    events.extend(queued);
+                }
+            }
+            database.commit(&snapshots, &events)?;
+            database.set_record("pending-block-queue-v1", "done")?;
+        }
         self.export(&database)?;
         Ok(lock)
     }
@@ -375,20 +392,21 @@ impl Store {
         Database::open(&self.state_dir.join("amh.sqlite3"))?.append_record(name, text)
     }
 
-    /// The IDs of the human's messages queued for a task and not delivered yet.
+    /// The IDs of stored human messages and typed/guest blocks queued for a task.
     pub fn queued_mail(&self, name: &str) -> Result<Vec<i64>, String> {
         let Some(database) = self.database()? else {
             return Ok(Vec::new());
         };
-        Ok(database
-            .pending_messages("human")?
+        let mut queued = database.pending_messages("human")?;
+        queued.extend(database.pending_messages("block")?);
+        Ok(queued
             .iter()
             .filter(|message| message["target"] == name)
             .filter_map(|message| message["id"].as_i64())
             .collect())
     }
 
-    /// Give up delivering the human's messages still queued for a task.
+    /// Give up delivering stored human messages and typed/guest blocks queued for a task.
     pub fn drop_queued_mail(&self, name: &str) -> Result<(), String> {
         let queued = self.queued_mail(name)?;
         if let Some(database) = self.database()? {
@@ -421,6 +439,14 @@ impl Store {
             None => Vec::new(),
         };
         let mut events = Vec::new();
+        for (_, block) in taskfile::pending_blocks(&task.body) {
+            if let Some(first) = block.first() {
+                task.body = crate::decide::without_marker(&task.body, first)
+                    .ok_or("pending block disappeared while queuing")?;
+                events.push(log::event_value("message queued", &task.name,
+                    serde_json::json!({"channel": "block", "to": task.name, "text": block.join("\n")})));
+            }
+        }
         if old
             .as_ref()
             .is_none_or(|before| before.render() != task.render())
@@ -661,6 +687,72 @@ impl Store {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn pending_blocks_migrate_once_and_stop_close_follow_the_queue()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "amh-blocks-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos()
+        ));
+        fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        taskfile::write(&root.join("TODO.md"), "current:\nt.md\n\nprevious:\n")?;
+        taskfile::write(
+            &root.join("t.md"),
+            "---\nstatus: running\nrunat: omnigent://worker\n---\n\n(pending)\nfirst\nsecond\n\n(pending)\nfirst\nsecond\n\n```\n(pending)\nexample\n```\n",
+        )?;
+        drop(store.lock()?);
+        let db = Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        let initial = db.pending_messages("block")?;
+        assert_eq!(initial.len(), 2);
+        assert_eq!(initial[0]["text"], "first\nsecond");
+        assert_eq!(initial[1]["text"], "first\nsecond");
+        assert!(taskfile::pending_blocks(&store.load("t.md")?.body).is_empty());
+        assert!(store.load("t.md")?.body.contains("```\n(pending)\nexample"));
+        drop(store.lock()?);
+        assert_eq!(db.pending_messages("block")?, initial);
+        let failure =
+            crate::agents::close_task(&BTreeMap::new(), &store, "t.md", false, false, false);
+        assert!(
+            failure
+                .err()
+                .ok_or("closed despite queued blocks")?
+                .contains("undelivered message")
+        );
+        let path = root.join("t.md");
+        fs::write(
+            &path,
+            fs::read_to_string(&path)? + "\n(pending)\nnew typed request\n",
+        )?;
+        drop(store.lock()?);
+        assert_eq!(db.pending_messages("block")?.len(), 3);
+        {
+            let _lock = store.lock()?;
+            let mut task = store.load("t.md")?;
+            crate::guest::queue(&mut task, "guest_mail", "guest-1.txt");
+            assert!(store.receive_mail("guest:guest_mail/guest-1.txt", &task)?);
+            assert!(!store.receive_mail("guest:guest_mail/guest-1.txt", &task)?);
+        }
+        assert_eq!(store.queued_mail("t.md")?.len(), 4);
+        assert!(
+            db.pending_messages("block")?[3]["text"]
+                .as_str()
+                .ok_or("missing guest source")?
+                .contains("guest_mail/guest-1.txt")
+        );
+        store.drop_queued_mail("t.md")?;
+        assert!(store.queued_mail("t.md")?.is_empty());
+        drop(store.lock()?);
+        assert!(db.pending_messages("block")?.is_empty());
+        assert!(store.load("t.md")?.body.contains("new typed request"));
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
 
     #[test]
     fn concurrent_record_migration_keeps_legacy_and_appended_lines()

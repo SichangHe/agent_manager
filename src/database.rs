@@ -125,7 +125,9 @@ impl Database {
     ) -> Result<(), String> {
         let transaction = self.0.transaction().map_err(error)?;
         commit_records(&transaction, snapshots, events)?;
-        transaction.commit().map_err(error)
+        transaction.commit().map_err(error)?;
+        self.wake(events);
+        Ok(())
     }
 
     /// Commit a mail receipt with its task updates and outbox exactly once per stable key.
@@ -147,6 +149,7 @@ impl Database {
         }
         commit_records(&transaction, snapshots, events)?;
         transaction.commit().map_err(error)?;
+        self.wake(events);
         Ok(true)
     }
 
@@ -165,7 +168,18 @@ impl Database {
             return Err(format!("amh: no pending message {id}"));
         }
         commit_records(&transaction, snapshots, events)?;
-        transaction.commit().map_err(error)
+        transaction.commit().map_err(error)?;
+        self.wake(events);
+        Ok(())
+    }
+
+    /// Wake the watcher only after relevant changes have committed.
+    fn wake(&self, events: &[Value]) {
+        if !events.is_empty()
+            && let Some(path) = self.0.path()
+        {
+            crate::wake::notify(Path::new(path));
+        }
     }
 
     /// The text of a small named record of the watcher; `None` when it was never written.
@@ -275,7 +289,7 @@ impl Database {
 
     /// Read pending delivery records of one channel in enqueue order; failed deliveries stay pending.
     ///
-    /// Channel `agent`: `text` is a notification for the agent of task `target`. Channel `human`: `text` names the stored message of the human for the agent of task `target`.
+    /// Channel `agent`: `text` is a notification. Channel `human`: `text` names a stored message. Channel `block`: `text` contains a typed or guest-mail block. `target` names the owning task.
     pub fn pending_messages(&self, channel: &str) -> Result<Vec<Value>, String> {
         let mut query = self.0.prepare(
             "SELECT id, channel, target, text, source, state, attempts, last_error FROM messages WHERE state = 'pending' AND channel = ?1 ORDER BY id"

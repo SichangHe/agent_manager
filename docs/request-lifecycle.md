@@ -42,11 +42,20 @@ dependencies and delivery
 - only resolved requests release edges
     - when the final edge disappears, queue one owner notification
 - SQLite messages holds durable delivery intents
+    - typed and guest-mail blocks use channel `block`; stored human mail uses channel `human`
+    - standalone `(pending)` markers are input compatibility syntax, removed atomically when the block is queued; code-fenced examples remain text
+    - existing pending blocks migrate once, retaining their text and distinct duplicate prompts
+    - guest intake commits a stable receipt with the queued block; a saved file alone does not suppress retry after a failed queue commit
+    - close refuses queued blocks; explicit human stop cancels them as well as queued human mail
     - compatible `request_notifications` remains in task snapshots
     - watcher retries each poll; relevant commands also retry
     - outcome and attempt count survive restarts
     - crash after delivery but before recording its outcome can repeat the message
 - recorded event sequence triggers dependency work and pending block scans
+    - committed events notify the local `amh-events.sock` listener; wakeups contain no task data
+    - notifications are advisory and nonblocking; SQLite remains the durable queue
+    - the watcher waits for a notification or its next connector poll, coalescing notifications
+    - connector intake remains rate-limited to its existing polling interval
     - connector polls, failed-delivery retries and external agent-health checks remain periodic
 - request logic is pure in `requests`; actions and store handle IO
 

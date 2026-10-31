@@ -306,7 +306,7 @@ pub fn close_task(
         crate::requests::can_close(&task, &store.all()?)?;
         if !store.queued_mail(name)?.is_empty() {
             return Err(format!(
-                "amh: {name} still has an undelivered message of the human; the watcher delivers it within seconds"
+                "amh: {name} still has an undelivered message; finish or cancel delivery before closing"
             ));
         }
         work::close(&mut task)?;
@@ -358,7 +358,8 @@ pub fn rotate(
         (
             Some("codex"),
             Some(settings::get(settings, "launch.codex.manager_model")).filter(|m| !m.is_empty()),
-            effort.or(Some(settings::get(settings, "launch.codex.manager_effort")).filter(|e| !e.is_empty())),
+            effort.or(Some(settings::get(settings, "launch.codex.manager_effort"))
+                .filter(|e| !e.is_empty())),
         )
     } else {
         (tool, model, effort)

@@ -97,16 +97,18 @@ commands (names to settle)
 - `amh todo list` shows id, stage, and what each request waits for
 
 order of building, each step in production before the next
-- status on 2026-10-12: steps 1 to 4 are in production; step 6 mostly (task files are generated from SQLite snapshots)
+- implementation status on 2026-10-31: all six listed migration steps are implemented using SQLite task snapshots and durable message rows
+    - the normalized tables and unified pure `step` function above remain architecture proposals
 - step 5 in slices
     - done: agent-to-agent notifications go through the `messages` table
     - done: `human mail received`, `message delivered`, `message rerouted` and `message failed` events for the human's messages
-    - done: the human's messages (email, Zulip, `amh say`, `amh edit`) are `messages` rows of channel `human`; `(pending)` markers remain for text typed into a task file and for guest mail
+    - done: the human's messages (email, Zulip, `amh say`, `amh edit`) are `messages` rows of channel `human`
     - done: the watcher's records (awaiting answers, told human, asked human, problem notices, compress notice) are rows of the `records` table, text as it was in the `amh-*.txt` files; a left-over file is taken over on first use
     - done: scheduled-job attempt times use the `records` table; legacy `amh-jobs.txt` is imported on first use
     - done: sent-message records and Zulip intake/read cursors use the `records` table; legacy files import on first use
-    - partial: event sequence changes trigger pending-message scans; connector intake and retries still poll every 5 s
-    - open: replace remaining typed/guest `(pending)` markers with queued message rows; finish event-driven coordination
+    - done: committed events wake the watcher through a local datagram socket; event sequences gate internal dependency and message scans
+    - done: typed/guest `(pending)` blocks become message rows atomically with removal of their markers; history stays in Markdown
+    - external connector intake, failed-delivery retries and manually typed file input retain periodic checks; a lost wakeup falls back to those checks
 1. event table, written by today's actions next to the markdown (no behaviour change)
 2. requests in SQLite; markdown items rendered from it; ids shown
 3. stages with approve and reject
@@ -114,7 +116,7 @@ order of building, each step in production before the next
 5. messages table replaces `(pending)` markers; watcher driven by events
 6. agent records in SQLite; task files fully generated
 
-open questions for the human
+original questions (answered by the current decision above)
 1. is the three-stage "task" one request (an open item today), with the task file being one agent's list
 2. for the human's own requests: must the human approve a resolution, or does the owner's `done` resolve it with an email, as today
 3. the human sometimes types notes into a task file; with generated markdown that would have to go through email or a command instead

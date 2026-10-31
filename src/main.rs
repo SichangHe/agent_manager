@@ -20,6 +20,7 @@ mod store;
 mod taskfile;
 mod tasks;
 mod view;
+mod wake;
 mod watch;
 mod work;
 mod zulip;

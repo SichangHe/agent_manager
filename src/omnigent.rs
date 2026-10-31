@@ -233,7 +233,9 @@ fn holds() -> serde_json::Map<String, Value> {
 /// Why the agent at `address` is held, if it is.
 pub fn held(address: &str) -> Option<String> {
     let id = session(address).ok()?;
-    holds().get(id).map(|why| why.as_str().unwrap_or("held").to_owned())
+    holds()
+        .get(id)
+        .map(|why| why.as_str().unwrap_or("held").to_owned())
 }
 
 /// Hold the agent at `address` with `reason`, or release it when `reason` is `None`.
@@ -423,7 +425,9 @@ pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
     if let Some(why) = held(address) {
         return ("paused", format!("held: {why}"));
     }
-    if let Some(known) = SCAN.with_borrow(|scan| scan.as_ref().and_then(|known| known.get(address).cloned())) {
+    if let Some(known) =
+        SCAN.with_borrow(|scan| scan.as_ref().and_then(|known| known.get(address).cloned()))
+    {
         return known;
     }
     fetched_status(settings, address)
@@ -443,7 +447,9 @@ pub fn begin_scan(settings: &Settings, addresses: &[String]) {
     std::thread::scope(|scope| {
         for _ in 0..16 {
             scope.spawn(|| {
-                while let Some(address) = addresses.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed)) {
+                while let Some(address) =
+                    addresses.get(next.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+                {
                     let found = fetched_status(settings, address);
                     if let Ok(mut known) = known.lock() {
                         known.insert(address.clone(), found);

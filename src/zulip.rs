@@ -615,6 +615,29 @@ fn pending_match(
     Ok(None)
 }
 
+/// The ID of a recent message with exactly `content` in `narrow`, when an uncertain send did arrive.
+fn delivered(settings: &Settings, narrow: &Value, content: &str) -> Option<u64> {
+    let recent = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "10".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )
+    .ok()?;
+    recent["messages"]
+        .as_array()?
+        .iter()
+        .rev()
+        .find(|message| message["content"].as_str().map(str::trim) == Some(content.trim()))
+        .and_then(|message| message["id"].as_u64())
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -702,27 +725,4 @@ mod tests {
         assert_eq!(own_text(text), "replace this agent");
         assert!(crate::decide::for_manager(&own_text(text)));
     }
-}
-
-/// The ID of a recent message with exactly `content` in `narrow`, when an uncertain send did arrive.
-fn delivered(settings: &Settings, narrow: &Value, content: &str) -> Option<u64> {
-    let recent = api(
-        settings,
-        "GET",
-        "messages",
-        &[
-            ("anchor", "newest".to_owned()),
-            ("num_before", "10".to_owned()),
-            ("num_after", "0".to_owned()),
-            ("apply_markdown", "false".to_owned()),
-            ("narrow", narrow.to_string()),
-        ],
-    )
-    .ok()?;
-    recent["messages"]
-        .as_array()?
-        .iter()
-        .rev()
-        .find(|message| message["content"].as_str().map(str::trim) == Some(content.trim()))
-        .and_then(|message| message["id"].as_u64())
 }
