@@ -23,6 +23,9 @@
   - incoming messages use the existing persisted task delivery queue
   - `amh-zulip-cursor.txt` remembers the last captured message across restarts
 - `amh tell human --replaces zulip:ID` deletes the indicated bot message after the replacement is sent
+  - a later human reply in the same topic prevents replacement deletion, including queued retries
+  - a failed reply check preserves the message for a later retry
+  - age-based cleanup remains separate
   - failed deletion remains queued for the watcher to retry
   - a deletion failure does not hide the replacement's sent Message-ID
 - after sending, the caller receives a consolidation reminder for earlier retained bot updates in the same task

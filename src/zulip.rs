@@ -326,13 +326,29 @@ pub fn send(
         ]);
     }
     // 🧑 (via the manager) "make amh handle a non-JSON Zulip reply by checking delivery and retrying itself"
-    let content = fields.iter().find(|(name, _)| *name == "content").map(|(_, value)| value.clone()).unwrap_or_default();
-    let narrow = match fields.iter().find(|(name, _)| *name == "type").map(|(_, value)| value.as_str()) {
+    let content = fields
+        .iter()
+        .find(|(name, _)| *name == "content")
+        .map(|(_, value)| value.clone())
+        .unwrap_or_default();
+    let narrow = match fields
+        .iter()
+        .find(|(name, _)| *name == "type")
+        .map(|(_, value)| value.as_str())
+    {
         Some("stream") => {
-            let value = |key| fields.iter().find(|(name, _)| *name == key).map(|(_, value)| value.clone()).unwrap_or_default();
+            let value = |key| {
+                fields
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.clone())
+                    .unwrap_or_default()
+            };
             json!([{"operator":"stream","operand":value("to").parse::<u64>().unwrap_or_default()},{"operator":"topic","operand":value("topic")}])
         }
-        _ => json!([{"operator":"dm","operand":fields.iter().find(|(name, _)| *name == "to").map(|(_, value)| value.clone()).unwrap_or_default()}]),
+        _ => {
+            json!([{"operator":"dm","operand":fields.iter().find(|(name, _)| *name == "to").map(|(_, value)| value.clone()).unwrap_or_default()}])
+        }
     };
     let mut sent = api(settings, "POST", "messages", &fields);
     for wait_s in [5, 20] {
@@ -340,7 +356,9 @@ pub fn send(
         std::thread::sleep(std::time::Duration::from_secs(wait_s));
         sent = match delivered(settings, &narrow, &content) {
             Some(id) => Ok(json!({"id": id})),
-            None if error.contains("invalid Zulip response") || error.contains("error sending request") => {
+            None if error.contains("invalid Zulip response")
+                || error.contains("error sending request") =>
+            {
                 api(settings, "POST", "messages", &fields)
             }
             None => Err(error.clone()),
@@ -431,6 +449,18 @@ pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
         else {
             continue;
         };
+        match answered(settings, id) {
+            Ok(true) => {
+                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                kept.push(format!("zulip:{id}"));
+                continue;
+            }
+            Err(error) => {
+                failures.push(error);
+                continue;
+            }
+            Ok(false) => {}
+        }
         let deleted = api(settings, "DELETE", &format!("messages/{id}"), &[]);
         match deleted {
             Ok(_) => {
@@ -444,7 +474,7 @@ pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
     }
     if !kept.is_empty() {
         failures.push(format!(
-            "kept {} because the human replied after it; messages the human answered are never deleted",
+            "kept {} because the human replied after it; replacement cannot delete these messages",
             kept.join(", ")
         ));
     }
@@ -486,7 +516,9 @@ fn answered(settings: &Settings, id: u64) -> Result<bool, String> {
             ("narrow", narrow.to_string()),
         ],
     )?;
-    Ok(after["messages"].as_array().is_some_and(|found| !found.is_empty()))
+    Ok(after["messages"]
+        .as_array()
+        .is_some_and(|found| !found.is_empty()))
 }
 
 pub fn incoming(settings: &Settings, cursor: u64) -> Result<Vec<Value>, String> {
@@ -562,7 +594,12 @@ pub fn own_text(body: &str) -> String {
 }
 
 /// The retained payload of an uncertain send with the same tag, subject and body, if any.
-fn pending_match(folder: &Path, tag: &str, subject: &str, body: &str) -> Result<Option<std::path::PathBuf>, String> {
+fn pending_match(
+    folder: &Path,
+    tag: &str,
+    subject: &str,
+    body: &str,
+) -> Result<Option<std::path::PathBuf>, String> {
     let entries = match fs::read_dir(folder) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -574,8 +611,9 @@ fn pending_match(folder: &Path, tag: &str, subject: &str, body: &str) -> Result<
         if !path.is_file() || path.extension().is_none_or(|extension| extension != "json") {
             continue;
         }
-        let pending: Value = serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
-            .map_err(|error| format!("invalid pending Zulip send: {error}"))?;
+        let pending: Value =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| error.to_string())?)
+                .map_err(|error| format!("invalid pending Zulip send: {error}"))?;
         if pending["tag"] == tag && pending["body"] == body && pending["subject"] == subject {
             return Ok(Some(path));
         }
@@ -591,8 +629,14 @@ mod tests {
         fs::create_dir_all(folder.join("done"))?;
         fs::write(folder.join("note.txt"), "x")?;
         assert_eq!(super::pending_match(&folder, "t", "s", "b")?, None);
-        fs::write(folder.join("1.json"), json!({"tag":"t","subject":"s","body":"b"}).to_string())?;
-        assert_eq!(super::pending_match(&folder, "t", "s", "b")?, Some(folder.join("1.json")));
+        fs::write(
+            folder.join("1.json"),
+            json!({"tag":"t","subject":"s","body":"b"}).to_string(),
+        )?;
+        assert_eq!(
+            super::pending_match(&folder, "t", "s", "b")?,
+            Some(folder.join("1.json"))
+        );
         fs::remove_dir_all(&folder)?;
         Ok(())
     }
