@@ -126,6 +126,35 @@ pub fn stored_mail(subject: &str, body: &str) -> String {
     format!("Subject: {subject}\n\n{body}")
 }
 
+/// A routed notification file `routed-KIND-GENERATION-UID.txt` and its text as mailbox kind, UID generation, UID, and receipt key.
+pub fn routed_mail(name: &str, text: &str) -> Result<(String, u32, String, String), String> {
+    let bad = || {
+        format!("amh: {name} is not a routed notification file `routed-KIND-GENERATION-UID.txt`")
+    };
+    let rest = name
+        .strip_prefix("routed-")
+        .and_then(|rest| rest.strip_suffix(".txt"));
+    let mut parts = rest.ok_or_else(bad)?.splitn(3, '-');
+    let (Some(kind), Some(generation), Some(uid)) = (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(bad());
+    };
+    let generation: u32 = generation.parse().map_err(|_| bad())?;
+    if uid.parse::<u32>().is_err() {
+        return Err(bad());
+    }
+    let message_id = text
+        .lines()
+        .find_map(|line| line.strip_prefix("Message-ID: "))
+        .unwrap_or("")
+        .trim();
+    let key = match message_id {
+        "" => format!("{kind}:{generation}:{uid}"),
+        id => format!("{kind}:{id}"),
+    };
+    Ok((kind.to_owned(), generation, uid.to_owned(), key))
+}
+
 /// The line of a task body that names the stored human email.
 pub fn mail_line(mail_name: &str) -> String {
     format!("{MAIL_SOURCE}{mail_name})")
@@ -737,6 +766,20 @@ mod tests {
     use crate::work::tests::task;
 
     const MAIN: &str = "omnigent://main";
+
+    #[test]
+    fn routed_mail_names_its_receipt() {
+        let text = "From: a@b\nMessage-ID: <x@y>\nSubject: s\n\nbody";
+        let parsed = routed_mail("routed-human-1-26558.txt", text).unwrap();
+        assert_eq!(
+            parsed,
+            ("human".into(), 1, "26558".into(), "human:<x@y>".into())
+        );
+        let parsed = routed_mail("routed-agent-7-9.txt", "From: a@b\nMessage-ID: \n").unwrap();
+        assert_eq!(parsed.3, "agent:7:9");
+        assert!(routed_mail("zulip-1.txt", text).is_err());
+        assert!(routed_mail("routed-human-x-1.txt", text).is_err());
+    }
 
     /// A main manager, a worker under it, a submanager under the worker, a done task, and a retired one.
     fn tasks() -> Vec<Task> {

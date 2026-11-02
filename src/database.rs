@@ -19,6 +19,19 @@ impl Database {
             )
             .map_err(error)
     }
+    /// The task a received mail was committed to, or `None` for receipts from before owners were recorded.
+    pub fn mail_owner(&self, key: &str) -> Result<Option<String>, String> {
+        let value: Option<String> = self
+            .0
+            .query_row(
+                "SELECT value FROM metadata WHERE key = ?1",
+                [format!("mail:{key}")],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?;
+        Ok(value.filter(|value| value != "received"))
+    }
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(error)?;
         connection
@@ -130,18 +143,21 @@ impl Database {
         Ok(())
     }
 
-    /// Commit a mail receipt with its task updates and outbox exactly once per stable key.
+    /// Commit a mail receipt with its task updates and outbox exactly once per stable key; the first snapshot's task owns the mail.
     pub fn receive_mail(
         &mut self,
         key: &str,
         snapshots: &[(String, String)],
         events: &[Value],
     ) -> Result<bool, String> {
+        let owner = snapshots
+            .first()
+            .map_or("received", |(name, _)| name.as_str());
         let transaction = self.0.transaction().map_err(error)?;
         let inserted = transaction
             .execute(
-                "INSERT OR IGNORE INTO metadata (key, value) VALUES (?1, 'received')",
-                [format!("mail:{key}")],
+                "INSERT OR IGNORE INTO metadata (key, value) VALUES (?1, ?2)",
+                [format!("mail:{key}"), owner.to_owned()],
             )
             .map_err(error)?;
         if inserted == 0 {
@@ -451,6 +467,8 @@ mod tests {
         assert!(db.events()?.is_empty());
         assert!(db.pending_messages("agent")?.is_empty());
         assert!(db.receive_mail("inbox:message-id", &snapshots, std::slice::from_ref(&event))?);
+        assert_eq!(db.mail_owner("inbox:message-id")?, Some("task.md".into()));
+        assert_eq!(db.mail_owner("inbox:unknown")?, None);
         drop(db);
         let mut db = Database::open(&path)?;
         let baseline = db.events()?;

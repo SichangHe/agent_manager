@@ -1175,6 +1175,46 @@ pub fn run(values: &Value) -> Result<u8, String> {
             store.save(&task)?;
             "noted; you will not be reminded to answer that email\n".to_owned()
         }
+        ("mail", "done") => {
+            let source = Path::new(need("mail"));
+            let name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("");
+            let path = store.root.join("manager_mail").join(name);
+            let stored = fs::read_to_string(&path)
+                .map_err(|error| format!("amh: cannot read {}: {error}", path.display()))?;
+            let (kind, generation, uid, key) = decide::routed_mail(name, &stored)?;
+            let task = store.own(text("task_file"))?;
+            let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+            let owner = database.mail_owner(&key)?;
+            if owner.as_deref() != Some(task.name.as_str()) {
+                return Err(format!(
+                    "amh: {name} was not routed to {} (recorded owner: {})",
+                    task.name,
+                    owner.as_deref().unwrap_or("none")
+                ));
+            }
+            let mut mailbox = match kind.as_str() {
+                "human" => mail::Mailbox::human(&settings)?,
+                "agent" => mail::Mailbox::agent(&settings)?,
+                other => return Err(format!("amh: unknown mailbox {other} in {name}")),
+            };
+            if mailbox.uid_validity()? != generation {
+                return Err(format!(
+                    "amh: the {kind} mailbox was renumbered since {name} arrived; mark it read by hand"
+                ));
+            }
+            mailbox.mark_read(&uid)?;
+            let _lock = store.lock()?;
+            let mut task = store.load(&task.name)?;
+            tasks::add_note(
+                &mut task,
+                &format!("marked routed email {name} read after handling it"),
+            );
+            store.save(&task)?;
+            format!("marked {name} read\n")
+        }
         ("manager", "watchers") => {
             let restarted = systemctl(&["restart", UNIT])?;
             return match restarted {
