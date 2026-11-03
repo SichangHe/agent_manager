@@ -212,10 +212,18 @@ pub fn unread_all(settings: &BTreeMap<String, String>) -> Result<Vec<Header>, St
 // 🧑 "sending email on a thread with unread emails from the same agent prompts the agent to replace unread emails with one single after the send"
 // 🧑 "this process should ignore emails about pending tasks being created and removed"
 // Emails the agent did not write, such as a mail-compression job's summaries, are left out too: it cannot merge text it never saw.
+// 🧑 "It just keeps piling up stuff onto the same email and never removes old content."
 pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
+    let news = |header: &Header| is_report(&header.subject);
+    if unread
+        .iter()
+        .any(|header| header.message_id == message_id && news(header))
+    {
+        return String::new();
+    }
     let others: Vec<&Header> = unread
         .iter()
-        .filter(|header| header.message_id != message_id && header.is_own())
+        .filter(|header| header.message_id != message_id && header.is_own() && !news(header))
         .collect();
     if others.is_empty() {
         return String::new();
@@ -233,6 +241,13 @@ pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
         others.len(),
         flags.join(" ")
     )
+}
+
+/// Whether a subject is a PB report, which stays a separate email and is never merged.
+pub fn is_report(subject: &str) -> bool {
+    REPORT_LABELS
+        .iter()
+        .any(|label| subject.ends_with(&format!("] {label}")))
 }
 
 /// What `tell human` prints when the email is sent but the human's unread emails could not be listed.
@@ -1125,6 +1140,14 @@ mod tests {
             "The human has 2 earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n  <old@x> '[t_work] Earlier' Mon\n  <older@x> '[t_work] it\\'s \"x\"' Mon\nDo this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --subject SAME_SUBJECT --file MERGED_FILE --replaces '<old@x>' --replaces '<older@x>' --replaces '<sent@x>'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n"
         );
         assert_eq!(replace_reminder("<sent@x>", &unread[2..]), "");
+        let news = [
+            header("9", "Re: [t_work] pb urgent", "<n1@x>", ""),
+            header("10", "[t_work] pb news", "<n2@x>", ""),
+            header("11", "[t_work] Progress", "<p@x>", ""),
+        ];
+        assert_eq!(replace_reminder("<n2@x>", &news), "");
+        assert!(!replace_reminder("<p@x>", &news[1..]).contains("<n2@x>"));
+        assert_eq!(replace_reminder("<p@x>", &news[1..]), "");
         assert!(NOTICE_SENDER.starts_with("amh ") && WATCHER.starts_with("amh "));
         assert_eq!(
             unread_check_failed("mail search in INBOX failed: it's down"),
