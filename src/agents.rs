@@ -383,13 +383,15 @@ pub fn rotate(
     Ok(new)
 }
 
-/// Replace the agent of a task on the human's order: start a fresh agent on the same tool, model, effort, and folder with the original request, a replacement note, the human's `message`, and the open items; then stop the old agent and tell the manager. Returns the new address.
+/// Replace the agent of a task for `why` (e.g. on the human's order): start a fresh agent on the same tool, model, effort, and folder, or on the given `tool`, `model` and `effort`, with the original request, a replacement note, the human's `message`, and the open items; then stop the old agent and tell the manager. Returns the new address.
 // 🧑 "I see \"replace this agent\" does not trigger automatic replacement. It should"
 pub fn replace(
     settings: &Settings,
     store: &Store,
     name: &str,
     message: &str,
+    to: Option<(&str, &str, &str)>,
+    why: &str,
 ) -> Result<String, String> {
     let agent = |error: String| format!("amh: {error}");
     let mut task = store.load(name)?;
@@ -406,7 +408,8 @@ pub fn replace(
         None,
     )
     .map_err(agent)?;
-    let [tool, model, effort, workdir] = work::relaunch(&session, None, None, None)?;
+    let [tool, model, effort, workdir] =
+        work::relaunch(&session, to.map(|t| t.0), to.map(|t| t.1), to.map(|t| t.2))?;
     let open = crate::requests::listed(&mut task)?;
     let root = store.root.display().to_string();
     let request = work::replacement(&task, &old, &root, message, &open);
@@ -415,8 +418,7 @@ pub fn replace(
     if old == settings::get(settings, "main_manager") {
         guides = work::handover(name, &old, &root, true).0;
     }
-    let record =
-        format!("(agent replaced on the human's order: {old} handed over to a fresh agent)\n");
+    let record = format!("(agent replaced {why}: {old} handed over to a fresh agent)\n");
     let started = start_agent(
         settings,
         store,
@@ -453,7 +455,7 @@ pub fn replace(
         let text = work::envelope(
             &new,
             &format!(
-                "{name}: on the human's order, amh replaced its agent {old} with {new}, which got the original request, the human's message and the open items; nothing to do."
+                "{name}: amh replaced its agent {old} with {new} {why}; it got the original request, the message and the open items; nothing to do."
             ),
         );
         let _ = report(settings, store, manager, &text, false);
@@ -474,6 +476,9 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     {
         *status = "long_running".to_owned();
     }
+    if given(new.model).is_some() {
+        fields.push(("model_pinned".to_owned(), "true".to_owned()));
+    }
     if store.contains(new.name)? {
         let old = store.load(new.name)?;
         let migrating = given(new.tool).is_some_and(|tool| old.field("tool") != Some(tool))
@@ -493,7 +498,14 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
             }
         }
     }
-    let tool = given(new.tool).unwrap_or(work::default_tool(new.as_manager));
+    let tool = given(new.tool).unwrap_or_else(|| {
+        let tool = work::default_tool(new.as_manager);
+        if new.as_manager {
+            tool
+        } else {
+            crate::fallback::default_tool(settings, tool)
+        }
+    });
     if new.as_manager && !settings::allows(settings, "manager.tools", tool) {
         return Err(format!(
             "amh: a manager must run on {}, not {tool}: the human wants only those to make top-level decisions",

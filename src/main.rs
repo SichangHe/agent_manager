@@ -7,6 +7,7 @@ mod archive;
 mod cli;
 mod database;
 mod decide;
+mod fallback;
 mod guest;
 mod jobs;
 mod log;

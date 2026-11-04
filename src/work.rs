@@ -359,7 +359,7 @@ pub fn replacement(task: &Task, old: &str, root: &str, message: &str, open: &str
         open
     };
     format!(
-        "{original}\nYou replace the agent that ran this task at {old}; the human asked for its replacement in the message below. Its task file {} in {root} holds its history; continue from there. The previous agent is stopped.\n\n{}\n\nThe task's pending items (`amh todo list`):\n{open}",
+        "{original}\nYou replace the agent that ran this task at {old}; why is in the message below. Its task file {} in {root} holds its history; continue from there. The previous agent is stopped.\n\n{}\n\nThe task's pending items (`amh todo list`):\n{open}",
         task.name,
         message.trim_end()
     )

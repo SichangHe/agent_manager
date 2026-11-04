@@ -146,6 +146,10 @@ impl Scanner {
             self.stalls_loaded = true;
         }
         let found = agents::problems(settings, store)?;
+        let wall_s = chrono::Utc::now().timestamp();
+        for line in crate::fallback::watch(settings, store, &found, wall_s) {
+            log(&line);
+        }
         let now_s = self.started.elapsed().as_secs();
         // 🧑 "We have 96% quota left for Codex and it resets in 5 days. Try to use them up in those days": Codex workers stop after each small step, so the setting `remind.codex_idle_s` wakes them sooner than the default.
         let remind_every_s = |task: &Task| {
@@ -916,6 +920,8 @@ impl Watcher {
                     store,
                     name,
                     &decide::mail_text(mail, &stored, false),
+                    None,
+                    "on the human's order",
                 ) {
                     Ok(new) => {
                         log(&format!(

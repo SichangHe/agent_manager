@@ -62,7 +62,7 @@ fn start_slot() -> Result<(), String> {
 type Settings = BTreeMap<String, String>;
 
 /// The session part of an agent address.
-fn session(address: &str) -> Result<&str, String> {
+pub fn session(address: &str) -> Result<&str, String> {
     address.strip_prefix(PREFIX).ok_or_else(|| {
         format!("{address} is not an Omnigent session; amh reaches agents on Omnigent only")
     })
@@ -309,7 +309,7 @@ fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Re
     Ok(())
 }
 
-fn session_error(session_value: &Value) -> &str {
+pub fn session_error(session_value: &Value) -> &str {
     session_value["last_task_error"]
         .as_str()
         .or_else(|| session_value["last_task_error"]["message"].as_str())

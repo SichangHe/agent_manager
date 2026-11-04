@@ -1146,7 +1146,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("agent", "replace") => {
             let name = work::task_name(need("who"));
             let message = text("message").unwrap_or_default();
-            let new = agents::replace(&settings, &store, &name, message)?;
+            let new = agents::replace(
+                &settings,
+                &store,
+                &name,
+                message,
+                None,
+                "on the human's order",
+            )?;
             format!("{name} now runs at {new}\n")
         }
         ("agent", "retire") => {
