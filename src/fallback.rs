@@ -1039,7 +1039,7 @@ mod tests {
         h.restarted("t.md", 100, false, 100 + 2 * RETRY_SWAP_S);
         assert_eq!(
             h.restart("t.md", false, 100, false, 100 + 4 * RETRY_SWAP_S),
-            Restart::No,
+            Restart::GaveUp,
             "attempts are limited"
         );
     }
