@@ -13,6 +13,7 @@ mod log;
 mod mail;
 mod mail_routes;
 mod omnigent;
+mod org;
 mod quota;
 mod requests;
 mod settings;

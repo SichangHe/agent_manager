@@ -1098,6 +1098,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             String::new()
         }
+        ("agent", "org") => crate::org::chart(
+            &store.active()?,
+            settings::get(&settings, "main_manager"),
+            |task| omnigent::held(task.address()),
+            &decide::parse_stalls(&store.record("amh-stalls.txt").unwrap_or_default()),
+        ),
         ("agent", "tree") => {
             work::tree(&store.active()?, settings::get(&settings, "main_manager")) + "\n"
         }
