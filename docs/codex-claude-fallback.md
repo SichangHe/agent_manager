@@ -14,7 +14,12 @@
     - failure 1 and 2 of an agent inside 10 min: restart it on the same tool, model and effort (`agents::replace` with no `to`), once per failure
         - a message to a failed `codex-native` session starts no turn (amh_support_codex.md, cx_maint Nov 4), so a "retry" message never resumed it (`omnigent::updated_at` dedups; a session without a readable `updated_at` is skipped)
     - failures are counted as 429s and stream drops separately; both count toward a swap
-    - every fresh failure of an agent that stays (swap held back by a probe, the cap, backoff, a refusal, or too few failures) is restarted on Codex the same way
+    - every fresh failure of an agent that stays (swap held back by a probe, the cap, backoff, a refusal, or too few failures) is restarted on Codex the same way (`Health::restart`, pure)
+        - at most 3 restart attempts per task per hour, failed ones included, counted apart from swaps; at the cap the manager is told once an hour and the task is left failed
+        - a failed restart is retried at most 3 times, 15 min apart, per (task, failure time)
+        - managers and tasks of unrecorded role are never restarted; the main manager is told once
+        - the task is reloaded first; if its address changed since the failed session was checked, the restart (and a swap) is skipped
+        - a restart keeps `model_pinned` and the session's tool, model and effort
     - brakes before a swap (`Health::swap`)
         - normal path: the agent has 3 failures in 10 min and a probe that failed less than 5 min ago; with 3 failures piling up amh probes at once (at most every 5 min), so a proxy restart that Codex survives swaps nobody
         - override: 6 or more failures of one agent in 30 min swap it even while probes succeed, for the human's "if it’s taking too many tries, and the progress is way too slow you should switch to Claude"

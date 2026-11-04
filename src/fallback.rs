@@ -32,6 +32,8 @@ const MAX_SWAPS_H: usize = 3;
 /// Attempts per failed swap, `RETRY_SWAP_S` apart.
 const MAX_TRIES: u32 = 3;
 const RETRY_SWAP_S: i64 = 900;
+/// Same-tool restarts per task per hour, attempts included; separate from `MAX_SWAPS_H`.
+const MAX_RESTARTS_H: usize = 3;
 /// Seconds a probe may take.
 const PROBE_TIMEOUT_S: u64 = 20;
 
@@ -70,6 +72,12 @@ pub struct Health {
     config_told: bool,
     /// Failed swaps: `(task name, failure time in s, attempts, last attempt in s)`.
     swap_tries: Vec<(String, i64, u32, i64)>,
+    /// Restart attempts `(task name, time in s)` in the last hour.
+    restarts_s: Vec<(String, i64)>,
+    /// Failed restarts: `(task name, failure time in s, attempts, last attempt in s)`.
+    restart_tries: Vec<(String, i64, u32, i64)>,
+    /// Restart notices to managers, once per hour: `(key, time in s)`.
+    restart_told: Vec<(String, i64)>,
 }
 
 impl Health {
@@ -101,11 +109,30 @@ impl Health {
                     ))
                 })
                 .collect(),
+            restarts_s: list("restarts_s")
+                .iter()
+                .filter_map(|r| Some((text(&r[0])?, r[1].as_i64()?)))
+                .collect(),
+            restart_tries: list("restart_tries")
+                .iter()
+                .filter_map(|t| {
+                    Some((
+                        text(&t[0])?,
+                        t[1].as_i64()?,
+                        u32::try_from(t[2].as_i64()?).ok()?,
+                        t[3].as_i64()?,
+                    ))
+                })
+                .collect(),
+            restart_told: list("restart_told")
+                .iter()
+                .filter_map(|r| Some((text(&r[0])?, r[1].as_i64()?)))
+                .collect(),
         }
     }
 
     fn to_json(&self) -> Value {
-        json!({"failures": self.failures, "unhealthy": self.unhealthy, "last_ok": self.last_ok, "probes_ok": self.probes_ok, "probed_s": self.probed_s, "refused": self.refused, "swaps_s": self.swaps_s, "cap_told_s": self.cap_told_s, "config_told": self.config_told, "swap_tries": self.swap_tries})
+        json!({"failures": self.failures, "unhealthy": self.unhealthy, "last_ok": self.last_ok, "probes_ok": self.probes_ok, "probed_s": self.probed_s, "refused": self.refused, "swaps_s": self.swaps_s, "cap_told_s": self.cap_told_s, "config_told": self.config_told, "swap_tries": self.swap_tries, "restarts_s": self.restarts_s, "restart_tries": self.restart_tries, "restart_told": self.restart_told})
     }
 
     /// Count a failure of `task` at `at_s`; true when it is new.
@@ -114,6 +141,9 @@ impl Health {
             .retain(|(_, at, _)| now_s - at < LONG_WINDOW_S);
         self.swaps_s.retain(|at| now_s - at < HOUR_S);
         self.swap_tries.retain(|t| now_s - t.1 < HOUR_S);
+        self.restart_tries.retain(|t| now_s - t.1 < HOUR_S);
+        self.restarts_s.retain(|r| now_s - r.1 < HOUR_S);
+        self.restart_told.retain(|r| now_s - r.1 < HOUR_S);
         if at_s <= now_s - LONG_WINDOW_S
             || self
                 .failures
@@ -175,6 +205,57 @@ impl Health {
         }
     }
 
+    /// Whether to restart `task` on Codex now, for its failure at `at_s`; pure. A fresh failure restarts once; a failed restart is retried up to `MAX_TRIES` times, `RETRY_SWAP_S` apart; at most `MAX_RESTARTS_H` attempts per hour. Managers are never restarted by amh.
+    fn restart(&self, task: &str, is_manager: bool, at_s: i64, fresh: bool, now_s: i64) -> Restart {
+        if is_manager {
+            return Restart::Manager;
+        }
+        let due = match self
+            .restart_tries
+            .iter()
+            .find(|t| t.0 == task && t.1 == at_s)
+        {
+            Some((_, _, n, last)) => *n < MAX_TRIES && now_s >= last + RETRY_SWAP_S,
+            None => fresh,
+        };
+        if !due {
+            return Restart::No;
+        }
+        let n_hour = self
+            .restarts_s
+            .iter()
+            .filter(|r| r.0 == task && now_s - r.1 < HOUR_S)
+            .count();
+        if n_hour >= MAX_RESTARTS_H {
+            Restart::Capped
+        } else {
+            Restart::Go
+        }
+    }
+
+    /// Note a restart attempt of `task` for its failure at `at_s`; a failed one stays retryable with backoff.
+    fn restarted(&mut self, task: &str, at_s: i64, ok: bool, now_s: i64) {
+        self.restarts_s.push((task.to_owned(), now_s));
+        let tries = self
+            .restart_tries
+            .iter()
+            .find(|t| t.0 == task && t.1 == at_s)
+            .map_or(0, |t| t.2);
+        self.restart_tries.retain(|t| !(t.0 == task && t.1 == at_s));
+        // A success needs no retry, but the entry keeps this failure from counting as fresh again.
+        let n = if ok { MAX_TRIES } else { tries + 1 };
+        self.restart_tries.push((task.to_owned(), at_s, n, now_s));
+    }
+
+    /// Whether the notice `key` is due, and if so mark it told for an hour.
+    fn tell_once(&mut self, key: String, now_s: i64) -> bool {
+        if self.restart_told.iter().any(|r| r.0 == key) {
+            return false;
+        }
+        self.restart_told.push((key, now_s));
+        true
+    }
+
     /// Whether to swap `task` (failed at `at_s`) now; pure. Needs 3 failures in 10 min and a probe failed within 5 min, or 6 failures in 30 min whatever the probe says; then the hourly cap and backoff apply.
     fn swap(&self, task: &str, at_s: i64, now_s: i64) -> Swap {
         let n = |window_s| {
@@ -205,6 +286,19 @@ impl Health {
             _ => Swap::Go,
         }
     }
+}
+
+#[derive(Debug, PartialEq)]
+enum Restart {
+    No,
+    Go,
+    Capped,
+    Manager,
+}
+
+/// Whether the task still runs the agent whose session was checked; a task reloaded after an owner replaced its agent does not.
+fn same_agent(reloaded_address: &str, checked_address: &str) -> bool {
+    reloaded_address == checked_address
 }
 
 #[derive(Debug, PartialEq)]
@@ -365,6 +459,11 @@ pub fn watch(
         );
         logs.push(format!("{text} (manager told: {})", told.is_ok()));
     };
+    let current = |task: &Task| {
+        store
+            .load(&task.name)
+            .is_ok_and(|fresh| same_agent(fresh.address(), task.address()))
+    };
     // `(task, session, failure time in s, new)` of every failed Codex agent.
     let mut due = Vec::new();
     for (task, problem, _) in found {
@@ -466,6 +565,13 @@ pub fn watch(
                     let message = format!(
                         "amh swapped this agent from Codex to Claude {reason}. Continue the task."
                     );
+                    if !current(task) {
+                        logs.push(format!(
+                            "{}: its agent changed since the check; swap skipped",
+                            task.name
+                        ));
+                        continue;
+                    }
                     let to = Some(("claude", claude_model.as_str(), claude_effort.as_str()));
                     // An attempt counts against the cap even when it fails.
                     health.swaps_s.push(now_s);
@@ -499,19 +605,55 @@ pub fn watch(
                 }
             }
         }
-        // Every fresh failure of an agent that stays is retried, whatever held back its swap.
+        // A fresh failure (or a failed restart due again) of an agent that stays is restarted on Codex, whatever held back its swap.
         // A message to a failed `codex-native` session starts no turn (amh_support_codex.md: cx_maint's retries at 06:40, 06:43 and 06:49 on Nov 4 sat unanswered), so the retry is a fresh agent on the same tool, model and effort.
-        if fresh && !swapped {
-            let reason = format!("because its Codex session failed ({counts})");
-            let message = "Your previous session failed on a provider error (429 or dropped stream). Continue the task.";
-            logs.push(
-                match agents::replace(settings, store, &task.name, message, None, &reason) {
+        if swapped {
+            continue;
+        }
+        let is_manager = task.field("is_manager") != Some("false");
+        match health.restart(&task.name, is_manager, at_s, fresh, now_s) {
+            Restart::No => {}
+            Restart::Manager => {
+                if fresh && !health.refused.contains(&format!("restart:{}", task.name)) {
+                    health.refused.push(format!("restart:{}", task.name));
+                    let text = format!(
+                        "{}: amh does not restart a manager or a task of unrecorded role after a Codex failure ({counts}); restart it by hand.",
+                        task.name
+                    );
+                    tell(
+                        &mut logs,
+                        settings::get(settings, "main_manager"),
+                        address,
+                        &text,
+                    );
+                }
+            }
+            Restart::Capped => {
+                if health.tell_once(format!("cap:{}", task.name), now_s) {
+                    let text = format!(
+                        "{}: amh restarted its Codex agent {MAX_RESTARTS_H} times in the last hour ({counts}) and stops; it is left failed.",
+                        task.name
+                    );
+                    tell(&mut logs, manager, address, &text);
+                }
+            }
+            Restart::Go if !current(task) => logs.push(format!(
+                "{}: its agent changed since the check; restart skipped",
+                task.name
+            )),
+            Restart::Go => {
+                let reason = format!("because its Codex session failed ({counts})");
+                let message = "Your previous session failed on a provider error (429 or dropped stream). Continue the task.";
+                let done = agents::replace(settings, store, &task.name, message, None, &reason);
+                health.restarted(&task.name, at_s, done.is_ok(), now_s);
+                logs.push(match done {
                     Ok(new) => format!("{}: {counts}; restarted on Codex as {new}", task.name),
-                    Err(error) => {
-                        format!("{}: {counts}; restart on Codex failed: {error}", task.name)
-                    }
-                },
-            );
+                    Err(error) => format!(
+                        "{}: {counts}; restart on Codex failed (retried with backoff): {error}",
+                        task.name
+                    ),
+                });
+            }
         }
     }
     if health.unhealthy() != before.unhealthy() {
@@ -766,6 +908,8 @@ mod tests {
         h.refused.push("agent0".to_owned());
         h.swaps_s.push(5);
         h.swap_tries.push(("agent0".to_owned(), 10, 2, 50));
+        h.restarted("agent0", 10, false, 60);
+        h.tell_once("cap:agent0".to_owned(), 70);
         let back =
             Health::from_json(&serde_json::from_str(&h.to_json().to_string()).unwrap_or_default());
         assert!(back == h && back.unhealthy());
@@ -779,6 +923,111 @@ mod tests {
             "/nonexistent/key".to_owned(),
         );
         assert!(matches!(probe(&settings), Probe::Config(_)));
+    }
+
+    #[test]
+    fn failures_of_successive_sessions_of_one_task_reach_a_swap() {
+        let mut h = Health::default();
+        // Each restart makes a new session, so the failures come from different addresses but one task name.
+        for at in [100, 200, 300] {
+            assert!(h.record("t.md", at, true, at));
+        }
+        h.probed(false, 310);
+        assert_eq!(h.swap("t.md", 300, 320), Swap::Go);
+        assert_eq!(h.swap("other.md", 300, 320), Swap::Wait);
+    }
+
+    #[test]
+    fn a_fresh_failure_restarts_once_and_a_deduplicated_one_does_not() {
+        let mut h = Health::default();
+        assert!(h.record("t.md", 100, false, 100));
+        assert_eq!(h.restart("t.md", false, 100, true, 101), Restart::Go);
+        h.restarted("t.md", 100, true, 101);
+        assert!(
+            !h.record("t.md", 100, false, 160),
+            "same failure is not fresh"
+        );
+        assert_eq!(h.restart("t.md", false, 100, false, 160), Restart::No);
+        assert_eq!(
+            h.restart("t.md", false, 100, false, 5000),
+            Restart::No,
+            "a done restart is not retried"
+        );
+    }
+
+    #[test]
+    fn restarts_stop_at_the_hourly_cap_and_the_manager_is_told_once() {
+        let mut h = Health::default();
+        for (i, at) in [100, 200, 300].into_iter().enumerate() {
+            h.record("t.md", at, false, at);
+            assert_eq!(
+                h.restart("t.md", false, at, true, at),
+                Restart::Go,
+                "restart {i}"
+            );
+            h.restarted("t.md", at, true, at);
+        }
+        h.record("t.md", 400, false, 400);
+        assert_eq!(h.restart("t.md", false, 400, true, 400), Restart::Capped);
+        assert!(h.tell_once("cap:t.md".to_owned(), 400));
+        assert!(!h.tell_once("cap:t.md".to_owned(), 401));
+        assert_eq!(h.swaps_s.len(), 0, "restarts do not use the swap cap");
+        h.record("t.md", 100 + HOUR_S, false, 100 + HOUR_S);
+        assert_eq!(
+            h.restart("t.md", false, 100 + HOUR_S, true, 100 + HOUR_S),
+            Restart::Go,
+            "an hour later it may restart again"
+        );
+    }
+
+    #[test]
+    fn a_failed_restart_is_retried_with_backoff_up_to_a_limit() {
+        let mut h = Health::default();
+        h.record("t.md", 100, false, 100);
+        h.restarted("t.md", 100, false, 100);
+        assert_eq!(h.restart("t.md", false, 100, false, 101), Restart::No);
+        assert_eq!(
+            h.restart("t.md", false, 100, false, 100 + RETRY_SWAP_S),
+            Restart::Go
+        );
+        h.restarted("t.md", 100, false, 100 + RETRY_SWAP_S);
+        h.restarted("t.md", 100, false, 100 + 2 * RETRY_SWAP_S);
+        assert_eq!(
+            h.restart("t.md", false, 100, false, 100 + 4 * RETRY_SWAP_S),
+            Restart::No,
+            "attempts are limited"
+        );
+    }
+
+    #[test]
+    fn managers_are_never_restarted() {
+        let h = Health::default();
+        assert_eq!(h.restart("m.md", true, 100, true, 101), Restart::Manager);
+    }
+
+    #[test]
+    fn a_task_whose_agent_changed_is_not_restarted() {
+        assert!(same_agent("omnigent://a", "omnigent://a"));
+        assert!(!same_agent("omnigent://new", "omnigent://a"));
+    }
+
+    #[test]
+    fn a_same_tool_restart_keeps_the_pin_and_the_model() {
+        let mut t = task(&[
+            ("is_manager", "false"),
+            ("model_pinned", "true"),
+            ("tool", "codex"),
+        ]);
+        let session = json!({"harness": "codex-native", "model_override": "gpt-6.1-sol", "reasoning_effort": "high", "workspace": "/w"});
+        let [tool, model, effort, _] =
+            crate::work::relaunch(&session, None, None, None).unwrap_or_default();
+        assert_eq!(
+            (tool.as_str(), model.as_str(), effort.as_str()),
+            ("codex", "gpt-6.1-sol", "high")
+        );
+        crate::work::record_start(&mut t, &[], "omnigent://new", &tool, "restarted\n");
+        assert_eq!(t.field("model_pinned"), Some("true"));
+        assert_eq!(t.address(), "omnigent://new");
     }
 
     #[test]
