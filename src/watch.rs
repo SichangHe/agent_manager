@@ -166,6 +166,7 @@ impl Scanner {
             return Ok(());
         };
         let mut by_manager: Vec<(String, Vec<String>)> = Vec::new();
+        let mut stalled: Vec<(String, String)> = Vec::new();
         for nudge in nudges {
             match nudge {
                 Nudge::Remind {
@@ -173,11 +174,13 @@ impl Scanner {
                     address,
                     text,
                 } => {
-                    match omnigent::send(settings, &address, &text) {
-                        Ok(()) => log(&format!("reminded idle {task} of its open items")),
-                        Err(error) => log(&format!("reminder to {task} failed: {error}")),
-                    }
+                    let reminded = omnigent::send(settings, &address, &text);
                     self.reminded_s.insert(task.clone(), now_s);
+                    if let Err(error) = reminded {
+                        log(&format!("reminder to {task} failed: {error}"));
+                        continue;
+                    }
+                    log(&format!("reminded idle {task} of its open items"));
                     let Ok(loaded) = store.load(&task) else {
                         continue;
                     };
@@ -202,8 +205,9 @@ impl Scanner {
                         let text = decide::stall_text(&task, stall.reminders, loaded.items.len());
                         match by_manager.iter_mut().find(|(known, _)| *known == manager) {
                             Some((_, texts)) => texts.push(text),
-                            None => by_manager.push((manager, vec![text])),
+                            None => by_manager.push((manager.clone(), vec![text])),
                         }
+                        stalled.push((manager, task.clone()));
                     }
                     self.stalls.insert(task, stall);
                 }
@@ -243,6 +247,12 @@ impl Scanner {
         for (manager, texts) in by_manager {
             if let Err(error) = omnigent::send(settings, &manager, &decide::problems_text(&texts)) {
                 log(&format!("problem notice to {manager} failed: {error}"));
+                continue;
+            }
+            for (_, task) in stalled.iter().filter(|(known, _)| *known == manager) {
+                if let Some(stall) = self.stalls.get_mut(task) {
+                    stall.reported = true;
+                }
             }
         }
         if let Err(error) = store.set_record(STALLS, &decide::stalls_text(&self.stalls)) {
@@ -1229,8 +1239,11 @@ pub fn run() -> u8 {
         }
         let request_effects = store
             .lock()
-            .and_then(|_lock| crate::actions::request_effects(&settings, &store));
+            .and_then(|_lock| crate::actions::request_effects(&store));
         if let Err(error) = request_effects {
+            log(&format!("request effects failed: {error}"));
+        }
+        if let Err(error) = crate::actions::deliver_requests(&settings, &store) {
             log(&format!("request notifications failed: {error}"));
         }
         let scanned = watcher.deliver_pending(&settings, &store);

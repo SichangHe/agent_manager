@@ -28,9 +28,9 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Commit dependency releases and delivery intents before attempting agent messages.
-pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String> {
-    let mut database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+/// Commit dependency releases and delivery intents; the watcher sends them with `deliver_requests`.
+pub fn request_effects(store: &Store) -> Result<(), String> {
+    let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let through = database.latest_event_id()?;
     if database.cursor("request_effects")? < through {
         let mut all = store.all()?;
@@ -50,6 +50,15 @@ pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String>
         }
         database.set_cursor("request_effects", through)?;
     }
+    Ok(())
+}
+
+/// Send the queued request notifications; only the watcher calls this, so each message has one sender.
+///
+/// The network send runs without the amh lock; the lock is taken only to record each delivery.
+// 🧑 "One problem you had was you would start a bunch of stuff and they would all stop at some point."
+pub fn deliver_requests(settings: &Settings, store: &Store) -> Result<(), String> {
+    let mut database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let mut failed = Vec::new();
     let mut awakened = Vec::new();
     for message in database.pending_messages("agent")? {
@@ -79,6 +88,7 @@ pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String>
         if let Ok(address) = delivered {
             awakened.push(address);
         }
+        let _lock = store.lock()?;
         let mut task = store.load(source)?;
         let mut remaining = requests::notifications(&task)?;
         if let Some(at) = remaining
@@ -96,6 +106,7 @@ pub fn request_effects(settings: &Settings, store: &Store) -> Result<(), String>
         database.complete_message(id, &[(task.name.clone(), task.render())], &[event])?;
         store.refresh_exports()?;
     }
+    let _lock = store.lock()?;
     for address in awakened {
         clear_stopped(store, &address)?;
     }
@@ -504,7 +515,7 @@ fn short(values: &Value) -> Result<u8, String> {
                 task.body = kept.join("\n");
                 store.save(&task)?;
                 store.drop_queued_mail(name)?;
-                request_effects(&settings, &store)?;
+                request_effects(&store)?;
             }
             let at = agents::close_task(&settings, &store, name, true, false, false)?;
             say(&format!("closed {name} at {at}\n"));
@@ -727,7 +738,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 text("report_label"),
             )?;
             let _lock = store.lock()?;
-            request_effects(&settings, &store)?;
+            request_effects(&store)?;
             match done.is_empty() {
                 true => String::new(),
                 false => tasks::close_hint(&task).to_owned(),
@@ -849,7 +860,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 None => report_items(&settings, &store, &task, &[], &done)?,
             };
             let _lock = store.lock()?;
-            request_effects(&settings, &store)?;
+            request_effects(&store)?;
             format!(
                 "resolved {} human request(s); agent requests await their creator\n{hint}{}",
                 done.len(),
@@ -894,7 +905,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 ),
             )?;
             store.save(&owner)?;
-            request_effects(&settings, &store)?;
+            request_effects(&store)?;
             format!("{}: {}\n", id, request.stage.text())
         }
         ("todo", "wait") => {
@@ -1005,7 +1016,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             );
             requests::queue(&mut source, &to.name, &message)?;
             store.save(&source)?;
-            request_effects(&settings, &store)?;
+            request_effects(&store)?;
             "ownership offered; the target must run `amh todo take ID`\n".to_owned()
         }
         ("task", "status") => {

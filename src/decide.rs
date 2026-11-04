@@ -771,7 +771,7 @@ pub struct Stall {
     pub reported: bool,
 }
 
-/// What a reminder means for an idle task: the updated stall record, and whether its manager must now be told it stalled.
+/// What a delivered reminder means for an idle task: the updated stall record, and whether its manager must now be told it stalled.\n///\n/// The caller sets `reported` only after the manager was told, so a failed notice is retried on the next reminder.
 ///
 /// Any change to the task file counts as progress and starts the count again.
 // 🧑 "One problem you had was you would start a bunch of stuff and they would all stop at some point. You need mechanisms to repeatedly check."
@@ -785,7 +785,6 @@ pub fn stall_step(previous: Option<&Stall>, task_text: &str, limit: u32) -> (Sta
     };
     stall.reminders += 1;
     let escalate = !stall.reported && stall.reminders > limit;
-    stall.reported |= escalate;
     (stall, escalate)
 }
 
@@ -835,7 +834,7 @@ pub fn parse_stalls(text: &str) -> BTreeMap<String, Stall> {
 /// The message telling a manager that one of its agents keeps idling without progress.
 pub fn stall_text(task: &str, reminders: u32, n_items: usize) -> String {
     format!(
-        "{task} stalled: it was reminded {reminders} times of its {n_items} open items and its open items and request stages have not changed since. Check on it: answer what it waits for, unblock it, or replace it with `amh agent replace`."
+        "{task} stalled: it received {reminders} reminders of its {n_items} open items and its open items and request stages have not changed since. Check on it: answer what it waits for, unblock it, or replace it with `amh agent replace`."
     )
 }
 
@@ -847,14 +846,18 @@ mod tests {
         let (one, e1) = stall_step(None, "a", 2);
         let (two, e2) = stall_step(Some(&one), "a", 2);
         let (three, e3) = stall_step(Some(&two), "a", 2);
-        let (four, e4) = stall_step(Some(&three), "a", 2);
-        assert_eq!((e1, e2, e3, e4), (false, false, true, false));
-        assert_eq!(four.reminders, 4);
-        let (moved, e5) = stall_step(Some(&four), "b", 2);
-        assert!(!e5 && moved.reminders == 1 && !moved.reported);
+        let (unsent, e4) = stall_step(Some(&three), "a", 2);
+        assert!(e4, "an undelivered stall notice is retried");
+        let mut told = unsent.clone();
+        told.reported = true;
+        let (four, e5) = stall_step(Some(&told), "a", 2);
+        assert_eq!((e1, e2, e3, e5), (false, false, true, false));
+        assert_eq!(four.reminders, 5);
+        let (moved, e6) = stall_step(Some(&four), "b", 2);
+        assert!(!e6 && moved.reminders == 1 && !moved.reported);
         assert!(
             stall_text("t.md", 4, 2)
-                .starts_with("t.md stalled: it was reminded 4 times of its 2 open items")
+                .starts_with("t.md stalled: it received 4 reminders of its 2 open items")
         );
     }
     use super::*;
