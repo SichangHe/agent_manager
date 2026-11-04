@@ -50,7 +50,7 @@ fn stream_drop(error: &str) -> bool {
         .contains("stream closed before response.completed")
 }
 
-/// A Codex agent's failure: `(agent address, time in s, whether a stream drop rather than a 429)`.
+/// A Codex agent's failure: `(task name, kept across restarts into new sessions, time in s, whether a stream drop rather than a 429)`.
 type Failure = (String, i64, bool);
 
 /// Codex health, the failures behind it, and the swap brakes, kept across watcher restarts in `amh-codex-health.json`.
@@ -68,7 +68,7 @@ pub struct Health {
     swaps_s: Vec<i64>,
     cap_told_s: i64,
     config_told: bool,
-    /// Failed swaps: `(address, failure time in s, attempts, last attempt in s)`.
+    /// Failed swaps: `(task name, failure time in s, attempts, last attempt in s)`.
     swap_tries: Vec<(String, i64, u32, i64)>,
 }
 
@@ -108,8 +108,8 @@ impl Health {
         json!({"failures": self.failures, "unhealthy": self.unhealthy, "last_ok": self.last_ok, "probes_ok": self.probes_ok, "probed_s": self.probed_s, "refused": self.refused, "swaps_s": self.swaps_s, "cap_told_s": self.cap_told_s, "config_told": self.config_told, "swap_tries": self.swap_tries})
     }
 
-    /// Count a failure of `address` at `at_s`; true when it is new.
-    pub fn record(&mut self, address: &str, at_s: i64, stream: bool, now_s: i64) -> bool {
+    /// Count a failure of `task` at `at_s`; true when it is new.
+    pub fn record(&mut self, task: &str, at_s: i64, stream: bool, now_s: i64) -> bool {
         self.failures
             .retain(|(_, at, _)| now_s - at < LONG_WINDOW_S);
         self.swaps_s.retain(|at| now_s - at < HOUR_S);
@@ -118,11 +118,11 @@ impl Health {
             || self
                 .failures
                 .iter()
-                .any(|(who, at, _)| who == address && *at == at_s)
+                .any(|(who, at, _)| who == task && *at == at_s)
         {
             return false;
         }
-        self.failures.push((address.to_owned(), at_s, stream));
+        self.failures.push((task.to_owned(), at_s, stream));
         if self.unhealthy {
             self.probes_ok = 0;
         }
@@ -130,11 +130,11 @@ impl Health {
     }
 
     /// The agent's failures (429s, stream drops) in the last `window_s`.
-    pub fn n_within(&self, address: &str, now_s: i64, window_s: i64) -> (usize, usize) {
+    pub fn n_within(&self, task: &str, now_s: i64, window_s: i64) -> (usize, usize) {
         let own = || {
             self.failures
                 .iter()
-                .filter(|f| f.0 == address && now_s - f.1 < window_s)
+                .filter(|f| f.0 == task && now_s - f.1 < window_s)
         };
         (
             own().filter(|f| !f.2).count(),
@@ -175,10 +175,10 @@ impl Health {
         }
     }
 
-    /// Whether to swap `address` (failed at `at_s`) now; pure. Needs 3 failures in 10 min and a probe failed within 5 min, or 6 failures in 30 min whatever the probe says; then the hourly cap and backoff apply.
-    fn swap(&self, address: &str, at_s: i64, now_s: i64) -> Swap {
+    /// Whether to swap `task` (failed at `at_s`) now; pure. Needs 3 failures in 10 min and a probe failed within 5 min, or 6 failures in 30 min whatever the probe says; then the hourly cap and backoff apply.
+    fn swap(&self, task: &str, at_s: i64, now_s: i64) -> Swap {
         let n = |window_s| {
-            let (n_429, n_stream) = self.n_within(address, now_s, window_s);
+            let (n_429, n_stream) = self.n_within(task, now_s, window_s);
             n_429 + n_stream
         };
         let slow = n(LONG_WINDOW_S) >= N_FAILURES_LONG;
@@ -198,11 +198,7 @@ impl Health {
         {
             return Swap::Capped;
         }
-        match self
-            .swap_tries
-            .iter()
-            .find(|t| t.0 == address && t.1 == at_s)
-        {
+        match self.swap_tries.iter().find(|t| t.0 == task && t.1 == at_s) {
             Some((_, _, n, last)) if *n >= MAX_TRIES || now_s < last + RETRY_SWAP_S => {
                 Swap::Backoff
             }
@@ -395,7 +391,7 @@ pub fn watch(
             logs.push(format!("{}: unreadable updated_at; skipped", task.name));
             continue;
         };
-        let fresh = health.record(address, at_s, stream_drop(error), now_s);
+        let fresh = health.record(&task.name, at_s, stream_drop(error), now_s);
         due.push((task, session, at_s, fresh));
     }
     if health.probe_due(now_s) || health.probe_wanted(now_s) {
@@ -429,8 +425,8 @@ pub fn watch(
     }
     for (task, session, at_s, fresh) in due {
         let address = task.address();
-        let (n_429, n_stream) = health.n_within(address, now_s, WINDOW_S);
-        let (long_429, long_stream) = health.n_within(address, now_s, LONG_WINDOW_S);
+        let (n_429, n_stream) = health.n_within(&task.name, now_s, WINDOW_S);
+        let (long_429, long_stream) = health.n_within(&task.name, now_s, LONG_WINDOW_S);
         let counts = format!(
             "{n_429} 429s and {n_stream} stream drops in {} min ({} in {} min)",
             WINDOW_S / 60,
@@ -439,7 +435,7 @@ pub fn watch(
         );
         let manager = task.field("managerat").unwrap_or_default();
         let mut swapped = false;
-        match health.swap(address, at_s, now_s) {
+        match health.swap(&task.name, at_s, now_s) {
             Swap::Wait | Swap::Backoff | Swap::CodexAlive => {}
             Swap::Capped => {
                 if now_s >= health.cap_told_s + HOUR_S {
@@ -457,8 +453,8 @@ pub fn watch(
                     Err(error) => Some(error.clone()),
                 };
                 if let Some(why) = why {
-                    if !health.refused.iter().any(|known| known == address) {
-                        health.refused.push(address.to_owned());
+                    if !health.refused.contains(&task.name) {
+                        health.refused.push(task.name.clone());
                         let text = format!(
                             "{}: amh did not swap its Codex agent to Claude ({counts}): {why}. It is left as is.",
                             task.name
@@ -485,14 +481,14 @@ pub fn watch(
                             let tries = health
                                 .swap_tries
                                 .iter()
-                                .find(|t| t.0 == address && t.1 == at_s)
+                                .find(|t| t.0 == task.name && t.1 == at_s)
                                 .map_or(0, |t| t.2);
                             health
                                 .swap_tries
-                                .retain(|t| !(t.0 == address && t.1 == at_s));
+                                .retain(|t| !(t.0 == task.name && t.1 == at_s));
                             health
                                 .swap_tries
-                                .push((address.to_owned(), at_s, tries + 1, now_s));
+                                .push((task.name.clone(), at_s, tries + 1, now_s));
                             logs.push(format!(
                                 "{}: swap to Claude failed (attempt {}): {error}",
                                 task.name,
@@ -503,14 +499,19 @@ pub fn watch(
                 }
             }
         }
-        // Every fresh failure of an agent that stays gets a retry message, whatever held back its swap.
+        // Every fresh failure of an agent that stays is retried, whatever held back its swap.
+        // A message to a failed `codex-native` session starts no turn (amh_support_codex.md: cx_maint's retries at 06:40, 06:43 and 06:49 on Nov 4 sat unanswered), so the retry is a fresh agent on the same tool, model and effort.
         if fresh && !swapped {
-            let text =
-                "Your last turn failed on a provider error (429 or dropped stream). Retry it.";
-            logs.push(match omnigent::send(settings, address, text) {
-                Ok(()) => format!("{}: {counts}; asked it to retry", task.name),
-                Err(error) => format!("{}: {counts}; retry message failed: {error}", task.name),
-            });
+            let reason = format!("because its Codex session failed ({counts})");
+            let message = "Your previous session failed on a provider error (429 or dropped stream). Continue the task.";
+            logs.push(
+                match agents::replace(settings, store, &task.name, message, None, &reason) {
+                    Ok(new) => format!("{}: {counts}; restarted on Codex as {new}", task.name),
+                    Err(error) => {
+                        format!("{}: {counts}; restart on Codex failed: {error}", task.name)
+                    }
+                },
+            );
         }
     }
     if health.unhealthy() != before.unhealthy() {

@@ -10,9 +10,11 @@
     - also `{code: codex_turn_error, message: "stream disconnected before completion: stream closed before response.completed"}`, counted alike (6 such sessions in `chat.db`, Oct 15-25; none found for Nov 3 cx_gc)
     - the same code appears for Claude 429s, so the harness must be `codex-native`
 - the watcher minute pass (`fallback::watch`, called in `Scanner::nudge`) over agents in problem `Error`
-    - failure 1 and 2 of an agent inside 10 min: send "retry" (`omnigent::send`), once per failure (`omnigent::updated_at` dedups; a session without a readable `updated_at` is skipped)
+    - failures are counted per task file, so they add up across the fresh sessions each restart makes
+    - failure 1 and 2 of an agent inside 10 min: restart it on the same tool, model and effort (`agents::replace` with no `to`), once per failure
+        - a message to a failed `codex-native` session starts no turn (amh_support_codex.md, cx_maint Nov 4), so a "retry" message never resumed it (`omnigent::updated_at` dedups; a session without a readable `updated_at` is skipped)
     - failures are counted as 429s and stream drops separately; both count toward a swap
-    - every fresh failure of an agent that stays (swap held back by a probe, the cap, backoff, a refusal, or too few failures) gets the "retry" message
+    - every fresh failure of an agent that stays (swap held back by a probe, the cap, backoff, a refusal, or too few failures) is restarted on Codex the same way
     - brakes before a swap (`Health::swap`)
         - normal path: the agent has 3 failures in 10 min and a probe that failed less than 5 min ago; with 3 failures piling up amh probes at once (at most every 5 min), so a proxy restart that Codex survives swaps nobody
         - override: 6 or more failures of one agent in 30 min swap it even while probes succeed, for the human's "if it’s taking too many tries, and the progress is way too slow you should switch to Claude"
