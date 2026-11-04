@@ -221,8 +221,35 @@ impl Scanner {
                             "stalled {task}: {} reminders without progress",
                             stall.reminders
                         ));
-                        let manager = loaded.field("managerat").unwrap_or_default().to_owned();
-                        let text = decide::stall_text(&task, stall.reminders, loaded.items.len());
+                        let route = decide::notice_route(
+                            loaded.field("managerat").unwrap_or_default(),
+                            loaded.address(),
+                            settings::get(settings, "main_manager"),
+                        );
+                        let (manager, note) = match route {
+                            decide::Route::To(to, note) => (to, note.unwrap_or_default()),
+                            decide::Route::Root => {
+                                // The main manager answers only to the human; no agent above it gets stall notices.
+                                log(&format!(
+                                    "stall of main manager {task} not escalated: it reports to the human"
+                                ));
+                                let mut stall = stall;
+                                stall.reported = true;
+                                self.stalls.insert(task, stall);
+                                continue;
+                            }
+                            decide::Route::Unroutable => {
+                                log(&format!(
+                                    "stall notice for {task} has no Omnigent recipient"
+                                ));
+                                self.stalls.insert(task, stall);
+                                continue;
+                            }
+                        };
+                        let text = format!(
+                            "{note}{}",
+                            decide::stall_text(&task, stall.reminders, loaded.items.len())
+                        );
                         match by_manager.iter_mut().find(|(known, _)| *known == manager) {
                             Some((_, texts)) => texts.push(text),
                             None => by_manager.push((manager.clone(), vec![text])),
@@ -240,9 +267,25 @@ impl Scanner {
                     email,
                 } => {
                     log(&line);
-                    match by_manager.iter_mut().find(|(known, _)| *known == manager) {
-                        Some((_, texts)) => texts.push(text),
-                        None => by_manager.push((manager, vec![text])),
+                    let address = store.load(&task).map(|loaded| loaded.address().to_owned());
+                    let route = decide::notice_route(
+                        &manager,
+                        address.as_deref().unwrap_or_default(),
+                        settings::get(settings, "main_manager"),
+                    );
+                    match route {
+                        decide::Route::To(to, note) => {
+                            let text = format!("{}{text}", note.unwrap_or_default());
+                            match by_manager.iter_mut().find(|(known, _)| *known == to) {
+                                Some((_, texts)) => texts.push(text),
+                                None => by_manager.push((to, vec![text])),
+                            }
+                        }
+                        decide::Route::Root | decide::Route::Unroutable => {
+                            log(&format!(
+                                "problem notice for {task} has no agent recipient (manager {manager})"
+                            ));
+                        }
                     }
                     let Some((tag, body)) = email else {
                         continue;

@@ -647,6 +647,36 @@ pub type Repeats = BTreeMap<String, (u64, u32)>;
 /// How many times an unresolved agent problem is reported again to one recipient, at most.
 pub const REPEAT_REPORTS: u32 = 3;
 
+/// Where a notice about a task goes.
+#[derive(Debug, PartialEq)]
+pub enum Route {
+    /// To this Omnigent address; with a routing-defect note when it replaces the task's unreachable manager.
+    To(String, Option<String>),
+    /// The task is the main manager, which answers only to the human: no agent above it to tell.
+    Root,
+    /// Neither the recorded manager nor the main manager is an Omnigent session.
+    Unroutable,
+}
+
+/// Route a notice about the task at `task_address` whose recorded manager is `manager`: to that manager when it is an Omnigent session, otherwise to the main manager with a note about the broken route; the main manager itself is the only exception.
+pub fn notice_route(manager: &str, task_address: &str, main_manager: &str) -> Route {
+    const OMNIGENT: &str = "omnigent://";
+    if manager.starts_with(OMNIGENT) {
+        Route::To(manager.to_owned(), None)
+    } else if task_address == main_manager {
+        Route::Root
+    } else if main_manager.starts_with(OMNIGENT) {
+        Route::To(
+            main_manager.to_owned(),
+            Some(format!(
+                "Routing defect: this task's recorded manager {manager} is not an Omnigent session, so you get this instead. "
+            )),
+        )
+    } else {
+        Route::Unroutable
+    }
+}
+
 /// One repeated problem notice; `entry` is recorded under `state_key` only once it was delivered.
 #[derive(Debug, PartialEq)]
 pub struct Repeat {
@@ -680,7 +710,11 @@ pub fn repeat_reports(
         if !reported.contains(&key) {
             continue;
         }
-        let manager = task.field("managerat").unwrap_or_default().to_owned();
+        let recorded = task.field("managerat").unwrap_or_default();
+        let (manager, note) = match notice_route(recorded, task.address(), main_manager) {
+            Route::To(to, note) => (to, note.unwrap_or_default()),
+            Route::Root | Route::Unroutable => continue,
+        };
         let mut recipients = vec![manager.clone()];
         let (manager_at, manager_count) = repeats
             .get(&format!("{manager} {key}"))
@@ -711,6 +745,8 @@ pub fn repeat_reports(
             );
             if to != manager {
                 text = format!("{} (its manager has not resolved it) {text}", task.name);
+            } else {
+                text = format!("{note}{text}");
             }
             notices.push(Repeat {
                 to,
@@ -954,6 +990,98 @@ pub fn stall_text(task: &str, reminders: u32, n_items: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn notices_for_unreachable_managers_go_to_the_main_manager_except_for_the_main_manager() {
+        let m = "omnigent://main";
+        assert_eq!(
+            notice_route("omnigent://boss", "omnigent://t", m),
+            Route::To("omnigent://boss".into(), None)
+        );
+        let Route::To(to, Some(note)) = notice_route("wl:16", "omnigent://t", m) else {
+            panic!()
+        };
+        assert!(to == m && note.contains("wl:16 is not an Omnigent session"));
+        assert_eq!(notice_route("wl:1", m, m), Route::Root);
+        assert_eq!(
+            notice_route("wl:1", "omnigent://t", "wl:0"),
+            Route::Unroutable
+        );
+        // A broken route escalates to the main manager with success-only counting; a repaired route goes to the new manager.
+        let text = |managerat: &str| {
+            format!(
+                "---\nstatus: running\nrunat: omnigent://t\nmanagerat: {managerat}\npending_task_items:\n  - x\n---\n"
+            )
+        };
+        let broken = Task::parse("t.md", &text("wl:16")).unwrap();
+        let found = vec![(broken.clone(), Problem::Error, "error=boom".to_owned())];
+        let key = problem_key(
+            &broken,
+            Problem::Error,
+            &error_of(Problem::Error, "error=boom"),
+        );
+        let reported = BTreeSet::from([key.clone()]);
+        let (_, start) = repeat_reports(
+            &found,
+            &reported,
+            std::slice::from_ref(&broken),
+            &Repeats::new(),
+            0,
+            50,
+            m,
+        );
+        let (due, kept) = repeat_reports(
+            &found,
+            &reported,
+            std::slice::from_ref(&broken),
+            &start,
+            60,
+            50,
+            m,
+        );
+        assert_eq!(due.len(), 1);
+        assert!(due[0].to == m && due[0].text.starts_with("Routing defect"));
+        assert_eq!(
+            kept[&format!("{m} {key}")],
+            (0, 0),
+            "nothing counted before delivery"
+        );
+        let fixed = Task::parse("t.md", &text("omnigent://boss")).unwrap();
+        let found = vec![(fixed.clone(), Problem::Error, "error=boom".to_owned())];
+        let key = problem_key(
+            &fixed,
+            Problem::Error,
+            &error_of(Problem::Error, "error=boom"),
+        );
+        let (_, start) = repeat_reports(
+            &found,
+            &BTreeSet::from([key.clone()]),
+            std::slice::from_ref(&fixed),
+            &Repeats::new(),
+            0,
+            50,
+            m,
+        );
+        let (due, _) = repeat_reports(&found, &BTreeSet::from([key]), &[fixed], &start, 60, 50, m);
+        assert_eq!(due[0].to, "omnigent://boss");
+        let root = Task::parse("main.md", "---\nstatus: long_running\nrunat: omnigent://main\nmanagerat: wl:1\npending_task_items:\n  - x\n---\n").unwrap();
+        let found = vec![(root.clone(), Problem::Error, "error=boom".to_owned())];
+        let key = problem_key(
+            &root,
+            Problem::Error,
+            &error_of(Problem::Error, "error=boom"),
+        );
+        let (none, _) = repeat_reports(
+            &found,
+            &BTreeSet::from([key]),
+            &[root],
+            &Repeats::new(),
+            999,
+            50,
+            m,
+        );
+        assert!(none.is_empty());
+    }
 
     #[test]
     fn unresolved_problems_are_repeated_boundedly_and_only_delivered_ones_count() {
