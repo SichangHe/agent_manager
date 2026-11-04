@@ -834,7 +834,7 @@ pub fn parse_stalls(text: &str) -> BTreeMap<String, Stall> {
 /// The message telling a manager that one of its agents keeps idling without progress.
 pub fn stall_text(task: &str, reminders: u32, n_items: usize) -> String {
     format!(
-        "{task} stalled: it received {reminders} reminders of its {n_items} open items and its open items and request stages have not changed since. Check on it: answer what it waits for, unblock it, or replace it with `amh agent replace`."
+        "{task} stalled: it received {reminders} reminders of its {n_items} open items and its open items and request stages have not changed since. This is advisory: long work can look like this. Check its actual output before acting; if it is stuck, answer what it waits for, unblock it, or replace it with `amh agent replace`."
     )
 }
 
