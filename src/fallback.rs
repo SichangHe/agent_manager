@@ -34,6 +34,8 @@ const MAX_TRIES: u32 = 3;
 const RETRY_SWAP_S: i64 = 900;
 /// Same-tool restarts per task per hour, attempts included; separate from `MAX_SWAPS_H`.
 const MAX_RESTARTS_H: usize = 3;
+/// The attempts value of a restart that worked.
+const RESTARTED: u32 = u32::MAX;
 /// Seconds a probe may take.
 const PROBE_TIMEOUT_S: u64 = 20;
 
@@ -215,7 +217,9 @@ impl Health {
             .iter()
             .find(|t| t.0 == task && t.1 == at_s)
         {
-            Some((_, _, n, last)) => *n < MAX_TRIES && now_s >= last + RETRY_SWAP_S,
+            Some((_, _, n, _)) if *n == RESTARTED => false,
+            Some((_, _, n, _)) if *n >= MAX_TRIES => return Restart::GaveUp,
+            Some((_, _, _, last)) => now_s >= last + RETRY_SWAP_S,
             None => fresh,
         };
         if !due {
@@ -243,7 +247,7 @@ impl Health {
             .map_or(0, |t| t.2);
         self.restart_tries.retain(|t| !(t.0 == task && t.1 == at_s));
         // A success needs no retry, but the entry keeps this failure from counting as fresh again.
-        let n = if ok { MAX_TRIES } else { tries + 1 };
+        let n = if ok { RESTARTED } else { tries + 1 };
         self.restart_tries.push((task.to_owned(), at_s, n, now_s));
     }
 
@@ -294,11 +298,18 @@ enum Restart {
     Go,
     Capped,
     Manager,
+    GaveUp,
 }
 
 /// Whether the task still runs the agent whose session was checked; a task reloaded after an owner replaced its agent does not.
 fn same_agent(reloaded_address: &str, checked_address: &str) -> bool {
     reloaded_address == checked_address
+}
+
+/// Whether the session is still the failure seen at `at_s`: failed, with the same `updated_at`.
+fn still_failed(session: &Value, at_s: i64) -> bool {
+    session["status"] == "failed"
+        && omnigent::updated_at(session).is_some_and(|at| at.timestamp() == at_s)
 }
 
 #[derive(Debug, PartialEq)]
@@ -449,7 +460,18 @@ pub fn watch(
         Err(error) => return vec![format!("codex fallback: {error}")],
     };
     let default_model = omnigent::launch_default(settings, "codex", false).map(|(model, _)| model);
+    // `name` is the failed agent's address: a notice never goes to it, nor to nobody; the problem notice of the watcher already emails the human about a failed agent.
     let tell = |logs: &mut Vec<String>, manager: &str, name: &str, text: &str| {
+        let main_manager = settings::get(settings, "main_manager");
+        let manager = if manager.starts_with("omnigent://") {
+            manager
+        } else {
+            main_manager
+        };
+        if manager == name || manager.is_empty() {
+            logs.push(format!("{text} (no agent above it to tell; not sent)"));
+            return;
+        }
         let told = agents::report(
             settings,
             store,
@@ -459,10 +481,20 @@ pub fn watch(
         );
         logs.push(format!("{text} (manager told: {})", told.is_ok()));
     };
-    let current = |task: &Task| {
+    // Just before a replace: the task still has the checked agent, and that session is still failed with the same `updated_at`.
+    let current = |task: &Task, at_s: i64| {
         store
             .load(&task.name)
             .is_ok_and(|fresh| same_agent(fresh.address(), task.address()))
+            && omnigent::session(task.address()).is_ok_and(|id| {
+                omnigent::api(
+                    settings,
+                    "GET",
+                    &format!("/v1/sessions/{id}?include_items=false"),
+                    None,
+                )
+                .is_ok_and(|session| still_failed(&session, at_s))
+            })
     };
     // `(task, session, failure time in s, new)` of every failed Codex agent.
     let mut due = Vec::new();
@@ -533,9 +565,12 @@ pub fn watch(
             LONG_WINDOW_S / 60
         );
         let manager = task.field("managerat").unwrap_or_default();
+        // True when the swap path handled this failure, so no restart follows.
         let mut swapped = false;
         match health.swap(&task.name, at_s, now_s) {
-            Swap::Wait | Swap::Backoff | Swap::CodexAlive => {}
+            Swap::Wait | Swap::CodexAlive => {}
+            // The swap backoff owns the retry of a failed swap; no Codex restart meanwhile.
+            Swap::Backoff => swapped = true,
             Swap::Capped => {
                 if now_s >= health.cap_told_s + HOUR_S {
                     health.cap_told_s = now_s;
@@ -565,9 +600,9 @@ pub fn watch(
                     let message = format!(
                         "amh swapped this agent from Codex to Claude {reason}. Continue the task."
                     );
-                    if !current(task) {
+                    if !current(task, at_s) {
                         logs.push(format!(
-                            "{}: its agent changed since the check; swap skipped",
+                            "{}: its agent or session changed since the check; swap skipped",
                             task.name
                         ));
                         continue;
@@ -584,6 +619,7 @@ pub fn watch(
                             ));
                         }
                         Err(error) => {
+                            swapped = true;
                             let tries = health
                                 .swap_tries
                                 .iter()
@@ -628,6 +664,15 @@ pub fn watch(
                     );
                 }
             }
+            Restart::GaveUp => {
+                if health.tell_once(format!("gaveup:{}:{at_s}", task.name), now_s) {
+                    let text = format!(
+                        "{}: amh's {MAX_TRIES} attempts to restart its Codex agent failed ({counts}); it is left failed.",
+                        task.name
+                    );
+                    tell(&mut logs, manager, address, &text);
+                }
+            }
             Restart::Capped => {
                 if health.tell_once(format!("cap:{}", task.name), now_s) {
                     let text = format!(
@@ -637,8 +682,8 @@ pub fn watch(
                     tell(&mut logs, manager, address, &text);
                 }
             }
-            Restart::Go if !current(task) => logs.push(format!(
-                "{}: its agent changed since the check; restart skipped",
+            Restart::Go if !current(task, at_s) => logs.push(format!(
+                "{}: its agent or session changed since the check; restart skipped",
                 task.name
             )),
             Restart::Go => {
@@ -997,6 +1042,33 @@ mod tests {
             Restart::No,
             "attempts are limited"
         );
+    }
+
+    #[test]
+    fn exhausted_restart_attempts_are_reported_not_silent() {
+        let mut h = Health::default();
+        h.record("t.md", 100, false, 100);
+        for k in 0..MAX_TRIES {
+            h.restarted("t.md", 100, false, 100 + i64::from(k) * RETRY_SWAP_S);
+        }
+        assert_eq!(h.restart("t.md", false, 100, false, 200), Restart::GaveUp);
+        assert!(h.tell_once("gaveup:t.md:100".to_owned(), 200));
+        assert!(!h.tell_once("gaveup:t.md:100".to_owned(), 300));
+    }
+
+    #[test]
+    fn a_session_revived_or_changed_is_not_replaced() {
+        let failed = json!({"status": "failed", "updated_at": 500});
+        assert!(still_failed(&failed, 500));
+        assert!(!still_failed(
+            &json!({"status": "running", "updated_at": 500}),
+            500
+        ));
+        assert!(!still_failed(
+            &json!({"status": "failed", "updated_at": 501}),
+            500
+        ));
+        assert!(!still_failed(&json!({"status": "failed"}), 500));
     }
 
     #[test]

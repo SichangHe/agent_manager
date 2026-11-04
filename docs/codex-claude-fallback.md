@@ -16,7 +16,10 @@
     - failures are counted as 429s and stream drops separately; both count toward a swap
     - every fresh failure of an agent that stays (swap held back by a probe, the cap, backoff, a refusal, or too few failures) is restarted on Codex the same way (`Health::restart`, pure)
         - at most 3 restart attempts per task per hour, failed ones included, counted apart from swaps; at the cap the manager is told once an hour and the task is left failed
-        - a failed restart is retried at most 3 times, 15 min apart, per (task, failure time)
+        - a failed restart is retried at most 3 times, 15 min apart, per (task, failure time); when the attempts run out the manager is told once and the task is left failed
+        - a failed Claude swap or a swap in backoff owns that failure: no Codex restart follows in the scan
+        - just before any replace the session is fetched again; it must still be failed with the same `updated_at`, else the replace is skipped and logged
+        - a notice never goes to the failed agent itself (the main manager): it is logged as not sent, and the watcher's problem notice already emails the human
         - managers and tasks of unrecorded role are never restarted; the main manager is told once
         - the task is reloaded first; if its address changed since the failed session was checked, the restart (and a swap) is skipped
         - a restart keeps `model_pinned` and the session's tool, model and effort
