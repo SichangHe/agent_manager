@@ -477,9 +477,7 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
         *status = "long_running".to_owned();
     }
     let pinned = given(new.model).is_some() || given(new.effort).is_some();
-    if pinned {
-        fields.push(("model_pinned".to_owned(), "true".to_owned()));
-    }
+    fields.push(("model_pinned".to_owned(), pinned.to_string()));
     if store.contains(new.name)? {
         let old = store.load(new.name)?;
         let migrating = given(new.tool).is_some_and(|tool| old.field("tool") != Some(tool))

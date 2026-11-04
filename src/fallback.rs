@@ -223,13 +223,20 @@ enum Swap {
 // 🧑 (via the manager) "Human authorized Claude replacements. Preserve experiment-specific model/account requirements; agent-runtime fallback must not silently substitute experiment models."
 /// Why this agent must not be swapped to Claude, if so. Pure.
 ///
-/// An experiment's model is not in the task file, but a task started with `--model` or `--effort` carries `model_pinned`, and a session running a model other than the current default was chosen by hand. A task started before `model_pinned` with the default model looks unpinned and is swapped.
+/// An experiment's model is not in the task file, but a task started with `--model` or `--effort` carries `model_pinned`, and a session running a model other than the current default was chosen by hand. Only a task with `model_pinned: false` can be swapped; one started before the marker is refused.
 pub fn refusal(task: &Task, session: &Value, default_model: &str) -> Option<String> {
     if task.field("is_manager") != Some("false") {
         return Some("it is a manager or its role is unrecorded".to_owned());
     }
-    if task.field("model_pinned").is_some() {
-        return Some("its task was started with an explicit model or effort".to_owned());
+    // Flip back to fail-open by refusing only `Some("true")`.
+    match task.field("model_pinned") {
+        Some("false") => {}
+        Some(_) => return Some("its task was started with an explicit model or effort".to_owned()),
+        None => {
+            return Some(
+                "its task has no `model_pinned` marker (started before the fallback)".to_owned(),
+            );
+        }
     }
     match session["model_override"].as_str() {
         Some(model) if model == default_model => None,
@@ -776,12 +783,21 @@ mod tests {
     #[test]
     fn experiments_and_managers_are_never_swapped() {
         let live = json!({"model_override": "gpt-6-astra"});
-        let worker = [("is_manager", "false"), ("tool", "codex")];
+        let worker = [
+            ("is_manager", "false"),
+            ("tool", "codex"),
+            ("model_pinned", "false"),
+        ];
         assert_eq!(refusal(&task(&worker), &live, "gpt-6-astra"), None);
         assert!(refusal(&task(&[("is_manager", "true")]), &live, "gpt-6-astra").is_some());
         assert!(
             refusal(&task(&[]), &live, "gpt-6-astra").is_some(),
             "role unrecorded fails closed"
+        );
+        let old = [("is_manager", "false"), ("tool", "codex")];
+        assert!(
+            refusal(&task(&old), &live, "gpt-6-astra").is_some(),
+            "unmarked task is refused"
         );
         let pinned = [("is_manager", "false"), ("model_pinned", "true")];
         assert!(refusal(&task(&pinned), &live, "gpt-6-astra").is_some());

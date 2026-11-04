@@ -22,9 +22,9 @@
     - a swap is `agents::replace` with Claude (`launch.claude` model), same task file, original request plus open items
 - never swapped (`fallback::refusal`); the manager is told once, the agent is left alone
     - managers or an unrecorded role
-    - tasks started with `--model` or `--effort` (`model_pinned: true` in the task file, set by `start_task`)
+    - tasks without `model_pinned: false` in the task file: `start_task` writes `true` when `--model` or `--effort` is given, else `false`; a task started before the marker has none and is refused (the agent still gets retry messages)
     - sessions whose `model_override` is not the current `launch.codex.model`
-    - remaining gaps: tasks started before `model_pinned` whose model equals the default look unpinned and are swapped; account requirements are not visible to amh (the proxy picks accounts)
+    - remaining gaps: account requirements are not visible to amh (the proxy picks accounts)
 - switch back: while unhealthy, `start_task` without `--tool`, `--model` and `--effort` starts workers on Claude (`fallback::default_tool`); explicit `--tool codex` is honored
     - every 15 min one probe: `POST /v1/responses` through the proxy, 16 output tokens, 20 s timeout
     - only HTTP 429, 5xx and timeouts mean Codex is down; other replies (401, 403, 404) and unreachable proxies are config errors
