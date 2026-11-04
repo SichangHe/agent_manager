@@ -649,7 +649,7 @@ pub struct Repeat {
     pub entry: (u64, u32),
 }
 
-/// The repeated notices due for agent problems already reported and still unresolved after `every_s`, at most `REPEAT_REPORTS` per recipient; the main manager is told once its manager was told again at least once.
+/// The repeated notices due for agent problems already reported and still unresolved after `every_s`, at most `REPEAT_REPORTS` per recipient; the main manager is told once its manager was told again, or after two periods if the manager could not be told.
 ///
 /// Returns the notices and the records to keep: records of problems no longer found are dropped, and a problem seen for the first time starts its clock now. The caller records each notice's `entry` only after delivering it, so an undelivered notice is due again on the next scan.
 // 🧑 "One problem you had was you would start a bunch of stuff and they would all stop at some point. You need mechanisms to repeatedly check."
@@ -675,10 +675,13 @@ pub fn repeat_reports(
         }
         let manager = task.field("managerat").unwrap_or_default().to_owned();
         let mut recipients = vec![manager.clone()];
-        let manager_count = repeats
+        let (manager_at, manager_count) = repeats
             .get(&format!("{manager} {key}"))
-            .map_or(0, |entry| entry.1);
-        if manager_count >= 1 && !main_manager.is_empty() && main_manager != manager {
+            .copied()
+            .unwrap_or((now_unix, 0));
+        // Escalate once the manager was told again, or after two periods even if it could not be told.
+        let overdue = manager_count >= 1 || now_unix.saturating_sub(manager_at) >= 2 * every_s;
+        if overdue && !main_manager.is_empty() && main_manager != manager {
             recipients.push(main_manager.to_owned());
         }
         for to in recipients {
@@ -1005,6 +1008,15 @@ mod tests {
         assert_eq!(state[&mk].1, 3);
         let (later, _) = run(&state, 900);
         assert!(later.iter().all(|n| n.to == "omnigent://g"));
+        // A manager that can never be told: the main manager is still told after two periods.
+        let (_, start) = run(&Repeats::new(), 1000);
+        let (early, kept) = run(&start, 1060);
+        let start = deliver(early, kept, &[]);
+        let (late, _) = run(&start, 1100);
+        assert_eq!(
+            late.iter().map(|n| n.to.as_str()).collect::<Vec<_>>(),
+            ["omnigent://m", "omnigent://g"]
+        );
         let (gone, kept) = repeat_reports(&[], &reported, &active, &state, 900, 50, "omnigent://g");
         assert!(gone.is_empty() && kept.is_empty());
     }
