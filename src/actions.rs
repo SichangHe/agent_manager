@@ -915,7 +915,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 .into_iter()
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
-            requests::wait(&mut task, need("id"), &blockers, &store.all()?)?;
+            if !blockers.is_empty() {
+                requests::wait(&mut task, need("id"), &blockers, &store.all()?)?;
+            }
+            if text("on").is_some() || flag("clear_on") {
+                requests::wait_on(&mut task, need("id"), text("on"))?;
+            }
             store.save(&task)?;
             String::new()
         }

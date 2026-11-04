@@ -351,6 +351,13 @@ pub fn wait(task: &mut Task, id: &str, blockers: &[String], all: &[Task]) -> Res
             pending.push(blocker.clone());
         }
     }
+    pending.extend(
+        request
+            .blockers
+            .iter()
+            .filter(|b| b.starts_with(EXTERNAL))
+            .cloned(),
+    );
     request.blockers = pending;
     write(task, &records);
     Ok(())
@@ -400,6 +407,32 @@ pub fn set_notifications(task: &mut Task, queued: Vec<Value>) {
             json!(queued).to_string(),
         ));
     }
+}
+
+/// How an external reason is stored among a request's blockers; it never matches a request ID, so only its owner clears it.
+pub const EXTERNAL: &str = "on: ";
+
+/// Make one added request wait for something outside amh, `reason`, or clear that wait with `None`; its request-ID dependencies stay.
+// 🧑 "change amh s.t. \"blocking\" status is per-task instead of per-agent"
+pub fn wait_on(task: &mut Task, id: &str, reason: Option<&str>) -> Result<(), String> {
+    let mut records = sync(task)?;
+    let request = records
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or("amh: no such request")?;
+    if request.stage != Stage::Added {
+        return Err("amh: only added requests may change dependencies".to_owned());
+    }
+    request.blockers.retain(|b| !b.starts_with(EXTERNAL));
+    if let Some(reason) = reason {
+        let reason = reason.trim();
+        if reason.is_empty() {
+            return Err("amh: say what the request waits for".to_owned());
+        }
+        request.blockers.push(format!("{EXTERNAL}{reason}"));
+    }
+    write(task, &records);
+    Ok(())
 }
 
 pub fn unblock(task: &mut Task, resolved: &[String]) -> Result<bool, String> {
@@ -623,6 +656,35 @@ mod tests {
             read(&Task::parse(&worker.name, &worker.render())?)?[0].stage,
             Stage::Resolved
         );
+        Ok(())
+    }
+
+    #[test]
+    fn external_waits_hold_only_their_item_survive_resolution_and_clear() -> Result<(), String> {
+        let mut owner = task("owner.md", false);
+        let mut dependency = task("dependency.md", true);
+        let waiting = sync(&mut owner)?[0].id.clone();
+        let blocker = sync(&mut dependency)?[0].id.clone();
+        crate::tasks::add_item(&mut owner, "independent work", false)?;
+        wait_on(
+            &mut owner,
+            &waiting,
+            Some("human_mgr calling amh mail done"),
+        )?;
+        let item = owner.items[0].clone();
+        assert_eq!(ready_items(&owner), ["independent work"]);
+        let all = [owner.clone(), dependency.clone()];
+        wait(&mut owner, &waiting, std::slice::from_ref(&blocker), &all)?;
+        let blockers = &sync(&mut owner)?[0].blockers;
+        assert!(blockers.contains(&blocker) && blockers.iter().any(|b| b.starts_with(EXTERNAL)));
+        // A resolved request ID never releases an external wait.
+        assert!(unblock(&mut owner, std::slice::from_ref(&blocker))?);
+        assert!(!ready_items(&owner).contains(&item.as_str()));
+        assert!(wait_on(&mut owner, &waiting, Some("  ")).is_err());
+        wait_on(&mut owner, &waiting, None)?;
+        assert!(ready_items(&owner).contains(&item.as_str()));
+        let owner = Task::parse(&owner.name, &owner.render())?;
+        assert_eq!(ready_items(&owner).len(), 2);
         Ok(())
     }
 
