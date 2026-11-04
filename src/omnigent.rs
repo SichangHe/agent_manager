@@ -336,17 +336,25 @@ fn quota_paused(
         session(address)?,
         error,
         chrono::Utc::now(),
-        session_value["updated_at"]
-            .as_str()
-            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
-            .map(|at| at.with_timezone(&chrono::Utc))
-            .or_else(|| {
-                session_value["updated_at"]
-                    .as_i64()
-                    .and_then(|at| chrono::DateTime::from_timestamp(at, 0))
-            }),
+        updated_at(session_value),
         attempt,
     )
+}
+
+/// When a session last changed: an RFC3339 string, or a number of seconds or milliseconds since the epoch.
+pub fn updated_at(session_value: &Value) -> Option<chrono::DateTime<chrono::Utc>> {
+    let at = &session_value["updated_at"];
+    at.as_str()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .or_else(|| {
+            let n = at.as_i64()?;
+            if n > 100_000_000_000 {
+                chrono::DateTime::from_timestamp_millis(n)
+            } else {
+                chrono::DateTime::from_timestamp(n, 0)
+            }
+        })
 }
 
 /// A JSON value as the evidence line shows it.
@@ -825,6 +833,20 @@ mod tests {
             "last_task_error": {"code": "native_turn_error", "message": "Session limit reached"}
         });
         assert!(crate::quota::limited(session_error(&found)));
+    }
+
+    #[test]
+    fn updated_at_reads_strings_seconds_and_milliseconds() {
+        let want = Some(1_793_772_270);
+        for at in [
+            json!("2026-11-03T22:44:30Z"),
+            json!(1_793_772_270),
+            json!(1_793_772_270_000_i64),
+        ] {
+            let found = json!({ "updated_at": at });
+            assert_eq!(updated_at(&found).map(|at| at.timestamp()), want);
+        }
+        assert!(updated_at(&json!({"updated_at": "soon"})).is_none());
     }
 
     #[test]

@@ -10,17 +10,23 @@
     - also `{code: codex_turn_error, message: "stream disconnected before completion: stream closed before response.completed"}`, counted alike (6 such sessions in `chat.db`, Oct 15-25; none found for Nov 3 cx_gc)
     - the same code appears for Claude 429s, so the harness must be `codex-native`
 - the watcher minute pass (`fallback::watch`, called in `Scanner::nudge`) over agents in problem `Error`
-    - failure 1 and 2 inside 10 min: send "retry" (`omnigent::send`), once per failure (`updated_at` dedups)
-    - failure 3 of one agent: `agents::replace` with Claude (`launch.claude` model), same task file, original request plus open items
-    - 3 failures from any agents in 10 min mark Codex unhealthy
-- never swapped (`fallback::refusal`, fails closed); the manager is told once, the agent is left alone
+    - failure 1 and 2 of an agent inside 10 min: send "retry" (`omnigent::send`), once per failure (`omnigent::updated_at` dedups; a session without a readable `updated_at` is skipped)
+    - failures are counted as 429s and stream drops separately; both count toward a swap
+    - brakes before a swap (`Health::swap`)
+        - the agent has 3 failures and the latest probe failed; with 3 failures piling up amh probes at once (at most every 5 min), so a proxy restart that Codex survives swaps nobody and the agent gets a retry message
+        - at most 3 swaps per hour over all agents; when the cap blocks one, the manager is told (once an hour)
+        - a failed swap is retried at most 3 times, 15 min apart, per (agent, failure time)
+    - a swap is `agents::replace` with Claude (`launch.claude` model), same task file, original request plus open items
+- never swapped (`fallback::refusal`); the manager is told once, the agent is left alone
     - managers or an unrecorded role
-    - tasks started with `--model` (`model_pinned: true` in the task file, set by `start_task`)
+    - tasks started with `--model` or `--effort` (`model_pinned: true` in the task file, set by `start_task`)
     - sessions whose `model_override` is not the current `launch.codex.model`
-    - not knowable: a task started before `model_pinned` with `--model` equal to the default, and account requirements (the proxy picks accounts)
-- switch back: while unhealthy, `start_task` without `--tool` starts workers on Claude (`fallback::default_tool`); explicit `--tool codex` is honored
-    - every 15 min one probe: `POST /v1/responses` through the proxy, 16 output tokens
-    - 2 successes in a row: healthy, failures forgotten; a failure resets the run
+    - remaining gaps: tasks started before `model_pinned` whose model equals the default look unpinned and are swapped; account requirements are not visible to amh (the proxy picks accounts)
+- switch back: while unhealthy, `start_task` without `--tool`, `--model` and `--effort` starts workers on Claude (`fallback::default_tool`); explicit `--tool codex` is honored
+    - every 15 min one probe: `POST /v1/responses` through the proxy, 16 output tokens, 20 s timeout
+    - a failed probe marks Codex unhealthy; 2 successes in a row mark it healthy; failures and refusals recorded are kept
+    - a probe that cannot run (missing key file, unreachable proxy) is a config error: logged, the main manager told once, Codex not judged
+    - a corrupt health file is moved aside to `.corrupt`, logged, and counts as unhealthy with no known probe, so nothing is swapped until a probe succeeds
     - running agents are never switched mid-turn
 - state: `amh-codex-health.json` in the state folder
 - settings in `env.toml`: `fallback.proxy_key_file` (the proxy's client key file, read per probe, never logged), `fallback.proxy_url` (default `http://127.0.0.1:18318`)

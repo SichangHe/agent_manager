@@ -476,7 +476,8 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     {
         *status = "long_running".to_owned();
     }
-    if given(new.model).is_some() {
+    let pinned = given(new.model).is_some() || given(new.effort).is_some();
+    if pinned {
         fields.push(("model_pinned".to_owned(), "true".to_owned()));
     }
     if store.contains(new.name)? {
@@ -500,7 +501,7 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     }
     let tool = given(new.tool).unwrap_or_else(|| {
         let tool = work::default_tool(new.as_manager);
-        if new.as_manager {
+        if new.as_manager || pinned {
             tool
         } else {
             crate::fallback::default_tool(settings, tool)
