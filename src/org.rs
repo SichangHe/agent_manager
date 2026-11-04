@@ -21,7 +21,18 @@ fn line(task: &Task, held: Option<&str>, stall: Option<&Stall>) -> String {
             on.chars().take(80).collect::<String>()
         );
     }
-    if stall.is_some_and(|stall| stall.reported) {
+    let waits = held.is_some() || task.field("blocked_on").is_some_and(|on| !on.is_empty());
+    let unchanged = |stall: &Stall| {
+        stall.task_text
+            == crate::decide::progress_mark(
+                &task.items,
+                task.field("request_records").unwrap_or_default(),
+            )
+    };
+    if !waits
+        && !task.items.is_empty()
+        && stall.is_some_and(|stall| stall.reported && unchanged(stall))
+    {
         state.push_str(", suspected stall (advisory)");
     }
     format!("{} [{role}] {} open; {state}", task.name, task.items.len())
@@ -147,6 +158,31 @@ mod tests {
             task("under_lost.md", "omnigent://u", "omnigent://l", false),
         ];
         let held = |task: &Task| (task.name == "w.md").then(|| "quota".to_owned());
+        let dept = &tasks[1];
+        let mark = crate::decide::progress_mark(
+            &dept.items,
+            dept.field("request_records").unwrap_or_default(),
+        );
+        let stalls = |mark: &str| {
+            BTreeMap::from([(
+                "dept.md".to_owned(),
+                Stall {
+                    task_text: mark.to_owned(),
+                    reminders: 4,
+                    reported: true,
+                },
+            )])
+        };
+        let flagged = chart(&tasks, "omnigent://m", held, &stalls(&mark));
+        assert!(
+            flagged.contains("dept.md [manager] 1 open; running, suspected stall (advisory)"),
+            "{flagged}"
+        );
+        let moved = chart(&tasks, "omnigent://m", held, &stalls("stale"));
+        assert!(
+            !moved.contains("suspected stall"),
+            "progress since the notice clears it: {moved}"
+        );
         let out = chart(&tasks, "omnigent://m", held, &BTreeMap::new());
         assert!(
             out.starts_with("human (CEO)\n  main.md [manager] 1 open; running\n"),
