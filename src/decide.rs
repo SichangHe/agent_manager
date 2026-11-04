@@ -579,6 +579,10 @@ pub fn nudges(
     let mut now = BTreeSet::new();
     for (task, problem, evidence) in found {
         if *problem == Problem::Idle {
+            let ready = crate::requests::ready_items(task);
+            if ready.is_empty() {
+                continue;
+            }
             let due = reminded_s
                 .get(&task.name)
                 .is_none_or(|at| now_s - at >= remind_every_s(task));
@@ -587,8 +591,8 @@ pub fn nudges(
                     task: task.name.clone(),
                     address: task.address().to_owned(),
                     text: format!(
-                        "You have {} open items. See them with `amh todo list`. Continue until each is finished or cancelled. This reminder is automatic: send nobody a message because of it; if you are waiting for a subagent, keep waiting.",
-                        task.items.len()
+                        "Continue your ready items:\n- {}\nSee request IDs and dependencies with `amh todo list`. This reminder is automatic: send nobody a message because of it.",
+                        ready.join("\n- ")
                     ),
                 });
             }
@@ -1454,7 +1458,7 @@ mod tests {
                 Nudge::Remind {
                     task: "t_work.md".to_owned(),
                     address: "omnigent://s1".to_owned(),
-                    text: "You have 1 open items. See them with `amh todo list`. Continue until each is finished or cancelled. This reminder is automatic: send nobody a message because of it; if you are waiting for a subagent, keep waiting.".to_owned(),
+                    text: "Continue your ready items:\n- x\nSee request IDs and dependencies with `amh todo list`. This reminder is automatic: send nobody a message because of it.".to_owned(),
                 },
             ]
         );

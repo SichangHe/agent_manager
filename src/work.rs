@@ -48,28 +48,16 @@ impl Problem {
 
 /// Whether a task's record says an agent should be working at its address.
 pub fn expects_agent(task: &Task) -> bool {
-    task.status() != "blocked"
-        && task.address() != "retired"
-        && task.field("agent_stopped") != Some("true")
+    task.address() != "retired" && task.field("agent_stopped") != Some("true")
 }
 
 /// The problem of an active task whose agent is in `state`: gone, failed, stuck, or idle with open items.
 pub fn problem_of(task: &Task, state: &str) -> Option<Problem> {
-    let waiting = task.status() == "long_running" && task.field("blocked_on").is_some();
-    let requests_waiting = crate::requests::read(task).is_ok_and(|requests| {
-        !task.items.is_empty()
-            && task.items.iter().all(|item| {
-                requests.iter().any(|r| {
-                    r.text == *item
-                        && (r.stage == crate::requests::Stage::Requested || !r.blockers.is_empty())
-                })
-            })
-    });
     match state {
         "missing" => Some(Problem::Missing),
         "error" => Some(Problem::Error),
         "stuck" => Some(Problem::Stuck),
-        "ready" if !task.items.is_empty() && !waiting && !requests_waiting => Some(Problem::Idle),
+        "ready" if !crate::requests::ready_items(task).is_empty() => Some(Problem::Idle),
         _ => None,
     }
 }
@@ -530,7 +518,7 @@ pub mod tests {
             &["x"],
             "",
         );
-        assert_eq!(problem_of(&waiting, "ready"), None);
+        assert_eq!(problem_of(&waiting, "ready"), Some(Problem::Idle));
         assert_eq!(problem_of(&waiting, "error"), Some(Problem::Error));
         let blocked = task("a.md", &[("status", "blocked"), ("runat", "x")], &[], "");
         let retired = task(
@@ -539,7 +527,7 @@ pub mod tests {
             &[],
             "",
         );
-        assert!(expects_agent(&idle) && !expects_agent(&blocked) && !expects_agent(&retired));
+        assert!(expects_agent(&idle) && expects_agent(&blocked) && !expects_agent(&retired));
     }
 
     #[test]

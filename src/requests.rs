@@ -36,6 +36,25 @@ pub struct Request {
     pub resolved_at: Option<String>,
 }
 
+/// Open items that can progress; legacy items without request records remain ready.
+// 🧑 "change amh s.t. \"blocking\" status is per-task instead of per-agent"
+pub fn ready_items(task: &Task) -> Vec<&str> {
+    let Ok(records) = read(task) else {
+        return Vec::new();
+    };
+    task.items
+        .iter()
+        .filter(|item| {
+            !records.iter().any(|r| {
+                r.text == **item
+                    && r.stage != Stage::Resolved
+                    && (r.stage == Stage::Requested || !r.blockers.is_empty())
+            })
+        })
+        .map(String::as_str)
+        .collect()
+}
+
 /// Read records without silently discarding corrupt metadata.
 pub fn read(task: &Task) -> Result<Vec<Request>, String> {
     let Some(raw) = task.field(KEY) else {
@@ -426,6 +445,80 @@ mod tests {
         };
         assert!(crate::tasks::add_item(&mut task, "deliver the requested change", human).is_ok());
         task
+    }
+
+    #[test]
+    fn reminders_follow_each_request_through_wait_and_release() -> Result<(), String> {
+        let mut owner = task("owner.md", false);
+        let mut dependency = task("dependency.md", true);
+        let waiting = sync(&mut owner)?[0].id.clone();
+        let blocker = sync(&mut dependency)?[0].id.clone();
+        crate::tasks::add_item(&mut owner, "independent work", false)?;
+        let all = [owner.clone(), dependency.clone()];
+        wait(&mut owner, &waiting, std::slice::from_ref(&blocker), &all)?;
+        crate::tasks::set_status(&mut owner, "blocked", Some("legacy blocker"))?;
+        let mut owner = Task::parse(&owner.name, &owner.render())?;
+        assert_eq!(owner.status(), "blocked");
+        assert_eq!(owner.field("blocked_on"), Some("legacy blocker"));
+        assert!(crate::work::expects_agent(&owner));
+        assert_eq!(ready_items(&owner), ["independent work"]);
+        assert_eq!(
+            crate::work::problem_of(&owner, "ready"),
+            Some(crate::work::Problem::Idle)
+        );
+        let found = [(owner.clone(), crate::work::Problem::Idle, String::new())];
+        let (nudges, _) = crate::decide::nudges(
+            &found,
+            &Default::default(),
+            &[owner.clone()],
+            &Default::default(),
+            0,
+            |_| 1,
+        )
+        .ok_or("unexpected unavailable runtime")?;
+        assert!(
+            matches!(&nudges[..], [crate::decide::Nudge::Remind { text, .. }]
+            if text.contains("independent work") && !text.contains("deliver the requested change"))
+        );
+        finish(&mut owner, "independent work", "delivered")?;
+        assert!(ready_items(&owner).is_empty());
+        assert_eq!(crate::work::problem_of(&owner, "ready"), None);
+        let found = [(owner.clone(), crate::work::Problem::Idle, String::new())];
+        let (nudges, _) = crate::decide::nudges(
+            &found,
+            &Default::default(),
+            &[owner.clone()],
+            &Default::default(),
+            0,
+            |_| 1,
+        )
+        .ok_or("unexpected unavailable runtime")?;
+        assert!(nudges.is_empty());
+        finish(&mut dependency, &blocker, "dependency delivered")?;
+        unblock(&mut owner, std::slice::from_ref(&blocker))?;
+        assert_eq!(ready_items(&owner), ["deliver the requested change"]);
+        assert_eq!(
+            crate::work::problem_of(&owner, "ready"),
+            Some(crate::work::Problem::Idle)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_and_repeated_items_remain_ready() -> Result<(), String> {
+        let mut owner = task("owner.md", true);
+        assert_eq!(ready_items(&owner), owner.items);
+        let text = owner.items[0].clone();
+        finish(&mut owner, &text, "finished")?;
+        crate::tasks::add_item(&mut owner, &text, false)?;
+        sync(&mut owner)?;
+        assert_eq!(ready_items(&owner), owner.items);
+        owner.fields.push((KEY.to_owned(), "invalid".to_owned()));
+        owner
+            .fields
+            .retain(|(key, value)| key != KEY || value == "invalid");
+        assert!(ready_items(&owner).is_empty());
+        Ok(())
     }
 
     #[test]

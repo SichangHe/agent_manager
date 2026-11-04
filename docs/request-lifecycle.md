@@ -37,6 +37,10 @@ transitions
     - explicit human `amh stop` confirmation resolves the owner's items
 
 dependencies and delivery
+- blocking applies to individual request items; other ready items keep receiving reminders
+    - reminders omit requests awaiting dependencies or resolution approval
+    - legacy `status: blocked` and `blocked_on` remain readable but no longer suppress ready-item reminders
+    - unrecorded legacy items remain ready; malformed request metadata does not produce reminders
 - `todo wait ID --for ID` adds dependency IDs; repeated flags permit several
     - rejects missing IDs and cycles; already resolved blockers need no edge
 - only resolved requests release edges
