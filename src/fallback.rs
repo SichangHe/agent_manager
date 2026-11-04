@@ -573,12 +573,12 @@ mod tests {
         assert_eq!(h.swap("a", 220, 220), Swap::Wait);
         h.record("a", 220, true, 220);
         assert_eq!(h.n_failures("a"), (1, 2));
-        assert!(h.probe_wanted(220), "pile-up triggers a probe");
+        assert!(h.probe_wanted(400), "pile-up triggers a probe");
         assert_eq!(h.swap("a", 220, 220), Swap::CodexAlive, "no probe yet");
-        h.probed(true, 220);
+        h.probed(true, 400);
         assert!(!h.unhealthy());
         assert_eq!(
-            h.swap("a", 220, 221),
+            h.swap("a", 220, 401),
             Swap::CodexAlive,
             "a proxy restart blip"
         );

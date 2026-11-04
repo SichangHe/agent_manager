@@ -839,7 +839,7 @@ mod tests {
     fn updated_at_reads_strings_seconds_and_milliseconds() {
         let want = Some(1_793_772_270);
         for at in [
-            json!("2026-11-03T22:44:30Z"),
+            json!("2026-11-04T06:04:30Z"),
             json!(1_793_772_270),
             json!(1_793_772_270_000_i64),
         ] {
