@@ -260,29 +260,36 @@ impl Scanner {
                 }
             }
         }
-        for (manager, text) in repeats {
-            log(&format!(
-                "repeated an unresolved agent problem to {manager}"
-            ));
-            match by_manager.iter_mut().find(|(known, _)| *known == manager) {
-                Some((_, texts)) => texts.push(text),
-                None => by_manager.push((manager, vec![text])),
+        let mut repeat_state = repeat_state;
+        let mut pending_repeats = Vec::new();
+        for repeat in repeats {
+            match by_manager.iter_mut().find(|(known, _)| *known == repeat.to) {
+                Some((_, texts)) => texts.push(repeat.text.clone()),
+                None => by_manager.push((repeat.to.clone(), vec![repeat.text.clone()])),
             }
-        }
-        if let Err(error) = store.set_record(PROBLEM_REPEATS, &decide::repeats_text(&repeat_state))
-        {
-            log(&format!("cannot save repeated problem records: {error}"));
+            pending_repeats.push((repeat.to, repeat.state_key, repeat.entry));
         }
         for (manager, texts) in by_manager {
             if let Err(error) = omnigent::send(settings, &manager, &decide::problems_text(&texts)) {
                 log(&format!("problem notice to {manager} failed: {error}"));
                 continue;
             }
+            for (_, state_key, entry) in pending_repeats.iter().filter(|(to, _, _)| *to == manager)
+            {
+                log(&format!(
+                    "repeated an unresolved agent problem to {manager}"
+                ));
+                repeat_state.insert(state_key.clone(), *entry);
+            }
             for (_, task) in stalled.iter().filter(|(known, _)| *known == manager) {
                 if let Some(stall) = self.stalls.get_mut(task) {
                     stall.reported = true;
                 }
             }
+        }
+        if let Err(error) = store.set_record(PROBLEM_REPEATS, &decide::repeats_text(&repeat_state))
+        {
+            log(&format!("cannot save repeated problem records: {error}"));
         }
         if let Err(error) = store.set_record(STALLS, &decide::stalls_text(&self.stalls)) {
             log(&format!("cannot save stall records: {error}"));
