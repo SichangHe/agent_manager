@@ -36,6 +36,7 @@ const TOLD_HUMAN: &str = "amh-told-human.txt";
 /// The agent questions already sent to the human: lines of prompt IDs.
 const ASKED_HUMAN: &str = "amh-asked-human.txt";
 const PROBLEM_NOTICES: &str = "amh-problem-notices.txt";
+const STALLS: &str = "amh-stalls.txt";
 
 type Settings = BTreeMap<String, String>;
 
@@ -72,6 +73,10 @@ struct Scanner {
     started: Instant,
     /// When each task's idle agent was last reminded, in seconds since `started`.
     reminded_s: BTreeMap<String, u64>,
+    /// Each idle task's reminders since its task file last changed.
+    stalls: BTreeMap<String, decide::Stall>,
+    /// Whether `stalls` was read back from the record after a restart.
+    stalls_loaded: bool,
 }
 
 /// Serializes changes to the awaited-answers record, which delivery appends to while the scan rewrites it.
@@ -135,6 +140,10 @@ impl Scanner {
         for line in agents::follow_moves(settings, store)? {
             log(&line);
         }
+        if !self.stalls_loaded {
+            self.stalls = decide::parse_stalls(&record(store, STALLS));
+            self.stalls_loaded = true;
+        }
         let found = agents::problems(settings, store)?;
         let now_s = self.started.elapsed().as_secs();
         // 🧑 "We have 96% quota left for Codex and it resets in 5 days. Try to use them up in those days": Codex workers stop after each small step, so the setting `remind.codex_idle_s` wakes them sooner than the default.
@@ -168,7 +177,35 @@ impl Scanner {
                         Ok(()) => log(&format!("reminded idle {task} of its open items")),
                         Err(error) => log(&format!("reminder to {task} failed: {error}")),
                     }
-                    self.reminded_s.insert(task, now_s);
+                    self.reminded_s.insert(task.clone(), now_s);
+                    let Ok(loaded) = store.load(&task) else {
+                        continue;
+                    };
+                    let limit = settings::get(settings, "remind.stall_reminders")
+                        .parse()
+                        .unwrap_or(decide::STALL_REMINDERS);
+                    let previous = self.stalls.get(&task);
+                    let mark = decide::progress_mark(
+                        &loaded.items,
+                        loaded.field("request_records").unwrap_or_default(),
+                    );
+                    if previous.is_some_and(|stall| stall.reported && stall.task_text != mark) {
+                        log(&format!("stalled {task} made progress again"));
+                    }
+                    let (stall, escalate) = decide::stall_step(previous, &mark, limit);
+                    if escalate {
+                        log(&format!(
+                            "stalled {task}: {} reminders without progress",
+                            stall.reminders
+                        ));
+                        let manager = loaded.field("managerat").unwrap_or_default().to_owned();
+                        let text = decide::stall_text(&task, stall.reminders, loaded.items.len());
+                        match by_manager.iter_mut().find(|(known, _)| *known == manager) {
+                            Some((_, texts)) => texts.push(text),
+                            None => by_manager.push((manager, vec![text])),
+                        }
+                    }
+                    self.stalls.insert(task, stall);
                 }
                 Nudge::Report {
                     key,
@@ -207,6 +244,9 @@ impl Scanner {
             if let Err(error) = omnigent::send(settings, &manager, &decide::problems_text(&texts)) {
                 log(&format!("problem notice to {manager} failed: {error}"));
             }
+        }
+        if let Err(error) = store.set_record(STALLS, &decide::stalls_text(&self.stalls)) {
+            log(&format!("cannot save stall records: {error}"));
         }
         let keys: String = now.iter().map(|key| format!("{key}\n")).collect();
         store.set_record(PROBLEM_NOTICES, &keys)
@@ -1015,6 +1055,8 @@ fn scan_agents() {
     let mut scanner = Scanner {
         started: Instant::now(),
         reminded_s: BTreeMap::new(),
+        stalls: BTreeMap::new(),
+        stalls_loaded: false,
     };
     loop {
         let began = Instant::now();

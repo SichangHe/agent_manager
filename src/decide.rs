@@ -760,8 +760,103 @@ pub fn without_awaiting(awaiting: &str, task: &str, mail: &str) -> (String, usiz
     (kept, awaiting.lines().filter(waits).count())
 }
 
+/// Reminders an idle agent may get without any change to its task before its manager is told it stalled.
+pub const STALL_REMINDERS: u32 = 3;
+
+/// One idle task's reminders since its task last changed.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Stall {
+    pub task_text: String,
+    pub reminders: u32,
+    pub reported: bool,
+}
+
+/// What a reminder means for an idle task: the updated stall record, and whether its manager must now be told it stalled.
+///
+/// Any change to the task file counts as progress and starts the count again.
+// 🧑 "One problem you had was you would start a bunch of stuff and they would all stop at some point. You need mechanisms to repeatedly check."
+pub fn stall_step(previous: Option<&Stall>, task_text: &str, limit: u32) -> (Stall, bool) {
+    let mut stall = match previous {
+        Some(stall) if stall.task_text == task_text => stall.clone(),
+        _ => Stall {
+            task_text: task_text.to_owned(),
+            ..Stall::default()
+        },
+    };
+    stall.reminders += 1;
+    let escalate = !stall.reported && stall.reminders > limit;
+    stall.reported |= escalate;
+    (stall, escalate)
+}
+
+/// What counts as progress of a task: its open items and request records, as a stable hash; notes, reminders and watcher metadata do not count.
+pub fn progress_mark(items: &[String], request_records: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in items.join("\n").bytes().chain(request_records.bytes()) {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The stall records as saved between watcher restarts: one `task reminders reported mark` line each.
+pub fn stalls_text(stalls: &BTreeMap<String, Stall>) -> String {
+    stalls
+        .iter()
+        .map(|(task, stall)| {
+            format!(
+                "{task} {} {} {}\n",
+                stall.reminders, stall.reported, stall.task_text
+            )
+        })
+        .collect()
+}
+
+/// Read saved stall records, skipping malformed lines.
+pub fn parse_stalls(text: &str) -> BTreeMap<String, Stall> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.split(' ');
+            let task = parts.next()?.to_owned();
+            let reminders = parts.next()?.parse().ok()?;
+            let reported = parts.next()?.parse().ok()?;
+            let task_text = parts.next()?.to_owned();
+            Some((
+                task,
+                Stall {
+                    task_text,
+                    reminders,
+                    reported,
+                },
+            ))
+        })
+        .collect()
+}
+
+/// The message telling a manager that one of its agents keeps idling without progress.
+pub fn stall_text(task: &str, reminders: u32, n_items: usize) -> String {
+    format!(
+        "{task} stalled: it was reminded {reminders} times of its {n_items} open items and its open items and request stages have not changed since. Check on it: answer what it waits for, unblock it, or replace it with `amh agent replace`."
+    )
+}
+
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stall_is_reported_once_after_the_limit_and_reset_by_progress() {
+        let (one, e1) = stall_step(None, "a", 2);
+        let (two, e2) = stall_step(Some(&one), "a", 2);
+        let (three, e3) = stall_step(Some(&two), "a", 2);
+        let (four, e4) = stall_step(Some(&three), "a", 2);
+        assert_eq!((e1, e2, e3, e4), (false, false, true, false));
+        assert_eq!(four.reminders, 4);
+        let (moved, e5) = stall_step(Some(&four), "b", 2);
+        assert!(!e5 && moved.reminders == 1 && !moved.reported);
+        assert!(
+            stall_text("t.md", 4, 2)
+                .starts_with("t.md stalled: it was reminded 4 times of its 2 open items")
+        );
+    }
     use super::*;
     use crate::work::tests::task;
 
