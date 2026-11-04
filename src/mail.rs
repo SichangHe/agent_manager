@@ -245,9 +245,10 @@ pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
 
 /// Whether a subject is a PB report, which stays a separate email and is never merged.
 pub fn is_report(subject: &str) -> bool {
-    REPORT_LABELS
-        .iter()
-        .any(|label| subject.ends_with(&format!("] {label}")))
+    tag_of(subject).is_some_and(|tag| REPORT_LABELS.contains(&tag))
+        || REPORT_LABELS
+            .iter()
+            .any(|label| subject.ends_with(&format!("] {label}")))
 }
 
 /// What `tell human` prints when the email is sent but the human's unread emails could not be listed.
@@ -1146,6 +1147,8 @@ mod tests {
             header("11", "[t_work] Progress", "<p@x>", ""),
         ];
         assert_eq!(replace_reminder("<n2@x>", &news), "");
+        assert!(is_report("Re: [pb news] Fed hikes") && is_report("[pb urgent] AMD up"));
+        assert!(!is_report("[t_work] Progress"));
         assert!(!replace_reminder("<p@x>", &news[1..]).contains("<n2@x>"));
         assert_eq!(replace_reminder("<p@x>", &news[1..]), "");
         assert!(NOTICE_SENDER.starts_with("amh ") && WATCHER.starts_with("amh "));
