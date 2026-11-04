@@ -595,13 +595,7 @@ pub fn nudges(
             continue;
         }
         let error = error_of(*problem, evidence);
-        let key = format!(
-            "{} {} {} {}",
-            task.name,
-            task.address(),
-            problem.name(),
-            error.chars().take(200).collect::<String>()
-        );
+        let key = problem_key(task, *problem, &error);
         if now.insert(key.clone()) && !reported.contains(&key) {
             let text = failure_text(task, *problem, &error, active);
             let emailed = matches!(problem, Problem::Error | Problem::Stuck)
@@ -627,6 +621,90 @@ pub fn nudges(
         }
     }
     Some((nudges, now))
+}
+
+/// The key under which one agent problem is reported once.
+fn problem_key(task: &Task, problem: Problem, error: &str) -> String {
+    format!(
+        "{} {} {} {}",
+        task.name,
+        task.address(),
+        problem.name(),
+        error.chars().take(200).collect::<String>()
+    )
+}
+
+/// When each reported problem was last reported (Unix seconds) and how often it was repeated, by problem key.
+pub type Repeats = BTreeMap<String, (u64, u32)>;
+
+/// How many times an unresolved agent problem is reported again, at most.
+pub const REPEAT_REPORTS: u32 = 3;
+
+/// Report again the agent problems already reported that are still unresolved after `every_s`, at most `REPEAT_REPORTS` times; from the second repeat on, the main manager is told too.
+///
+/// `repeats` maps each reported key to when it was last reported (Unix seconds) and how often it was repeated. Returns the (manager, text) notices to send and the updated map; keys no longer found are dropped.
+// 🧑 "One problem you had was you would start a bunch of stuff and they would all stop at some point. You need mechanisms to repeatedly check."
+pub fn repeat_reports(
+    found: &[(Task, Problem, String)],
+    reported: &BTreeSet<String>,
+    active: &[Task],
+    repeats: &Repeats,
+    now_unix: u64,
+    every_s: u64,
+    main_manager: &str,
+) -> (Vec<(String, String)>, Repeats) {
+    let mut notices = Vec::new();
+    let mut kept = BTreeMap::new();
+    for (task, problem, evidence) in found {
+        if *problem == Problem::Idle {
+            continue;
+        }
+        let error = error_of(*problem, evidence);
+        let key = problem_key(task, *problem, &error);
+        if !reported.contains(&key) {
+            continue;
+        }
+        let (at, count) = repeats.get(&key).copied().unwrap_or((now_unix, 0));
+        let mut entry = (at, count);
+        if count < REPEAT_REPORTS && now_unix.saturating_sub(at) >= every_s {
+            entry = (now_unix, count + 1);
+            let text = format!(
+                "Still unresolved (repeat {} of {REPEAT_REPORTS}): {}",
+                count + 1,
+                failure_text(task, *problem, &error, active)
+            );
+            let manager = task.field("managerat").unwrap_or_default().to_owned();
+            if count + 1 >= 2 && !main_manager.is_empty() && main_manager != manager {
+                notices.push((
+                    main_manager.to_owned(),
+                    format!("{} (its manager has not resolved it) {text}", task.name),
+                ));
+            }
+            notices.push((manager, text));
+        }
+        kept.insert(key, entry);
+    }
+    (notices, kept)
+}
+
+/// The repeat records as saved between watcher restarts: one `seconds count key` line each.
+pub fn repeats_text(repeats: &BTreeMap<String, (u64, u32)>) -> String {
+    repeats
+        .iter()
+        .map(|(key, (at, count))| format!("{at} {count} {key}\n"))
+        .collect()
+}
+
+/// Read saved repeat records, skipping malformed lines.
+pub fn parse_repeats(text: &str) -> BTreeMap<String, (u64, u32)> {
+    text.lines()
+        .filter_map(|line| {
+            let mut parts = line.splitn(3, ' ');
+            let at = parts.next()?.parse().ok()?;
+            let count = parts.next()?.parse().ok()?;
+            Some((parts.next()?.to_owned(), (at, count)))
+        })
+        .collect()
 }
 
 /// The message telling a manager about the problems of its agents.
@@ -840,6 +918,82 @@ pub fn stall_text(task: &str, reminders: u32, n_items: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn unresolved_problems_are_repeated_boundedly_then_to_the_main_manager() {
+        let task = Task::parse(
+            "t.md",
+            "---\nstatus: running\nrunat: omnigent://t\nmanagerat: omnigent://m\npending_task_items:\n  - x\n---\n",
+        )
+        .unwrap();
+        let found = vec![(task.clone(), Problem::Error, "error=boom".to_owned())];
+        let key = problem_key(
+            &task,
+            Problem::Error,
+            &error_of(Problem::Error, "error=boom"),
+        );
+        let reported = BTreeSet::from([key.clone()]);
+        let active = [task];
+        let (none, state) = repeat_reports(
+            &found,
+            &reported,
+            &active,
+            &BTreeMap::new(),
+            100,
+            50,
+            "omnigent://main",
+        );
+        assert!(none.is_empty() && state[&key] == (100, 0));
+        let (first, state) = repeat_reports(
+            &found,
+            &reported,
+            &active,
+            &state,
+            150,
+            50,
+            "omnigent://main",
+        );
+        assert_eq!(first.len(), 1);
+        assert!(
+            first[0].0 == "omnigent://m"
+                && first[0].1.starts_with("Still unresolved (repeat 1 of 3)")
+        );
+        let (second, state) = repeat_reports(
+            &found,
+            &reported,
+            &active,
+            &state,
+            200,
+            50,
+            "omnigent://main",
+        );
+        assert_eq!(
+            second.iter().map(|(to, _)| to.as_str()).collect::<Vec<_>>(),
+            ["omnigent://main", "omnigent://m"]
+        );
+        let (_, state) = repeat_reports(
+            &found,
+            &reported,
+            &active,
+            &state,
+            250,
+            50,
+            "omnigent://main",
+        );
+        let (done, state) = repeat_reports(
+            &found,
+            &reported,
+            &active,
+            &state,
+            900,
+            50,
+            "omnigent://main",
+        );
+        assert!(done.is_empty() && state[&key].1 == 3);
+        assert_eq!(parse_repeats(&repeats_text(&state)), state);
+        let (_, gone) = repeat_reports(&[], &reported, &active, &state, 900, 50, "omnigent://main");
+        assert!(gone.is_empty());
+    }
 
     #[test]
     fn stall_is_reported_once_after_the_limit_and_reset_by_progress() {

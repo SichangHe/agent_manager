@@ -37,6 +37,7 @@ const TOLD_HUMAN: &str = "amh-told-human.txt";
 const ASKED_HUMAN: &str = "amh-asked-human.txt";
 const PROBLEM_NOTICES: &str = "amh-problem-notices.txt";
 const STALLS: &str = "amh-stalls.txt";
+const PROBLEM_REPEATS: &str = "amh-problem-repeats.txt";
 
 type Settings = BTreeMap<String, String>;
 
@@ -165,6 +166,21 @@ impl Scanner {
         let Some((nudges, mut now)) = decided else {
             return Ok(());
         };
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_secs());
+        let every_s = settings::get(settings, "remind.repeat_report_s")
+            .parse()
+            .unwrap_or(2 * 3600);
+        let (repeats, repeat_state) = decide::repeat_reports(
+            &found,
+            &reported,
+            &store.active()?,
+            &decide::parse_repeats(&record(store, PROBLEM_REPEATS)),
+            now_unix,
+            every_s,
+            settings::get(settings, "main_manager"),
+        );
         let mut by_manager: Vec<(String, Vec<String>)> = Vec::new();
         let mut stalled: Vec<(String, String)> = Vec::new();
         for nudge in nudges {
@@ -243,6 +259,19 @@ impl Scanner {
                     }
                 }
             }
+        }
+        for (manager, text) in repeats {
+            log(&format!(
+                "repeated an unresolved agent problem to {manager}"
+            ));
+            match by_manager.iter_mut().find(|(known, _)| *known == manager) {
+                Some((_, texts)) => texts.push(text),
+                None => by_manager.push((manager, vec![text])),
+            }
+        }
+        if let Err(error) = store.set_record(PROBLEM_REPEATS, &decide::repeats_text(&repeat_state))
+        {
+            log(&format!("cannot save repeated problem records: {error}"));
         }
         for (manager, texts) in by_manager {
             if let Err(error) = omnigent::send(settings, &manager, &decide::problems_text(&texts)) {
