@@ -13,7 +13,7 @@ use crate::{agents, omnigent, settings, taskfile};
 
 type Settings = BTreeMap<String, String>;
 
-/// Failures older than this no longer count.
+/// Failures older than this no longer count toward the 3-failure swap and the probe.
 const WINDOW_S: i64 = 600;
 /// Failures of one agent within the window that allow its swap, and of all agents that trigger a probe.
 const N_FAILURES: usize = 3;
@@ -21,7 +21,10 @@ const N_FAILURES: usize = 3;
 const PROBE_S: i64 = 900;
 /// Probe successes in a row that make Codex healthy again.
 const N_PROBES_OK: u32 = 2;
-/// Seconds before a probe may be repeated because failures piled up.
+/// Failures of one agent within `LONG_WINDOW_S` that allow its swap even while Codex answers probes.
+const N_FAILURES_LONG: usize = 6;
+const LONG_WINDOW_S: i64 = 1800;
+/// Seconds before a probe may be repeated because failures piled up, and after which a failed probe no longer allows swaps.
 const RECHECK_S: i64 = 300;
 const HOUR_S: i64 = 3600;
 /// Swaps per hour, over all agents.
@@ -107,10 +110,11 @@ impl Health {
 
     /// Count a failure of `address` at `at_s`; true when it is new.
     pub fn record(&mut self, address: &str, at_s: i64, stream: bool, now_s: i64) -> bool {
-        self.failures.retain(|(_, at, _)| now_s - at < WINDOW_S);
+        self.failures
+            .retain(|(_, at, _)| now_s - at < LONG_WINDOW_S);
         self.swaps_s.retain(|at| now_s - at < HOUR_S);
         self.swap_tries.retain(|t| now_s - t.1 < HOUR_S);
-        if at_s <= now_s - WINDOW_S
+        if at_s <= now_s - LONG_WINDOW_S
             || self
                 .failures
                 .iter()
@@ -125,9 +129,13 @@ impl Health {
         true
     }
 
-    /// The agent's failures in the window: 429s and stream drops.
-    pub fn n_failures(&self, address: &str) -> (usize, usize) {
-        let own = || self.failures.iter().filter(|f| f.0 == address);
+    /// The agent's failures (429s, stream drops) in the last `window_s`.
+    pub fn n_within(&self, address: &str, now_s: i64, window_s: i64) -> (usize, usize) {
+        let own = || {
+            self.failures
+                .iter()
+                .filter(|f| f.0 == address && now_s - f.1 < window_s)
+        };
         (
             own().filter(|f| !f.2).count(),
             own().filter(|f| f.2).count(),
@@ -142,10 +150,13 @@ impl Health {
         self.unhealthy && now_s >= self.probed_s + PROBE_S
     }
 
-    /// Whether failures piled up and the last probe is too old to say whether Codex is down.
+    /// Whether failures piled up (3 in the window, from any agents) and the last probe is too old to say whether Codex is down.
     fn probe_wanted(&self, now_s: i64) -> bool {
-        self.failures.len() >= N_FAILURES
-            && (self.last_ok != Some(false) || !self.unhealthy)
+        self.failures
+            .iter()
+            .filter(|f| now_s - f.1 < WINDOW_S)
+            .count()
+            >= N_FAILURES
             && now_s >= self.probed_s + RECHECK_S
     }
 
@@ -164,13 +175,18 @@ impl Health {
         }
     }
 
-    /// Whether to swap `address` (failed at `at_s`) now; pure.
+    /// Whether to swap `address` (failed at `at_s`) now; pure. Needs 3 failures in 10 min and a probe failed within 5 min, or 6 failures in 30 min whatever the probe says; then the hourly cap and backoff apply.
     fn swap(&self, address: &str, at_s: i64, now_s: i64) -> Swap {
-        let (n_429, n_stream) = self.n_failures(address);
-        if n_429 + n_stream < N_FAILURES {
+        let n = |window_s| {
+            let (n_429, n_stream) = self.n_within(address, now_s, window_s);
+            n_429 + n_stream
+        };
+        let slow = n(LONG_WINDOW_S) >= N_FAILURES_LONG;
+        if n(WINDOW_S) < N_FAILURES && !slow {
             return Swap::Wait;
         }
-        if self.last_ok != Some(false) {
+        let probe_failed = self.last_ok == Some(false) && now_s < self.probed_s + RECHECK_S;
+        if !probe_failed && !slow {
             return Swap::CodexAlive;
         }
         if self
@@ -232,13 +248,16 @@ fn path() -> std::path::PathBuf {
     settings::state_dir().join("amh-codex-health.json")
 }
 
-/// The saved health; no file is healthy. A corrupt file is moved aside and counts as unhealthy with no known probe, so nothing is swapped on it, and its error is returned.
+/// The saved health, read only; no file is healthy. A corrupt file counts as unhealthy with no known probe, so nothing is swapped on it, and its error is returned. Only the watcher moves it aside.
 fn load() -> (Health, Option<String>) {
-    match std::fs::read_to_string(path()) {
+    read(&path())
+}
+
+fn read(path: &std::path::Path) -> (Health, Option<String>) {
+    match std::fs::read_to_string(path) {
         Ok(text) => match serde_json::from_str(&text) {
             Ok(value) => (Health::from_json(&value), None),
             Err(error) => {
-                let _ = std::fs::rename(path(), path().with_extension("corrupt"));
                 let unknown = Health {
                     unhealthy: true,
                     ..Health::default()
@@ -299,8 +318,12 @@ fn probe(settings: &Settings) -> Probe {
         .header("Authorization", &format!("Bearer {}", key.trim()))
         .send_json(json!({"model": model, "input": "ok", "max_output_tokens": 16, "stream": false}))
     {
-        Ok(answer) if answer.status().as_u16() == 200 => Probe::Alive,
-        Ok(_) | Err(ureq::Error::Timeout(_)) => Probe::Down,
+        Ok(answer) => match answer.status().as_u16() {
+            200 => Probe::Alive,
+            429 | 500..=599 => Probe::Down,
+            code => Probe::Config(format!("the Codex probe got HTTP {code} from {url}")),
+        },
+        Err(ureq::Error::Timeout(_)) => Probe::Down,
         Err(error) => Probe::Config(format!(
             "the Codex probe could not reach the proxy at {url}: {error}"
         )),
@@ -319,7 +342,10 @@ pub fn watch(
         return logs;
     }
     let (mut health, corrupt) = load();
-    logs.extend(corrupt);
+    if let Some(error) = corrupt {
+        let _ = std::fs::rename(path(), path().with_extension("corrupt"));
+        logs.push(format!("{error}; moved aside to .corrupt"));
+    }
     let before = health.clone();
     let (claude_model, claude_effort) = match omnigent::launch_default(settings, "claude", false) {
         Ok(chosen) => chosen,
@@ -336,7 +362,7 @@ pub fn watch(
         );
         logs.push(format!("{text} (manager told: {})", told.is_ok()));
     };
-    // `(task, session, failure time in s, new)` of agents that reached the failures a swap needs.
+    // `(task, session, failure time in s, new)` of every failed Codex agent.
     let mut due = Vec::new();
     for (task, problem, _) in found {
         let address = task.address();
@@ -363,19 +389,7 @@ pub fn watch(
             continue;
         };
         let fresh = health.record(address, at_s, stream_drop(error), now_s);
-        let (n_429, n_stream) = health.n_failures(address);
-        if n_429 + n_stream < N_FAILURES {
-            if fresh {
-                let text =
-                    "Your last turn failed on a provider error (429 or dropped stream). Retry it.";
-                logs.push(match omnigent::send(settings, address, text) {
-                    Ok(()) => format!("{}: failure {n_429} 429s, {n_stream} stream drops; asked it to retry", task.name),
-                    Err(error) => format!("{}: failure {n_429} 429s, {n_stream} stream drops; retry message failed: {error}", task.name),
-                });
-            }
-        } else {
-            due.push((task, session, at_s, fresh));
-        }
+        due.push((task, session, at_s, fresh));
     }
     if health.probe_due(now_s) || health.probe_wanted(now_s) {
         match probe(settings) {
@@ -408,28 +422,18 @@ pub fn watch(
     }
     for (task, session, at_s, fresh) in due {
         let address = task.address();
-        let (n_429, n_stream) = health.n_failures(address);
+        let (n_429, n_stream) = health.n_within(address, now_s, WINDOW_S);
+        let (long_429, long_stream) = health.n_within(address, now_s, LONG_WINDOW_S);
         let counts = format!(
-            "{n_429} 429s and {n_stream} stream drops in {} min",
-            WINDOW_S / 60
+            "{n_429} 429s and {n_stream} stream drops in {} min ({} in {} min)",
+            WINDOW_S / 60,
+            long_429 + long_stream,
+            LONG_WINDOW_S / 60
         );
         let manager = task.field("managerat").unwrap_or_default();
+        let mut swapped = false;
         match health.swap(address, at_s, now_s) {
-            Swap::Wait | Swap::Backoff => {}
-            Swap::CodexAlive => {
-                if fresh {
-                    let text = "Your last turn failed on a provider error, but Codex answers a probe. Retry it.";
-                    logs.push(match omnigent::send(settings, address, text) {
-                        Ok(()) => format!(
-                            "{}: {counts}, Codex answers probes; asked it to retry",
-                            task.name
-                        ),
-                        Err(error) => {
-                            format!("{}: {counts}; retry message failed: {error}", task.name)
-                        }
-                    });
-                }
-            }
+            Swap::Wait | Swap::Backoff | Swap::CodexAlive => {}
             Swap::Capped => {
                 if now_s >= health.cap_told_s + HOUR_S {
                     health.cap_told_s = now_s;
@@ -454,41 +458,52 @@ pub fn watch(
                         );
                         tell(&mut logs, manager, address, &text);
                     }
-                    continue;
-                }
-                let reason = format!("because Codex failed {counts} and a probe failed too");
-                let message = format!(
-                    "amh swapped this agent from Codex to Claude {reason}. Continue the task."
-                );
-                let to = Some(("claude", claude_model.as_str(), claude_effort.as_str()));
-                match agents::replace(settings, store, &task.name, &message, to, &reason) {
-                    Ok(new) => {
-                        health.swaps_s.push(now_s);
-                        logs.push(format!(
-                            "{}: replaced its Codex agent with Claude {new} {reason}",
-                            task.name
-                        ));
-                    }
-                    Err(error) => {
-                        let tries = health
-                            .swap_tries
-                            .iter()
-                            .find(|t| t.0 == address && t.1 == at_s)
-                            .map_or(0, |t| t.2);
-                        health
-                            .swap_tries
-                            .retain(|t| !(t.0 == address && t.1 == at_s));
-                        health
-                            .swap_tries
-                            .push((address.to_owned(), at_s, tries + 1, now_s));
-                        logs.push(format!(
-                            "{}: swap to Claude failed (attempt {}): {error}",
-                            task.name,
-                            tries + 1
-                        ));
+                } else {
+                    let reason = format!("because Codex failed {counts} and a probe failed too");
+                    let message = format!(
+                        "amh swapped this agent from Codex to Claude {reason}. Continue the task."
+                    );
+                    let to = Some(("claude", claude_model.as_str(), claude_effort.as_str()));
+                    // An attempt counts against the cap even when it fails.
+                    health.swaps_s.push(now_s);
+                    match agents::replace(settings, store, &task.name, &message, to, &reason) {
+                        Ok(new) => {
+                            swapped = true;
+                            logs.push(format!(
+                                "{}: replaced its Codex agent with Claude {new} {reason}",
+                                task.name
+                            ));
+                        }
+                        Err(error) => {
+                            let tries = health
+                                .swap_tries
+                                .iter()
+                                .find(|t| t.0 == address && t.1 == at_s)
+                                .map_or(0, |t| t.2);
+                            health
+                                .swap_tries
+                                .retain(|t| !(t.0 == address && t.1 == at_s));
+                            health
+                                .swap_tries
+                                .push((address.to_owned(), at_s, tries + 1, now_s));
+                            logs.push(format!(
+                                "{}: swap to Claude failed (attempt {}): {error}",
+                                task.name,
+                                tries + 1
+                            ));
+                        }
                     }
                 }
             }
+        }
+        // Every fresh failure of an agent that stays gets a retry message, whatever held back its swap.
+        if fresh && !swapped {
+            let text =
+                "Your last turn failed on a provider error (429 or dropped stream). Retry it.";
+            logs.push(match omnigent::send(settings, address, text) {
+                Ok(()) => format!("{}: {counts}; asked it to retry", task.name),
+                Err(error) => format!("{}: {counts}; retry message failed: {error}", task.name),
+            });
         }
     }
     if health.unhealthy() != before.unhealthy() {
@@ -572,7 +587,7 @@ mod tests {
         h.record("a", 160, true, 160);
         assert_eq!(h.swap("a", 220, 220), Swap::Wait);
         h.record("a", 220, true, 220);
-        assert_eq!(h.n_failures("a"), (1, 2));
+        assert_eq!(h.n_within("a", 220, WINDOW_S), (1, 2));
         assert!(h.probe_wanted(400), "pile-up triggers a probe");
         assert_eq!(h.swap("a", 220, 220), Swap::CodexAlive, "no probe yet");
         h.probed(true, 400);
@@ -596,17 +611,21 @@ mod tests {
         down(&mut h, 40);
         h.swap_tries.push(("a".to_owned(), 30, 1, 100));
         assert_eq!(h.swap("a", 30, 150), Swap::Backoff);
-        assert_eq!(h.swap("a", 30, 100 + RETRY_SWAP_S), Swap::Go);
         h.swap_tries[0].2 = MAX_TRIES;
-        assert_eq!(h.swap("a", 30, 100_000), Swap::Backoff);
+        assert_eq!(h.swap("a", 30, 300), Swap::Backoff);
         assert_eq!(
             h.swap("a", 31, 150),
             Swap::Go,
             "a newer failure is a new attempt"
         );
         h.swaps_s = vec![100, 200, 300];
-        assert_eq!(h.swap("a", 31, 400), Swap::Capped);
-        assert_eq!(h.swap("a", 31, 100 + HOUR_S), Swap::Go);
+        assert_eq!(h.swap("a", 31, 200), Swap::Capped);
+        h.swaps_s = vec![-HOUR_S, -HOUR_S + 1, -HOUR_S + 2];
+        assert_eq!(
+            h.swap("a", 31, 200),
+            Swap::Go,
+            "swaps older than an hour do not count"
+        );
     }
 
     #[test]
@@ -623,7 +642,8 @@ mod tests {
         assert!(h.unhealthy(), "a failed probe breaks the run");
         h.probed(true, 3700);
         assert!(!h.unhealthy());
-        assert_eq!(h.n_failures("a"), (1, 0));
+        assert_eq!(h.n_within("a", 3700, LONG_WINDOW_S), (0, 0));
+        assert_eq!(h.failures.len(), 1, "failures recorded in the pass stay");
         assert_eq!(h.refused, ["a"]);
     }
 
@@ -633,8 +653,99 @@ mod tests {
         h.record("a", 0, false, 0);
         h.record("a", 300, false, 300);
         h.record("a", 700, false, 700);
-        assert_eq!(h.n_failures("a"), (2, 0));
-        assert!(!h.record("a", 50, false, 700), "a stale failure is ignored");
+        assert_eq!(h.n_within("a", 700, WINDOW_S), (2, 0));
+        assert_eq!(h.n_within("a", 700, LONG_WINDOW_S), (3, 0));
+        assert!(
+            !h.record("a", -2000, false, 700),
+            "a stale failure is ignored"
+        );
+    }
+
+    #[test]
+    fn six_failures_in_30_min_swap_even_while_probes_succeed_but_the_cap_holds() {
+        let mut h = Health::default();
+        for i in 0..6 {
+            h.record("a", i * 280, false, i * 280);
+        }
+        h.probed(true, 1400);
+        assert_eq!(h.swap("a", 1400, 1401), Swap::Go);
+        h.swaps_s = vec![1000, 1100, 1200];
+        assert_eq!(h.swap("a", 1400, 1401), Swap::Capped);
+        let mut few = Health::default();
+        for i in 0..5 {
+            few.record("a", i * 280, false, i * 280);
+        }
+        few.probed(true, 1400);
+        assert_eq!(
+            few.swap("a", 1120, 1401),
+            Swap::Wait,
+            "5 failures spread over 20 min: only 2 in 10"
+        );
+    }
+
+    #[test]
+    fn a_failed_probe_older_than_5_min_does_not_unlock_swaps() {
+        let mut h = Health::default();
+        for at in [10, 20, 30] {
+            h.record("a", at, false, at);
+        }
+        h.probed(false, 40);
+        assert_eq!(h.swap("a", 30, 41), Swap::Go);
+        assert_eq!(h.swap("a", 30, 40 + RECHECK_S), Swap::CodexAlive);
+        assert!(h.probe_wanted(40 + RECHECK_S));
+    }
+
+    /// Serve one canned HTTP answer on a local port and return its URL.
+    fn proxy_answering(code: u16) -> Result<String, std::io::Error> {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}", listener.local_addr()?);
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = listener.accept() {
+                let mut buf = [0; 4096];
+                let _ = conn.set_read_timeout(Some(std::time::Duration::from_millis(300)));
+                let _ = conn.read(&mut buf);
+                let _ = conn.read(&mut buf);
+                let _ = write!(
+                    conn,
+                    "HTTP/1.1 {code} X\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                );
+            }
+        });
+        Ok(url)
+    }
+
+    #[test]
+    fn only_429_5xx_and_timeouts_are_a_down_codex() -> Result<(), Box<dyn std::error::Error>> {
+        let key = std::env::temp_dir().join(format!("amh-probe-key-{}", std::process::id()));
+        std::fs::write(&key, "k\n")?;
+        let mut settings = BTreeMap::new();
+        settings.insert(
+            "fallback.proxy_key_file".to_owned(),
+            key.display().to_string(),
+        );
+        for (code, want) in [(200, Probe::Alive), (429, Probe::Down), (503, Probe::Down)] {
+            settings.insert("fallback.proxy_url".to_owned(), proxy_answering(code)?);
+            assert_eq!(probe(&settings), want, "HTTP {code}");
+        }
+        for code in [401, 403, 404] {
+            settings.insert("fallback.proxy_url".to_owned(), proxy_answering(code)?);
+            assert!(matches!(probe(&settings), Probe::Config(_)), "HTTP {code}");
+        }
+        std::fs::remove_file(key)?;
+        Ok(())
+    }
+
+    #[test]
+    fn reading_a_corrupt_health_file_leaves_it_alone_and_counts_unhealthy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let file = std::env::temp_dir().join(format!("amh-health-{}.json", std::process::id()));
+        std::fs::write(&file, "{not json")?;
+        let (health, error) = read(&file);
+        assert!(health.unhealthy() && health.last_ok.is_none() && error.is_some());
+        assert!(file.exists(), "only the watcher moves it aside");
+        std::fs::remove_file(file)?;
+        Ok(())
     }
 
     #[test]
