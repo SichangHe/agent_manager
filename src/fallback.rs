@@ -284,9 +284,8 @@ impl Health {
             return Swap::Capped;
         }
         match self.swap_tries.iter().find(|t| t.0 == task && t.1 == at_s) {
-            Some((_, _, n, last)) if *n >= MAX_TRIES || now_s < last + RETRY_SWAP_S => {
-                Swap::Backoff
-            }
+            Some((_, _, n, _)) if *n >= MAX_TRIES => Swap::GaveUp,
+            Some((_, _, _, last)) if now_s < last + RETRY_SWAP_S => Swap::Backoff,
             _ => Swap::Go,
         }
     }
@@ -318,6 +317,7 @@ enum Swap {
     CodexAlive,
     Capped,
     Backoff,
+    GaveUp,
     Go,
 }
 
@@ -571,6 +571,16 @@ pub fn watch(
             Swap::Wait | Swap::CodexAlive => {}
             // The swap backoff owns the retry of a failed swap; no Codex restart meanwhile.
             Swap::Backoff => swapped = true,
+            Swap::GaveUp => {
+                swapped = true;
+                if health.tell_once(format!("swapgaveup:{}:{at_s}", task.name), now_s) {
+                    let text = format!(
+                        "{}: amh's {MAX_TRIES} attempts to swap its Codex agent to Claude failed ({counts}); it is left failed for you to handle.",
+                        task.name
+                    );
+                    tell(&mut logs, manager, address, &text);
+                }
+            }
             Swap::Capped => {
                 if now_s >= health.cap_told_s + HOUR_S {
                     health.cap_told_s = now_s;
@@ -636,6 +646,13 @@ pub fn watch(
                                 task.name,
                                 tries + 1
                             ));
+                            if health.tell_once(format!("swapfail:{}:{at_s}", task.name), now_s) {
+                                let text = format!(
+                                    "{}: amh's swap of its Codex agent to Claude failed: {error}. The agent is left failed for you to handle; amh does not restart it, since a half-launched agent may exist.",
+                                    task.name
+                                );
+                                tell(&mut logs, manager, address, &text);
+                            }
                         }
                     }
                 }
@@ -807,7 +824,9 @@ mod tests {
         h.swap_tries.push(("a".to_owned(), 30, 1, 100));
         assert_eq!(h.swap("a", 30, 150), Swap::Backoff);
         h.swap_tries[0].2 = MAX_TRIES;
-        assert_eq!(h.swap("a", 30, 300), Swap::Backoff);
+        assert_eq!(h.swap("a", 30, 300), Swap::GaveUp, "attempts run out");
+        assert!(h.tell_once("swapgaveup:a:30".to_owned(), 300));
+        assert!(!h.tell_once("swapgaveup:a:30".to_owned(), 301));
         assert_eq!(
             h.swap("a", 31, 150),
             Swap::Go,

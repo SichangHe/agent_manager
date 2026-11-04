@@ -27,7 +27,7 @@
         - normal path: the agent has 3 failures in 10 min and a probe that failed less than 5 min ago; with 3 failures piling up amh probes at once (at most every 5 min), so a proxy restart that Codex survives swaps nobody
         - override: 6 or more failures of one agent in 30 min swap it even while probes succeed, for the human's "if it’s taking too many tries, and the progress is way too slow you should switch to Claude"
         - both paths: at most 3 swap attempts per hour over all agents, failed attempts included; when the cap blocks one, the manager is told (once an hour)
-        - a failed swap is retried at most 3 times, 15 min apart, per (agent, failure time); the 10 min window usually ends first, so a retry needs a new failure
+        - a failed swap is retried at most 3 times, 15 min apart, per (agent, failure time); the 10 min window usually ends first, so a retry needs a new failure; a failed swap tells the manager at once (once per task and failure time, with the error) and no restart follows; when the attempts run out the manager is told once more
         - failures are keyed by the session's `updated_at`; a session whose `updated_at` moves without a new failure can count twice
     - a swap is `agents::replace` with Claude (`launch.claude` model), same task file, original request plus open items
 - never swapped (`fallback::refusal`); the manager is told once, the agent is left alone
