@@ -158,7 +158,11 @@ pub fn recent_human(entries: &[(String, i64, String)], since_unix: i64) -> Strin
                 .map_or("", |(_, body)| body)
                 .lines()
                 .map(str::trim)
-                .find(|line| !line.is_empty() && !line.starts_with('>') && !line.starts_with("On "))
+                .find(|line| {
+                    !line.is_empty()
+                        && !line.starts_with('>')
+                        && !(line.starts_with("On ") && line.ends_with("wrote:"))
+                })
                 .unwrap_or("");
             let first: String = first.chars().take(160).collect();
             let time = chrono::DateTime::from_timestamp(*at, 0)
@@ -1234,7 +1238,7 @@ mod tests {
             e(
                 "zulip-2.txt",
                 200,
-                "Subject: [t_one] Zulip message\n\nSecond thing",
+                "Subject: [t_one] Zulip message\n\nOn Monday please do X",
             ),
             e(
                 "zulip-1.txt",
@@ -1266,7 +1270,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            lines[1].ends_with("[t_one] manager_mail/zulip-2.txt: Second thing"),
+            lines[1].ends_with("[t_one] manager_mail/zulip-2.txt: On Monday please do X"),
             "{out}"
         );
     }
