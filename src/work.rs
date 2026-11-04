@@ -48,11 +48,16 @@ impl Problem {
 
 /// Whether a task's record says an agent should be working at its address.
 pub fn expects_agent(task: &Task) -> bool {
-    task.address() != "retired" && task.field("agent_stopped") != Some("true")
+    task.status() != "blocked"
+        && task.address() != "retired"
+        && task.field("agent_stopped") != Some("true")
 }
 
 /// The problem of an active task whose agent is in `state`: gone, failed, stuck, or idle with open items.
 pub fn problem_of(task: &Task, state: &str) -> Option<Problem> {
+    if !expects_agent(task) {
+        return None;
+    }
     match state {
         "missing" => Some(Problem::Missing),
         "error" => Some(Problem::Error),
@@ -527,7 +532,7 @@ pub mod tests {
             &[],
             "",
         );
-        assert!(expects_agent(&idle) && expects_agent(&blocked) && !expects_agent(&retired));
+        assert!(expects_agent(&idle) && !expects_agent(&blocked) && !expects_agent(&retired));
     }
 
     #[test]

@@ -578,6 +578,9 @@ pub fn nudges(
     let mut nudges = Vec::new();
     let mut now = BTreeSet::new();
     for (task, problem, evidence) in found {
+        if !crate::work::expects_agent(task) {
+            continue;
+        }
         if *problem == Problem::Idle {
             let ready = crate::requests::ready_items(task);
             if ready.is_empty() {

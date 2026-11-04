@@ -39,9 +39,7 @@ pub struct Request {
 /// Open items that can progress; legacy items without request records remain ready.
 // 🧑 "change amh s.t. \"blocking\" status is per-task instead of per-agent"
 pub fn ready_items(task: &Task) -> Vec<&str> {
-    let Ok(records) = read(task) else {
-        return Vec::new();
-    };
+    let records = read(task).unwrap_or_default();
     task.items
         .iter()
         .filter(|item| {
@@ -456,9 +454,9 @@ mod tests {
         crate::tasks::add_item(&mut owner, "independent work", false)?;
         let all = [owner.clone(), dependency.clone()];
         wait(&mut owner, &waiting, std::slice::from_ref(&blocker), &all)?;
-        crate::tasks::set_status(&mut owner, "blocked", Some("legacy blocker"))?;
+        crate::tasks::set_status(&mut owner, "long_running", Some("legacy blocker"))?;
         let mut owner = Task::parse(&owner.name, &owner.render())?;
-        assert_eq!(owner.status(), "blocked");
+        assert_eq!(owner.status(), "long_running");
         assert_eq!(owner.field("blocked_on"), Some("legacy blocker"));
         assert!(crate::work::expects_agent(&owner));
         assert_eq!(ready_items(&owner), ["independent work"]);
@@ -480,6 +478,27 @@ mod tests {
             matches!(&nudges[..], [crate::decide::Nudge::Remind { text, .. }]
             if text.contains("independent work") && !text.contains("deliver the requested change"))
         );
+        let reminded = std::collections::BTreeMap::from([(owner.name.clone(), 0)]);
+        let (nudges, _) = crate::decide::nudges(
+            &found,
+            &Default::default(),
+            &[owner.clone()],
+            &reminded,
+            9,
+            |_| 10,
+        )
+        .ok_or("unexpected unavailable runtime")?;
+        assert!(nudges.is_empty());
+        let (nudges, _) = crate::decide::nudges(
+            &found,
+            &Default::default(),
+            &[owner.clone()],
+            &reminded,
+            10,
+            |_| 10,
+        )
+        .ok_or("unexpected unavailable runtime")?;
+        assert!(matches!(&nudges[..], [crate::decide::Nudge::Remind { .. }]));
         finish(&mut owner, "independent work", "delivered")?;
         assert!(ready_items(&owner).is_empty());
         assert_eq!(crate::work::problem_of(&owner, "ready"), None);
@@ -517,7 +536,53 @@ mod tests {
         owner
             .fields
             .retain(|(key, value)| key != KEY || value == "invalid");
-        assert!(ready_items(&owner).is_empty());
+        assert_eq!(ready_items(&owner), owner.items);
+        let found = [(owner.clone(), crate::work::Problem::Idle, String::new())];
+        let (nudges, _) = crate::decide::nudges(
+            &found,
+            &Default::default(),
+            &[owner.clone()],
+            &Default::default(),
+            0,
+            |_| 1,
+        )
+        .ok_or("unexpected unavailable runtime")?;
+        assert!(matches!(&nudges[..], [crate::decide::Nudge::Remind { .. }]));
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_whole_task_pause_still_suppresses_reminders_and_reports() -> Result<(), String> {
+        let owner = Task::parse(
+            "legacy.md",
+            "---\nstatus: blocked\nblocked_on: human review\nrunat: omnigent://legacy\npending_task_items:\n  - legacy work\n---\n",
+        )?;
+        assert!(!crate::work::expects_agent(&owner));
+        for (state, problem) in [
+            ("ready", crate::work::Problem::Idle),
+            ("missing", crate::work::Problem::Missing),
+            ("error", crate::work::Problem::Error),
+            ("stuck", crate::work::Problem::Stuck),
+        ] {
+            assert_eq!(crate::work::problem_of(&owner, state), None);
+            let (nudges, _) = crate::decide::nudges(
+                &[(owner.clone(), problem, String::new())],
+                &Default::default(),
+                std::slice::from_ref(&owner),
+                &Default::default(),
+                0,
+                |_| 1,
+            )
+            .ok_or("unexpected unavailable runtime")?;
+            assert!(nudges.is_empty());
+        }
+        let mut owner = owner;
+        crate::tasks::set_status(&mut owner, "long_running", Some("legacy wait"))?;
+        assert_eq!(ready_items(&owner), ["legacy work"]);
+        assert_eq!(
+            crate::work::problem_of(&owner, "ready"),
+            Some(crate::work::Problem::Idle)
+        );
         Ok(())
     }
 
