@@ -1035,6 +1035,24 @@ pub fn run(values: &Value) -> Result<u8, String> {
             store.place(&task)?;
             String::new()
         }
+        // 🧑 "Organize everything and improve amh to give a company-like structure where human is CEO."
+        ("task", "role") => {
+            let _lock = store.lock()?;
+            let mut task = store.load(need("task"))?;
+            let wanted = if need("role") == "manager" {
+                "true"
+            } else {
+                "false"
+            };
+            match task.fields.iter_mut().find(|(key, _)| key == "is_manager") {
+                Some((_, value)) => *value = wanted.to_owned(),
+                None => task
+                    .fields
+                    .push(("is_manager".to_owned(), wanted.to_owned())),
+            }
+            store.save(&task)?;
+            format!("{} is now recorded as a {}\n", task.name, need("role"))
+        }
         ("task", "adopt") => {
             let _lock = store.lock()?;
             let caller = store.own(text("task_file"))?;

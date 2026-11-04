@@ -422,6 +422,17 @@ fn plain_list_entries_survive_exports_and_task_placement() -> Result<(), Box<dyn
     fs::write(root.join("TODO.md"), "stale export")?;
     workspace.ok(&add)?;
     assert_eq!(fs::read_to_string(root.join("TODO.md"))?, expected);
+    workspace.ok(&["task", "role", "a", "manager"])?;
+    let promoted = fs::read_to_string(root.join("a.md"))?;
+    assert!(
+        promoted.contains("is_manager: 'true'")
+            || promoted.contains("is_manager: \"true\"")
+            || promoted.contains("is_manager: true"),
+        "{promoted}"
+    );
+    assert!(promoted.contains("status: running") && promoted.contains("runat: omnigent://a"));
+    workspace.ok(&["task", "role", "a", "worker"])?;
+    assert!(fs::read_to_string(root.join("a.md"))?.contains("false"));
     workspace.ok(&["task", "place", "a", "--under", "low priority"])?;
     let placed = fs::read_to_string(root.join("TODO.md"))?;
     assert!(placed.contains(&format!("- {entry}")));
