@@ -127,6 +127,10 @@ pub fn consolidation_reminder(
     if settings::get(settings, "zulip.consolidation_reminder") == "false" {
         return Ok(String::new());
     }
+    // PB report topics stay separate updates, so nothing in them is merged: the `mail::replace_reminder` exemption (commit efc04df).
+    if mail::REPORT_LABELS.contains(&tag) {
+        return Ok(String::new());
+    }
     let bot = api(settings, "GET", "users/me", &[])?["user_id"]
         .as_u64()
         .ok_or("Zulip profile has no user ID")?;
@@ -159,6 +163,9 @@ pub fn consolidation_reminder(
         .ok_or("Zulip response has no messages")?;
     // 🧑 "some agents have more than one unread messages sitting in my inbox. Why are they not notified to compress them?"
     const NEWEST: usize = 20;
+    if current_is_report(messages, current) {
+        return Ok(String::new());
+    }
     let prior = retained_updates(messages, bot, tag, current);
     let mut ids = Vec::new();
     for id in prior
@@ -182,6 +189,25 @@ pub fn consolidation_reminder(
     ))
 }
 
+/// Whether the message's header line `[tag] title` has a PB report label as its title, as `mail::is_report` decides for an email subject.
+fn is_report_update(message: &Value) -> bool {
+    let header = message["content"]
+        .as_str()
+        .and_then(|body| body.lines().next());
+    header.is_some_and(|line| mail::is_report(line.trim_end()))
+}
+
+/// Whether the message just sent, `current`, is a PB report, which is never merged.
+fn current_is_report(messages: &[Value], current: &str) -> bool {
+    messages.iter().any(|message| {
+        message["id"]
+            .as_u64()
+            .is_some_and(|id| format!("zulip:{id}") == current)
+            && is_report_update(message)
+    })
+}
+
+/// The bot's earlier updates of the task, except PB reports, which stay separate and are never merged.
 fn retained_updates(messages: &[Value], bot: u64, tag: &str, current: &str) -> Vec<Value> {
     messages
         .iter()
@@ -193,6 +219,7 @@ fn retained_updates(messages: &[Value], bot: u64, tag: &str, current: &str) -> V
                 && message["content"]
                     .as_str()
                     .is_some_and(|body| body.starts_with(&format!("[{tag}] ")))
+                && !is_report_update(message)
         })
         .cloned()
         .collect()
@@ -689,6 +716,41 @@ mod tests {
             retained_updates(&messages, 7, "task", "zulip:4"),
             vec![messages[0].clone()]
         );
+    }
+    #[test]
+    fn pb_report_topics_get_no_merge_reminder_offline() {
+        // No settings: any Zulip request would fail on missing credentials, so `Ok("")` proves none was made.
+        for label in mail::REPORT_LABELS {
+            assert_eq!(
+                consolidation_reminder(&Settings::new(), label, "zulip:1"),
+                Ok(String::new())
+            );
+        }
+        let error = consolidation_reminder(&Settings::new(), "task", "zulip:1").unwrap_err();
+        assert!(error.contains("cannot read Zulip credentials"), "{error}");
+    }
+    #[test]
+    fn consolidation_leaves_pb_reports_unmerged() {
+        let messages = vec![
+            json!({"id":1,"sender_id":7,"content":"[task] pb news\n\nreport"}),
+            json!({"id":2,"sender_id":7,"content":"[task] Progress\n\nsee [x] pb news"}),
+            json!({"id":3,"sender_id":7,"content":"[task] pb urgent"}),
+            json!({"id":4,"sender_id":7,"content":"[task] pb new\n\nold label"}),
+            json!({"id":5,"sender_id":7,"content":"[task] Next"}),
+            json!({"id":6,"sender_id":7,"content":"[task] pb news\n\nreport"}),
+        ];
+        // Only the first line decides: a label in the body does not make an update a report.
+        assert_eq!(
+            retained_updates(&messages, 7, "task", "zulip:5"),
+            vec![messages[1].clone()]
+        );
+        assert!(!current_is_report(&messages, "zulip:5"));
+        assert!(!current_is_report(&messages, "zulip:2"));
+        for current in ["zulip:1", "zulip:3", "zulip:4", "zulip:6"] {
+            assert!(current_is_report(&messages, current), "{current}");
+        }
+        assert!(!current_is_report(&messages, "zulip:99"));
+        assert!(!current_is_report(&[], "zulip:1"));
     }
     #[test]
     fn direct_and_quoted_task_replies_route() {
