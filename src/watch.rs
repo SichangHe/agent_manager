@@ -418,6 +418,21 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+/// Hold the watcher's lifetime lock, or fail when another watcher already holds it.
+fn watcher_lock(state_dir: &std::path::Path) -> Result<fs::File, String> {
+    let failed = |error: std::io::Error| format!("amh watch: cannot lock: {error}");
+    fs::create_dir_all(state_dir).map_err(failed)?;
+    let lock = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(state_dir.join("amh-watch.lock"))
+        .map_err(failed)?;
+    lock.try_lock()
+        .map_err(|_| "amh watch: another watcher is already running; exiting".to_owned())?;
+    Ok(lock)
+}
+
 /// Commit the task notification and receipt before changing the external mailbox.
 fn route_mail(
     store: &Store,
@@ -1178,6 +1193,14 @@ pub fn run() -> u8 {
     let mut last_zulip_cleanup: Option<Instant> = None;
     let mut last_commit: Option<Instant> = None;
     let mut last_poll: Option<Instant> = None;
+    // Only one watcher may run: request notifications are read and sent without the amh lock, so a second watcher would send them twice.
+    let _single = match watcher_lock(&settings::state_dir()) {
+        Ok(lock) => lock,
+        Err(error) => {
+            log(&error);
+            return 1;
+        }
+    };
     let wake = match crate::wake::listen(&settings::state_dir()) {
         Ok(socket) => Some(socket),
         Err(error) => {
@@ -1289,5 +1312,20 @@ pub fn run() -> u8 {
             }
             None => thread::sleep(timeout),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_watcher_holds_the_lock() {
+        let dir = std::env::temp_dir().join(format!("amh-watch-lock-{}", std::process::id()));
+        let first = watcher_lock(&dir).unwrap();
+        assert!(watcher_lock(&dir).unwrap_err().contains("already running"));
+        drop(first);
+        assert!(watcher_lock(&dir).is_ok());
+        let _ = fs::remove_dir_all(&dir);
     }
 }
