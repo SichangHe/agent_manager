@@ -126,6 +126,53 @@ pub fn stored_mail(subject: &str, body: &str) -> String {
     format!("Subject: {subject}\n\n{body}")
 }
 
+/// What the human wrote since `since_unix`, across all tasks, oldest first: one line per stored message with its local time, task tag, file and first own line.
+///
+/// `entries` are the stored mail files as name, modification time (Unix seconds) and text. Only the human's Zulip messages (`zulip-*.txt`) and emails (`HASH-N.txt`) count; routed notifications and other files do not. Quoted lines (`>`) are skipped, so a reply shows what the human added.
+// 🧑 "maybe we need to strengthen tooling + prompts for human manager so they always get all the recent stuffs the human has sent for context before compiling the list?"
+pub fn recent_human(entries: &[(String, i64, String)], since_unix: i64) -> String {
+    let human = |name: &str| {
+        let stem = name.strip_suffix(".txt").unwrap_or("");
+        let email = stem.split_once('-').is_some_and(|(hash, n)| {
+            hash.len() == 12
+                && hash.chars().all(|c| c.is_ascii_hexdigit())
+                && n.chars().all(|c| c.is_ascii_digit())
+                && !n.is_empty()
+        });
+        stem.starts_with("zulip-") || email
+    };
+    let mut kept: Vec<&(String, i64, String)> = entries
+        .iter()
+        .filter(|(name, at, _)| *at >= since_unix && human(name))
+        .collect();
+    kept.sort_by_key(|(name, at, _)| (*at, name.clone()));
+    kept.iter()
+        .map(|(name, at, text)| {
+            let subject = text
+                .lines()
+                .find_map(|line| line.strip_prefix("Subject: "))
+                .unwrap_or("");
+            let tag = crate::mail::tag_of(subject).unwrap_or("-");
+            let first = text
+                .split_once("\n\n")
+                .map_or("", |(_, body)| body)
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('>') && !line.starts_with("On "))
+                .unwrap_or("");
+            let first: String = first.chars().take(160).collect();
+            let time = chrono::DateTime::from_timestamp(*at, 0)
+                .map(|t| {
+                    t.with_timezone(&chrono::Local)
+                        .format("%m-%d %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            format!("{time} [{tag}] manager_mail/{name}: {first}\n")
+        })
+        .collect()
+}
+
 /// A routed notification file `routed-KIND-GENERATION-UID.txt` and its text as mailbox kind, UID generation, UID, and receipt key.
 pub fn routed_mail(name: &str, text: &str) -> Result<(String, u32, String, String), String> {
     let bad = || {
@@ -1179,6 +1226,50 @@ mod tests {
     use crate::work::tests::task;
 
     const MAIN: &str = "omnigent://main";
+
+    #[test]
+    fn recent_human_lists_only_the_human_s_own_messages_since_the_cutoff() {
+        let e = |name: &str, at: i64, text: &str| (name.to_owned(), at, text.to_owned());
+        let entries = [
+            e(
+                "zulip-2.txt",
+                200,
+                "Subject: [t_one] Zulip message\n\nSecond thing",
+            ),
+            e(
+                "zulip-1.txt",
+                100,
+                "Subject: [t_one] Zulip message\n\nToo old",
+            ),
+            e(
+                "85c5dff58359-26.txt",
+                150,
+                "Subject: Re: [t_two] pb news\n\nRegister for this\n\nOn Tue someone wrote:\n> quoted",
+            ),
+            e(
+                "routed-human-1-9.txt",
+                160,
+                "From: x\nSubject: CI\n\nnot the human",
+            ),
+            e("vl_x_body.txt", 170, "Subject: [t] x\n\nagent file"),
+            e(
+                "85c5dff58359-edit-3.txt",
+                180,
+                "Subject: [t] x\n\nedit file",
+            ),
+        ];
+        let out = recent_human(&entries, 120);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        assert!(
+            lines[0].ends_with("[t_two] manager_mail/85c5dff58359-26.txt: Register for this"),
+            "{out}"
+        );
+        assert!(
+            lines[1].ends_with("[t_one] manager_mail/zulip-2.txt: Second thing"),
+            "{out}"
+        );
+    }
 
     #[test]
     fn routed_mail_names_its_receipt() {

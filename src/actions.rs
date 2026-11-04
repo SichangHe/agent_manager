@@ -1182,6 +1182,37 @@ pub fn run(values: &Value) -> Result<u8, String> {
             clear_stopped(&store, &at)?;
             String::new()
         }
+        ("mail", "recent") => {
+            let hours: u64 = need("hours")
+                .parse()
+                .map_err(|_| "amh: --hours takes a whole number".to_owned())?;
+            let since = chrono::Utc::now().timestamp() - (hours as i64) * 3600;
+            let dir = store.root.join("manager_mail");
+            let mut entries = Vec::new();
+            for entry in fs::read_dir(&dir)
+                .map_err(|e| format!("amh: cannot read {}: {e}", dir.display()))?
+            {
+                let Ok(entry) = entry else { continue };
+                let Ok(at) = entry.metadata().and_then(|m| m.modified()) else {
+                    continue;
+                };
+                let at = at
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                if at < since {
+                    continue;
+                }
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let text = fs::read_to_string(entry.path()).unwrap_or_default();
+                entries.push((name, at, text));
+            }
+            let out = decide::recent_human(&entries, since);
+            if out.is_empty() {
+                format!("nothing from the human in the last {hours} h\n")
+            } else {
+                out
+            }
+        }
         ("mail", "unread") => {
             let task = store.own(text("task_file"))?;
             if crate::zulip::enabled(&settings) {
