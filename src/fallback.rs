@@ -777,7 +777,7 @@ enum Attempt {
 fn attempt_of(done: &Result<String, String>) -> Attempt {
     match done {
         Ok(_) => Attempt::Ok,
-        Err(error) if error.contains("no agent start slot free") => Attempt::NoSlot,
+        Err(error) if error.contains(omnigent::NO_SLOT) => Attempt::NoSlot,
         Err(_) => Attempt::Failed,
     }
 }
@@ -1136,7 +1136,10 @@ mod tests {
         assert_eq!(late.restarts_s.len(), 1);
         // Managers stay excluded.
         assert_eq!(h.restart("m.md", true, at, true, at), Restart::Manager);
-        assert_eq!(attempt_of(&Err("amh: no agent start slot free this minute (2 per minute on the machine); retried later".into())), Attempt::NoSlot);
+        assert_eq!(
+            attempt_of(&Err(format!("amh: {}", omnigent::NO_SLOT))),
+            Attempt::NoSlot
+        );
         assert_eq!(
             attempt_of(&Err(
                 "amh: the manager's session has no model_override".into()
