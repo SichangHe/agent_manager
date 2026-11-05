@@ -32,6 +32,10 @@ const MAX_SWAPS_H: usize = 3;
 /// Attempts per failed swap, `RETRY_SWAP_S` apart.
 const MAX_TRIES: u32 = 3;
 const RETRY_SWAP_S: i64 = 900;
+/// A restart refused only because no agent start slot was free is retried this soon: slots free up within a minute.
+const SLOT_RETRY_S: i64 = 60;
+/// Slot-refused restarts of one failure are retried for at most this long, then left to the normal backoff.
+const SLOT_RETRY_FOR_S: i64 = 1800;
 /// Same-tool restarts per task per hour, attempts included; separate from `MAX_SWAPS_H`.
 const MAX_RESTARTS_H: usize = 3;
 /// The attempts value of a restart that worked.
@@ -238,7 +242,26 @@ impl Health {
     }
 
     /// Note a restart attempt of `task` for its failure at `at_s`; a failed one stays retryable with backoff.
-    fn restarted(&mut self, task: &str, at_s: i64, ok: bool, now_s: i64) {
+    ///
+    /// A refusal only for want of a start slot started nothing: it uses no attempt and no hourly restart, and is due again after `SLOT_RETRY_S` (for up to `SLOT_RETRY_FOR_S` after the failure).
+    fn restarted(&mut self, task: &str, at_s: i64, outcome: Attempt, now_s: i64) {
+        if outcome == Attempt::NoSlot && now_s - at_s < SLOT_RETRY_FOR_S {
+            let tries = self
+                .restart_tries
+                .iter()
+                .find(|t| t.0 == task && t.1 == at_s)
+                .map_or(0, |t| t.2);
+            self.restart_tries.retain(|t| !(t.0 == task && t.1 == at_s));
+            // Stored as if the last real attempt was long enough ago that the next is due after SLOT_RETRY_S.
+            self.restart_tries.push((
+                task.to_owned(),
+                at_s,
+                tries,
+                now_s + SLOT_RETRY_S - RETRY_SWAP_S,
+            ));
+            return;
+        }
+        let ok = outcome == Attempt::Ok;
         self.restarts_s.push((task.to_owned(), now_s));
         let tries = self
             .restart_tries
@@ -707,9 +730,14 @@ pub fn watch(
                 let reason = format!("because its Codex session failed ({counts})");
                 let message = "Your previous session failed on a provider error (429 or dropped stream). Continue the task.";
                 let done = agents::replace(settings, store, &task.name, message, None, &reason);
-                health.restarted(&task.name, at_s, done.is_ok(), now_s);
+                let attempt = attempt_of(&done);
+                health.restarted(&task.name, at_s, attempt, now_s);
                 logs.push(match done {
                     Ok(new) => format!("{}: {counts}; restarted on Codex as {new}", task.name),
+                    Err(error) if attempt == Attempt::NoSlot => format!(
+                        "{}: {counts}; restart on Codex waits for a start slot (retried in {SLOT_RETRY_S} s): {error}",
+                        task.name
+                    ),
                     Err(error) => format!(
                         "{}: {counts}; restart on Codex failed (retried with backoff): {error}",
                         task.name
@@ -734,6 +762,24 @@ pub fn watch(
         logs.push(format!("cannot write the codex health record: {error}"));
     }
     logs
+}
+
+/// The result of one restart attempt.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Attempt {
+    Ok,
+    /// Refused only because no agent start slot was free; nothing was started.
+    NoSlot,
+    Failed,
+}
+
+/// Classify a restart result; a missing start slot is recognized by `omnigent`'s message.
+fn attempt_of(done: &Result<String, String>) -> Attempt {
+    match done {
+        Ok(_) => Attempt::Ok,
+        Err(error) if error.contains("no agent start slot free") => Attempt::NoSlot,
+        Err(_) => Attempt::Failed,
+    }
 }
 
 #[cfg(test)]
@@ -972,7 +1018,7 @@ mod tests {
         h.refused.push("agent0".to_owned());
         h.swaps_s.push(5);
         h.swap_tries.push(("agent0".to_owned(), 10, 2, 50));
-        h.restarted("agent0", 10, false, 60);
+        h.restarted("agent0", 10, Attempt::Failed, 60);
         h.tell_once("cap:agent0".to_owned(), 70);
         let back =
             Health::from_json(&serde_json::from_str(&h.to_json().to_string()).unwrap_or_default());
@@ -1006,7 +1052,7 @@ mod tests {
         let mut h = Health::default();
         assert!(h.record("t.md", 100, false, 100));
         assert_eq!(h.restart("t.md", false, 100, true, 101), Restart::Go);
-        h.restarted("t.md", 100, true, 101);
+        h.restarted("t.md", 100, Attempt::Ok, 101);
         assert!(
             !h.record("t.md", 100, false, 160),
             "same failure is not fresh"
@@ -1029,7 +1075,7 @@ mod tests {
                 Restart::Go,
                 "restart {i}"
             );
-            h.restarted("t.md", at, true, at);
+            h.restarted("t.md", at, Attempt::Ok, at);
         }
         h.record("t.md", 400, false, 400);
         assert_eq!(h.restart("t.md", false, 400, true, 400), Restart::Capped);
@@ -1045,17 +1091,73 @@ mod tests {
     }
 
     #[test]
+    fn a_start_slot_refusal_is_retried_within_a_minute_without_using_attempts() {
+        // As seen live for cx_builtins.md (15:46) and vl_cx_engine_hunt.md (17:14): the restart was refused for a start slot.
+        let mut h = Health::default();
+        let at = 100;
+        assert_eq!(h.restart("t.md", false, at, true, at), Restart::Go);
+        h.restarted("t.md", at, Attempt::NoSlot, at);
+        assert_eq!(
+            h.restart("t.md", false, at, false, at + SLOT_RETRY_S - 1),
+            Restart::No
+        );
+        assert_eq!(
+            h.restart("t.md", false, at, false, at + SLOT_RETRY_S),
+            Restart::Go
+        );
+        // Many slot refusals use neither attempts nor the hourly cap.
+        for k in 1..20 {
+            h.restarted("t.md", at, Attempt::NoSlot, at + k * SLOT_RETRY_S);
+        }
+        assert!(h.restarts_s.is_empty());
+        assert_eq!(
+            h.restart("t.md", false, at, false, at + 20 * SLOT_RETRY_S),
+            Restart::Go
+        );
+        // A real failure after that still uses the long backoff.
+        h.restarted("t.md", at, Attempt::Failed, at + 20 * SLOT_RETRY_S);
+        assert_eq!(
+            h.restart("t.md", false, at, false, at + 21 * SLOT_RETRY_S),
+            Restart::No
+        );
+        assert_eq!(
+            h.restart(
+                "t.md",
+                false,
+                at,
+                false,
+                at + 20 * SLOT_RETRY_S + RETRY_SWAP_S
+            ),
+            Restart::Go
+        );
+        // Past SLOT_RETRY_FOR_S a slot refusal counts as a normal failed attempt.
+        let mut late = Health::default();
+        late.restarted("u.md", at, Attempt::NoSlot, at + SLOT_RETRY_FOR_S);
+        assert_eq!(late.restarts_s.len(), 1);
+        // Managers stay excluded.
+        assert_eq!(h.restart("m.md", true, at, true, at), Restart::Manager);
+        assert_eq!(attempt_of(&Err("amh: no agent start slot free this minute (2 per minute on the machine); retried later".into())), Attempt::NoSlot);
+        assert_eq!(
+            attempt_of(&Err(
+                "amh: the manager's session has no model_override".into()
+            )),
+            Attempt::Failed
+        );
+        assert_eq!(attempt_of(&Ok("omnigent://new".into())), Attempt::Ok);
+    }
+
+    #[test]
     fn a_failed_restart_is_retried_with_backoff_up_to_a_limit() {
         let mut h = Health::default();
         h.record("t.md", 100, false, 100);
-        h.restarted("t.md", 100, false, 100);
+        h.restarted("t.md", 100, Attempt::Failed, 100);
         assert_eq!(h.restart("t.md", false, 100, false, 101), Restart::No);
         assert_eq!(
             h.restart("t.md", false, 100, false, 100 + RETRY_SWAP_S),
             Restart::Go
         );
-        h.restarted("t.md", 100, false, 100 + RETRY_SWAP_S);
-        h.restarted("t.md", 100, false, 100 + 2 * RETRY_SWAP_S);
+        h.restarted("t.md", 100, Attempt::Failed, 100 + RETRY_SWAP_S);
+        h.restarted("t.md", 100, Attempt::Failed, 100 + 2 * RETRY_SWAP_S);
         assert_eq!(
             h.restart("t.md", false, 100, false, 100 + 4 * RETRY_SWAP_S),
             Restart::GaveUp,
@@ -1068,7 +1170,12 @@ mod tests {
         let mut h = Health::default();
         h.record("t.md", 100, false, 100);
         for k in 0..MAX_TRIES {
-            h.restarted("t.md", 100, false, 100 + i64::from(k) * RETRY_SWAP_S);
+            h.restarted(
+                "t.md",
+                100,
+                Attempt::Failed,
+                100 + i64::from(k) * RETRY_SWAP_S,
+            );
         }
         assert_eq!(h.restart("t.md", false, 100, false, 200), Restart::GaveUp);
         assert!(h.tell_once("gaveup:t.md:100".to_owned(), 200));
