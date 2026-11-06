@@ -178,6 +178,35 @@ pub fn recent_human(entries: &[(String, i64, String)], since_unix: i64) -> Strin
 }
 
 /// A routed notification file `routed-KIND-GENERATION-UID.txt` and its text as mailbox kind, UID generation, UID, and receipt key.
+/// Names of routed notification files `routed-KIND-GENERATION-UID.txt` mentioned in `text`.
+pub fn routed_names(text: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, _) in text.match_indices("routed-") {
+        let name: String = text[at..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '.')
+            .collect();
+        let name = name.trim_end_matches('.');
+        let name = match name.find(".txt") {
+            Some(end) => &name[..end + 4],
+            None => continue,
+        };
+        if routed_mail(name, "").is_ok() && !names.iter().any(|n: &String| n == name) {
+            names.push(name.to_owned());
+        }
+    }
+    names
+}
+
+#[test]
+fn finds_routed_names() {
+    assert_eq!(
+        routed_names("see manager_mail/routed-human-1-26695.txt, and routed-agent-2-7.txt."),
+        vec!["routed-human-1-26695.txt", "routed-agent-2-7.txt"]
+    );
+    assert!(routed_names("routed-x.txt routed-").is_empty());
+}
+
 pub fn routed_mail(name: &str, text: &str) -> Result<(String, u32, String, String), String> {
     let bad = || {
         format!("amh: {name} is not a routed notification file `routed-KIND-GENERATION-UID.txt`")

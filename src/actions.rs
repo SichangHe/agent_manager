@@ -777,6 +777,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
             omnigent::send(&settings, &to, &message).map_err(failed)?;
             let _lock = store.lock()?;
             clear_stopped(&store, &to)?;
+            // mdbook_pr3086.md: "routing ownership should match the task that handles them"
+            if need("who").ends_with(".md") {
+                hand_over_mail(&store, text("task_file"), need("who"), &message)?;
+            }
             String::new()
         }
         ("tell", "guest") => tell_guest(
@@ -1268,7 +1272,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let owner = database.mail_owner(&key)?;
             if owner.as_deref() != Some(task.name.as_str()) {
                 return Err(format!(
-                    "amh: {name} was not routed to {} (recorded owner: {})",
+                    "amh: {name} was not routed to {} (recorded owner: {}); the owner hands it over by naming the file in `amh tell agent` to your task",
                     task.name,
                     owner.as_deref().unwrap_or("none")
                 ));
@@ -1353,4 +1357,29 @@ mod zulip_followup_tests {
             Ok(String::new())
         );
     }
+}
+
+/// A routed email named in a forwarded message now belongs to the receiving task, so it can run `amh mail done`.
+/// Only the sender that owns it, or anyone for a receipt with no recorded owner, hands it over.
+fn hand_over_mail(
+    store: &Store,
+    sender: Option<&str>,
+    receiver: &str,
+    message: &str,
+) -> Result<(), String> {
+    let sender = store.own(sender).ok().map(|task| task.name.clone());
+    let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+    for name in decide::routed_names(message) {
+        let Ok(stored) = fs::read_to_string(store.root.join("manager_mail").join(&name)) else {
+            continue;
+        };
+        let Ok((_, _, _, key)) = decide::routed_mail(&name, &stored) else {
+            continue;
+        };
+        let owner = database.mail_owner(&key)?;
+        if owner.is_none() || owner == sender {
+            database.set_mail_owner(&key, receiver)?;
+        }
+    }
+    Ok(())
 }

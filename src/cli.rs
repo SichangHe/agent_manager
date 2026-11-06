@@ -231,7 +231,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("because").long("because").required(true).value_name("WORDS").help("the human's own words saying no email is needed"))
             )
             // 🧑 "If agents handled certain emails they should be marked read."
-            .subcommand(Command::new("done").about("Mark an email routed to your task read, after you handled it.").long_about("Mark an email routed to your task read, after you handled it.\n\nOnly the task the route delivered it to may do this. Run it only after actually handling the email; routes keep emails unread until then.")
+            .subcommand(Command::new("done").about("Mark an email routed to your task read, after you handled it.").long_about("Mark an email routed to your task read, after you handled it.\n\nOnly the task the route delivered it to may do this, or a task it forwarded the email to by naming the file in `amh tell agent`. Run it only after actually handling the email; routes keep emails unread until then.")
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
                 .arg(Arg::new("mail").required(true).value_name("MAIL.txt").help("the routed email's file, as in the notification, e.g. `manager_mail/routed-human-1-26558.txt`"))
             )

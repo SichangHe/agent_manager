@@ -288,6 +288,12 @@ impl Database {
         }
     }
 
+    /// Make `owner` the task that handles a received mail, as when its owner forwards it.
+    pub fn set_mail_owner(&self, key: &str, owner: &str) -> Result<(), String> {
+        self.0.execute("INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![format!("mail:{key}"), owner]).map_err(error)?;
+        Ok(())
+    }
+
     pub fn set_cursor(&self, key: &str, id: i64) -> Result<(), String> {
         self.0.execute("INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, id.to_string()]).map_err(error)?;
         Ok(())
