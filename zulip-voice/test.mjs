@@ -15,6 +15,9 @@ try{
   const errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(origin);
+  await page.locator('body.reader-layout').waitFor();
+  assert.ok((await page.locator('#messages').boundingBox()).height>664*0.7);
+  await page.getByRole('button',{name:'Compose',exact:true}).click();
   await page.locator('#draft').fill('A draft for the manager');
   await page.locator('#agent').selectOption('quals');
   assert.equal(await page.locator('#draft').inputValue(),'');
@@ -46,7 +49,7 @@ try{
   assert.equal(await page.locator('#listen').isEnabled(),true);
   await page.unroute('**/api/messages?*');
   await page.locator('#listen').click();
-  await page.getByText('Quals assistant (mock): This is a mock conversation.',{exact:false}).waitFor();
+  await page.getByText('This is a mock conversation.',{exact:false}).waitFor();
   assert.deepEqual(errors,[]);
   assert.deepEqual(routeReply('Hello\n[switch: missing]',[{id:'quals'}]),{text:'Hello',switchTo:null,notice:'Unknown conversation: missing'});
   assert.equal(await page.locator('#choose').isVisible(),false);
@@ -65,26 +68,31 @@ try{
   assert.equal(await page.locator('#auto').getAttribute('aria-pressed'),'true');
   await page.locator('#auto').click();
   assert.equal(await page.locator('#auto').getAttribute('aria-pressed'),'false');
+  for(const event of history.events)await fetch(origin+'/api/read',{method:'POST',headers:{Origin:origin,'Content-Type':'application/json'},body:JSON.stringify({id:event.id})});
   await page.evaluate(()=>{
     window.spoken=[];window.currentSpeech=null;
-    Object.defineProperty(window,'speechSynthesis',{value:{speaking:false,pending:false,
-      speak(u){this.speaking=true;window.currentSpeech=u;window.spoken.push(u.text);},
-      cancel(){this.speaking=false;window.currentSpeech=null;}
-    }});
-    window.finishSpeech=()=>{const u=window.currentSpeech;window.currentSpeech=null;speechSynthesis.speaking=false;u?.onend();};
+    const original=window.fetch;
+    window.fetch=async(path,options)=>{if(path==='/api/tts'){window.spoken.push(JSON.parse(options.body).text);return new Response(new Blob(['audio'],{type:'audio/wav'}));}return original(path,options);};
+    HTMLMediaElement.prototype.play=async function(){window.currentSpeech=this;};
+    Object.defineProperty(HTMLMediaElement.prototype,'src',{set(){},get(){return '';}});
+    HTMLMediaElement.prototype.pause=function(){window.currentSpeech=null;};
+    window.finishSpeech=()=>{const u=window.currentSpeech;window.currentSpeech=null;u?.onended();};
   });
+  await page.locator('#agent').selectOption('manager');
   await page.locator('#auto').click();
+  await page.waitForFunction(()=>window.currentSpeech?.onended&&window.spoken.length===1);
   await page.evaluate(()=>window.finishSpeech());
   await post({id:crypto.randomUUID(),agent:'manager',text:'First queued reply'});
-  await post({id:crypto.randomUUID(),agent:'quals',text:'Second queued reply'});
+  await post({id:crypto.randomUUID(),agent:'quals',text:'Other conversation must stay silent'});
+  await post({id:crypto.randomUUID(),agent:'manager',text:'Second queued reply'});
   await page.waitForFunction(()=>window.spoken.length===2);
-  assert.match(await page.evaluate(()=>window.spoken[1]),/^Main manager/);
+  assert.match(await page.evaluate(()=>window.spoken[1]),/Main manager/);
   await page.locator('#draft').fill('Interrupt playback with a draft');
   await page.waitForFunction(()=>window.spoken.length===3);
   assert.equal(await page.evaluate(()=>window.spoken[1]===window.spoken[2]),true);
   await page.evaluate(()=>window.finishSpeech());
   await page.waitForFunction(()=>window.spoken.length===4);
-  assert.match(await page.evaluate(()=>window.spoken[3]),/^Quals assistant/);
+  assert.match(await page.evaluate(()=>window.spoken[3]),/Main manager/);
   await page.locator('#auto').click();
   assert.equal(await page.evaluate(()=>window.currentSpeech),null);
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

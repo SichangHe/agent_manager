@@ -23,6 +23,11 @@ globalThis.fetch=async (address,options)=>{
   if(path==='users/me')data={user_id:humanId,is_bot:humanIsBot};
   else if(path==='users/20')data={user:{user_id:20,is_bot:agentIsBot}};
   else if(path==='users/me/30/topics')data={topics:structuredClone(topics)};
+  else if(path==='messages/flags'){
+    assert.equal(options.body.get('flag'),'read');assert.equal(options.body.get('op'),'add');
+    for(const id of JSON.parse(options.body.get('messages')))channel.find(m=>m.id===id).flags=['read'];
+    data={};
+  }
   else if(path==='messages'&&options.method==='POST'){
     posts++;
     assert.equal(options.body.get('to'),'30');
@@ -36,7 +41,9 @@ globalThis.fetch=async (address,options)=>{
     assert.deepEqual(narrow[0],{operator:'stream',operand:30});
     const topic=narrow.find(n=>n.operator==='topic')?.operand;
     let messages=channel.filter(m=>!topic||m.subject===topic);
-    if(query.get('anchor')==='newest')messages=messages.slice(-Number(query.get('num_before')));
+    if(narrow.some(n=>n.operator==='is'&&n.operand==='unread'))messages=messages.filter(m=>!m.flags?.includes('read')&&m.sender_id===20);
+    if(query.get('anchor')==='oldest')messages=messages.slice(0,100);
+    else if(query.get('anchor')==='newest')messages=messages.slice(-Number(query.get('num_before')));
     else{
       assert.equal(query.get('include_anchor'),'false');
       assert.ok(Number(query.get('num_after'))<=100);
@@ -71,6 +78,11 @@ try{
   assert.ok((await live.send({id:'bad',agent:'missing',text:'No'})).error);
   assert.equal(requests.length,count);
   assert.deepEqual((await live.events(null)).data,{cursor:100,events:[]});
+  assert.deepEqual((await live.unread()).data.map(m=>m.id),[100]);
+  assert.equal((await live.messages('newer')).data[0].unread,true);
+  await live.markRead(100);
+  assert.deepEqual((await live.unread()).data,[]);
+  assert.equal((await live.messages('newer')).data[0].unread,false);
   channel.push(...Array.from({length:105},(_,i)=>({id:101+i,sender_id:i%3===0?20:i%3===1?10:99,subject:'older',content:'Reply '+i})));
   topics=[{name:'older',max_id:205},{name:'newer',max_id:100}];
   const first=(await live.events(100)).data;

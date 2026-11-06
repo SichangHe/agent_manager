@@ -1,0 +1,25 @@
+/* 🧑 "Too much junk and too small a scrollbox of the messages. Should be mostly messages on screen when not using controls" */
+.reader-layout{padding:3px;gap:3px;overflow:hidden}
+.reader-layout header{display:grid;grid-template-columns:1fr auto;gap:2px 6px;align-items:center}
+.reader-layout h1{display:none}
+.reader-layout header label,.reader-layout header>.actions{display:none}
+.reader-layout #agent{grid-column:1;grid-row:1;min-height:40px;padding:4px;font-size:16px}
+.reader-layout #mode{grid-column:2;grid-row:1;font-size:10px;max-width:85px}
+.reader-layout main{gap:3px}
+.reader-layout section:first-child{position:relative;padding:3px 6px}
+.reader-layout #messages{overscroll-behavior:contain;overflow-anchor:none;line-height:1.5;scrollbar-gutter:stable}
+.reader-layout article{padding:8px 0;white-space:pre-wrap;overflow-wrap:anywhere}
+.reader-speaker{font-size:12px;color:#46606e;margin-bottom:2px;white-space:normal}
+.reader-sentence{border-radius:3px;cursor:pointer}
+.reader-sentence:hover{background:#e7f1f2}
+.reader-sentence.reading{background:#ffdf80;color:#172a34;box-shadow:0 0 0 2px #ffdf80}
+.reader-sentence:focus-visible{outline:2px solid #135b66;outline-offset:2px}
+.reader-follow{position:absolute;right:8px;top:8px;z-index:1;background:#fff;box-shadow:0 2px 8px #0002;min-height:38px!important}
+.reader-layout [hidden]{display:none!important}
+.reader-dock{display:flex;flex-shrink:0;gap:3px;padding-bottom:env(safe-area-inset-bottom,0px)}
+.reader-dock button{flex:1;min-width:0;min-height:44px;padding:4px;font-size:14px}
+.reader-layout section:last-child{flex-shrink:0;max-height:45dvh;overflow:auto}
+.reader-layout textarea{height:70px;min-height:50px;max-height:18dvh}
+.reader-layout .note{display:none}
+.reader-layout #status{margin:2px 0}
+@media(min-width:800px){.reader-layout{max-width:960px;margin:auto}.reader-layout #mode{max-width:none}.reader-dock button{flex:none;min-width:110px}}

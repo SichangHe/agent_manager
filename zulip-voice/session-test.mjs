@@ -5,6 +5,10 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {createSessionAuth} from './session.mjs';
 import {createServer} from './server.mjs';
+import {routeReply} from './server.mjs';
+
+assert.equal(routeReply('[switch: main_mgr.md]',[{id:'main_mgr'}]).switchTo,'main_mgr');
+assert.equal(routeReply('[switch: main_mgr]',[{id:'main_mgr'}]).switchTo,'main_mgr');
 
 const directory=await mkdtemp(join(tmpdir(),'voice-auth-'));
 const tokenPath=join(directory,'token');

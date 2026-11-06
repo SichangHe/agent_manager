@@ -6,14 +6,21 @@
 - "Spawn an agent to investigate and propose solutions and work on promising solutions autonomously."
 
 proposed prototype
+- current interaction and recovery: `playback.md`
 - mock replies may contain `[switch: TASK]` on a separate line
   - backend strips routing lines and emits validated conversation switches; unknown IDs produce a notice
-  - page switches, announces the destination, and reads its latest agent reply
+  - page switches and announces the destination; autoplay reads only unread replies
   - mock mentioning another conversation name emits its switch line
-- auto-play toggle queues new agent replies across conversations in arrival order
+- auto-play toggle queues Zulip unread agent replies in the open conversation, oldest first
+  - read flags saved after completed playback; failed writes retry without repeating audio
+  - stopped/interrupted messages stay unread; Stop audio also disables autoplay
+  - first-line `[task]` titles omitted from reading
+  - tap a sentence to reread from there; reading from the start marks the complete message read
   - polling pauses while dictating, sending, or hidden; resumes from its cursor
   - iOS playback after polling still needs phone validation
-- compact viewport layout scrolls the transcript; bottom controls hide on transcript scroll up and return on down/bottom
+- compact viewport layout reserves most space for messages; Compose expands controls
+  - sentence highlighting follows actual playback; manual scrolling pauses following
+  - reader details: `reader-ui.md`
 - mock SSH forwarding accepts `localhost`, `127.0.0.1`, and `[::1]` with any port
   - submissions require an HTTP origin matching the request host exactly
   - configured deployment host remains accepted; live host and authentication checks are unchanged
@@ -28,14 +35,15 @@ proposed prototype
 - private HTTPS page through Tailscale Serve
 - selected agent remains visible above conversation and draft
   - tap selection and agent reply routing replace the hidden spoken agent picker
-- browser speech recognition composes a draft
+- server speech recognition composes a draft from browser MediaRecorder audio
   - unsupported browsers use keyboard dictation
 - review reads recipient and draft aloud
   - separate confirmation recognizer accepts only send or cancel
   - transcript containing the word send never sends during composition
 - changing agent restores that agent's draft and stops recognition and playback
-- replies use browser speech synthesis
+- replies use server Kokoro speech through a shared browser audio player
   - explicit playback starts from user interaction
+  - worker setup, format checks and measured limits: `audio.md`
 - mock conversations first
   - visibly labeled; no Zulip credentials or network writes
 - local server owns allowed recipients and submission receipts
@@ -50,13 +58,13 @@ integration discovery
   - "one topic per task tag preserves independent task threads"
   - "replies route by topic without requiring a task header"
 - optional native human Zulip API adapter in `zulip.mjs`
-  - server-side human credential provisioning remains unresolved
+  - human credentials stay server-side
   - startup checks `users/me` against configured human ID and rejects bots
   - fixed channel ID and configured exact task topics determine recipients
   - reads newest replies on playback; sends appear as the human in Zulip
 - 🧑 "Make the real thing. We test in prod"
   - `node auto-live.mjs` waits for credentials, validates identity read-only, then stops `zulip-voice-ssh-8769` and serves live on loopback8769
-    - invalid credentials leave mock running; steering agent receives failures and activation token path
+    - invalid credentials leave mock running; steering agent receives failures and activation status
     - bind failure restarts mock; watcher needs the user systemd bus and `amh` in PATH
   - `node ssh-live.mjs` runs live on loopback port 8769 through an SSH tunnel
   - private inputs under `~/.config/zulip-voice/`
@@ -67,12 +75,10 @@ integration discovery
   - topics discovered from the configured channel and ordered by newest message
   - only configured human and verified bot appear in history; only that bot can trigger switches
   - reply events use a forward cursor across all channel messages; initial connection skips old events
-  - `private/login-token`, mode `0600`, contains a single-use token
-    - open `http://127.0.0.1:8769/?t=TOKEN` through the tunnel
-    - rotates on use and redirects to `/` with an HttpOnly, SameSite=Strict session cookie
-    - sessions expire after 12 hours or process restart; every API requires the cookie
-    - token never enters the application bundle; login responses disable caching/referrers
-    - other local users cannot read the private token file; same Unix user remains trusted
+  - 🧑 "Rid the secret. I don't see a point. We are already inside VPN"
+    - SSH mode requires no login token or session cookie; startup deletes the old token file
+    - local processes that can reach the listener can access it; SSH access is the deployment boundary
+  - switch targets accept an optional `.md` suffix
   - loopback host aliases and exact request Origin remain required
   - this entry point replaces Tailscale identity authentication only for SSH deployment
 - run `node server.mjs` with Node 22
@@ -84,9 +90,9 @@ integration discovery
   - live adapter reserves submission IDs in private durable files before network writes
     - retries return completed receipt or uncertain status; never resend
     - ambiguous errors require checking the actual Zulip topic
-- running deployment uses transient user service `zulip-voice-mock`
-  - survives this terminal; does not survive reboot
-  - stop with `systemctl --user stop zulip-voice-mock`
+- running SSH deployment uses enabled persistent user services `zulip-voice-auto-live` and `zulip-voice-audio`
+  - user lingering enabled; startup after an actual reboot remains untested
+  - stop with `systemctl --user stop zulip-voice-auto-live zulip-voice-audio`
 - mock deployment grants no authorization for live human input
   - legacy `VOICE_CONFIG` deployment requires exact configured `Tailscale-User-Login` on every request
   - Serve removes client-supplied identity headers; loopback remains trusted

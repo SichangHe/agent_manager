@@ -71,15 +71,26 @@ async function connect(configPath,zuliprcPath) {
   const topics=await refresh();if(topics.error)return topics;
   const known=agent=>config.conversations.some(c=>c.id===agent);
   return {data:{
+    scope:config.site+':'+config.humanId,
     conversations:config.conversations,
     refresh,
     authorize:headers=>!zuliprcPath&&headers['tailscale-user-login']===config.tailscaleLogin,
-    async messages(agent){
+    async messages(agent,anchor='newest'){
       if(!known(agent))return {error:'Unknown Zulip task topic.'};
-      const result=await request('GET','messages',{anchor:'newest',num_before:'30',num_after:'0',apply_markdown:'false',narrow:JSON.stringify([{operator:'stream',operand:config.streamId},{operator:'topic',operand:agent}])});
+      const result=await request('GET','messages',{anchor:String(anchor),num_before:anchor==='newest'?'30':'15',num_after:anchor==='newest'?'0':'15',apply_markdown:'false',narrow:JSON.stringify([{operator:'stream',operand:config.streamId},{operator:'topic',operand:agent}])});
       if(result.error)return result;
       if(!Array.isArray(result.data.messages))return {error:'Unexpected Zulip message response.'};
-      return {data:result.data.messages.filter(m=>m.sender_id===config.humanId||m.sender_id===config.botId).map(m=>({id:m.id,sender:m.sender_id===config.humanId?'human':'agent',text:m.content}))};
+      return {data:result.data.messages.filter(m=>m.sender_id===config.humanId||m.sender_id===config.botId).map(m=>({id:m.id,sender:m.sender_id===config.humanId?'human':'agent',text:m.content,unread:!m.flags?.includes('read')}))};
+    },
+    async unread(agent){
+      if(agent&&!known(agent))return {error:'Unknown Zulip task topic.'};
+      const result=await request('GET','messages',{anchor:'oldest',num_before:'0',num_after:'100',apply_markdown:'false',narrow:JSON.stringify([{operator:'stream',operand:config.streamId},{operator:'sender',operand:config.botId},{operator:'is',operand:'unread'},...(agent?[{operator:'topic',operand:agent}]:[])])});
+      if(result.error)return result;
+      return {data:result.data.messages.filter(m=>m.sender_id===config.botId&&known(m.subject)).map(m=>({id:m.id,agent:m.subject,text:m.content,unread:true}))};
+    },
+    async markRead(id){
+      if(!Number.isSafeInteger(id)||id<1)return {error:'Invalid message ID.'};
+      return request('POST','messages/flags',{messages:JSON.stringify([id]),op:'add',flag:'read'});
     },
     async events(after){
       if(after!==null&&(!Number.isSafeInteger(after)||after<0))return {error:'Invalid Zulip event cursor.'};
