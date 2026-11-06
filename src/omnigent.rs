@@ -27,36 +27,54 @@ pub static NO_WAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBoo
 
 fn start_slot() -> Result<(), String> {
     let path = crate::settings::state_dir().join("amh-starts.json");
+    // 🤖 vl_catchup.md: a burst of wakes left `amh task start` waiting 5+ min; waiters are served in arrival order.
+    let queue_path = path.with_extension("queue.json");
+    let me = std::process::id();
+    let wait = !NO_WAIT.load(std::sync::atomic::Ordering::Relaxed);
     let given_up = Instant::now() + Duration::from_secs(1800);
     loop {
         let lock = std::fs::File::create(path.with_extension("lock"))
             .map_err(|e| format!("cannot open the start lock: {e}"))?;
         lock.lock()
             .map_err(|e| format!("cannot lock the start record: {e}"))?;
+        let mut queue: Vec<u32> = std::fs::read_to_string(&queue_path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default();
+        queue.retain(|pid| *pid == me || std::path::Path::new(&format!("/proc/{pid}")).exists());
+        if wait && !queue.contains(&me) {
+            queue.push(me);
+        }
         let now_s = chrono::Utc::now().timestamp();
         let mut starts: Vec<i64> = std::fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         starts.retain(|at| now_s - at < 60);
-        if starts.len() < STARTS_PER_MIN {
+        let my_turn = queue.first().is_none_or(|head| *head == me);
+        let outcome = if starts.len() < STARTS_PER_MIN && my_turn {
             starts.push(now_s);
+            queue.retain(|pid| *pid != me);
             crate::taskfile::write(&path, &json!(starts).to_string())
-                .map_err(|e| format!("cannot write the start record: {e}"))?;
-            return Ok(());
-        }
+                .map_err(|e| format!("cannot write the start record: {e}"))
+                .map(|()| true)
+        } else if !wait {
+            Err(NO_SLOT.to_owned())
+        } else if Instant::now() >= given_up {
+            queue.retain(|pid| *pid != me);
+            Err("waited 30 min for a start slot; the machine allows 2 agent starts per minute"
+                .to_owned())
+        } else {
+            Ok(false)
+        };
+        crate::taskfile::write(&queue_path, &json!(queue).to_string())
+            .map_err(|e| format!("cannot write the start queue: {e}"))?;
         drop(lock);
-        if NO_WAIT.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(NO_SLOT.to_owned());
+        match outcome {
+            Ok(true) => break Ok(()),
+            Ok(false) => std::thread::sleep(Duration::from_secs(1)),
+            Err(error) => break Err(error),
         }
-        if Instant::now() >= given_up {
-            return Err(
-                "waited 30 min for a start slot; the machine allows 2 agent starts per minute"
-                    .to_owned(),
-            );
-        }
-        let wait_s = (starts.iter().min().copied().unwrap_or(now_s) + 60 - now_s).max(1);
-        std::thread::sleep(Duration::from_secs(wait_s as u64));
     }
 }
 
