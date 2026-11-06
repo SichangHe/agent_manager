@@ -5,10 +5,11 @@
 <title>Zulip voice · mock prototype</title>
 <style>
 :root{font:18px system-ui;color:#162b37;background:#edf3f5}body{max-width:740px;margin:auto;padding:20px}header{position:sticky;top:0;background:#edf3f5;padding:12px 0}h1{font-size:1.6rem;margin:0}label{display:block;margin:16px 0 6px}button,select,textarea{font:inherit;border:1px solid #90a5af;border-radius:12px;padding:14px}button{background:white;cursor:pointer;min-height:52px}button.primary{background:#135b66;color:white}button:disabled{opacity:.45;cursor:default}select,textarea{width:100%;box-sizing:border-box}textarea{min-height:130px}section{background:white;border-radius:18px;padding:18px;margin-top:16px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}.note{font-size:.9rem;color:#46606e}#status{min-height:2.7em}article{border-bottom:1px solid #dae4e8;padding:12px 0;white-space:pre-wrap}article:last-child{border:0}#mode{color:#905400}button:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #10898c;outline-offset:3px}
+*{box-sizing:border-box}body{margin:0;padding:4px;height:100vh;height:100dvh;max-width:none;display:flex;flex-direction:column;gap:4px;font-size:16px}header{position:static;padding:0}h1{font-size:17px}#mode{font-size:12px;margin:0}label{margin:2px 0}button,select,textarea{padding:6px;border-radius:6px}button{min-height:42px}main{display:flex;flex-direction:column;flex:1;min-height:0;gap:4px}section{padding:4px;margin:0;border-radius:6px}section:first-child{display:flex;flex-direction:column;flex:1;min-height:0}#messages{overflow:auto;flex:1;min-height:30px}textarea{min-height:64px;height:64px;max-height:20dvh}.actions{gap:4px;margin-top:2px}#status{min-height:18px;max-height:46px;overflow:auto;font-size:13px;margin:3px 0}.note{font-size:12px;margin:0}article{padding:5px 0}#choose{display:none}button[aria-pressed=true]{background:#135b66;color:white}
 </style>
 <header><h1>Zulip voice</h1><p id="mode">Mock conversations · nothing goes to Zulip</p><label for="agent">Talking to</label><select id="agent"></select><div class="actions"><button id="choose">Choose agent by voice</button></div></header>
 <main>
-<section><div class="actions"><button id="listen">Read replies</button><button id="quiet">Stop audio</button></div><div id="messages" aria-label="Conversation"></div></section>
+<section><div class="actions"><button id="auto" aria-pressed="false">Auto-play: off</button><button id="listen">Read replies</button><button id="quiet">Stop audio</button></div><div id="messages" aria-label="Conversation"></div></section>
 <section><label for="draft">Your message</label><textarea id="draft" placeholder="Tap Dictate, or use your keyboard microphone."></textarea><div class="actions"><button id="dictate" class="primary">Dictate</button><button id="stop" disabled>Finish dictating</button><button id="review">Review aloud</button><button id="send">Send mock message</button></div><p id="status" role="status" aria-live="polite">Choose an agent, then dictate a draft.</p><p class="note">Voice confirmation: after review, say “send” or “cancel”. Keep the page open. Your browser may use an online speech service.</p></section>
 </main>
 <script type="module">
@@ -17,9 +18,69 @@ const Recognition = window.isSecureContext && (window.SpeechRecognition || windo
 const submissionId=()=>Array.from(crypto.getRandomValues(new Uint8Array(18)),byte=>byte.toString(16).padStart(2,'0')).join('');
 let recognition, generation=0, busy=false, pending=null, conversations=[], messages=[], recording=false, loaded=false, loading=false, drafts={}, mock=true, ready=false;
 const status = text=>{el.status.textContent=text;};
+const composer=document.querySelector('section:last-child');
+composer.prepend(document.querySelector('section:first-child .actions'));
+let transcriptTop=0;
+// 🧑 "All the buttons should be kind of sticky unless scrolling up to read the transcript"
+el.messages.addEventListener('scroll',()=>{
+  const top=el.messages.scrollTop,bottom=el.messages.scrollHeight-top-el.messages.clientHeight<12;
+  if(bottom||top>transcriptTop)composer.style.visibility='visible';
+  else if(top<transcriptTop)composer.style.visibility='hidden';
+  transcriptTop=top;
+});
+let autoplay=false,eventCursor=null,polling=false;
+const autoplayQueue=[];
+let autoplaySpeaking=false;
+function playQueued(){
+  if(!autoplay||autoplaySpeaking||recording||busy||document.hidden||!autoplayQueue.length||!window.speechSynthesis||speechSynthesis.speaking||speechSynthesis.pending)return;
+  autoplaySpeaking=true;
+  const finished=()=>{autoplayQueue.shift();autoplaySpeaking=false;playQueued();};
+  speak(autoplayQueue[0],finished,finished);
+}
+const autoButton=document.getElementById('auto');
+// 🧑 "A button that automatically plays everything new received" ... "Should be a toggle"
+autoButton.onclick=()=>{autoplay=!autoplay;cancelAudio();if(!autoplay)autoplayQueue.length=0;autoButton.textContent='Auto-play: '+(autoplay?'on':'off');autoButton.setAttribute('aria-pressed',String(autoplay));if(autoplay)speak('Auto-play on.',playQueued);};
+// 🧑 "allow agents to produce some fixed texts that would make the backend do the switch to another agent specified"
+async function pollEvents(){
+  if(!ready||polling||busy||recording||document.hidden)return;
+  polling=true;
+  try{
+    const result=await api('/api/events'+(eventCursor===null?'':'?after='+eventCursor));
+    if(result.error){status(result.error);return;}
+    if(busy||recording||document.hidden)return;
+    if(result.data.conversations){
+      const selected=el.agent.value;
+      const next=result.data.conversations;
+      if(JSON.stringify(next)!==JSON.stringify(conversations)){
+        conversations=next;
+        el.agent.replaceChildren(...conversations.map(c=>{const option=document.createElement('option');option.value=c.id;option.textContent=c.name;return option;}));
+        if(conversations.some(c=>c.id===selected))el.agent.value=selected;
+        else{const draft=drafts[el.agent.value];el.draft.value=draft?.text||'';pending=draft?.pending||null;await load();}
+      }
+    }
+    if(eventCursor===null){eventCursor=result.data.cursor;return;}
+    let completed=true;
+    for(const event of result.data.events){
+      if(busy||recording||document.hidden){completed=false;break;}
+      if(autoplay&&event.text)autoplayQueue.push(conversations.find(c=>c.id===event.agent)?.name+'. '+event.text);
+      if(event.notice)status(event.notice);
+      if(event.switchTo){
+        saveDraft();el.agent.value=event.switchTo;
+        const draft=drafts[event.switchTo];pending=draft?.pending||null;el.draft.value=draft?.text||'';saveDraft();
+        await load();
+        const announcement='Switched to '+conversations.find(c=>c.id===event.switchTo).name+'.';
+        status(announcement+(event.notice?' '+event.notice:''));
+        const spoken=announcement+' '+(loaded?messages.filter(m=>m.sender==='agent').at(-1)?.text||'No replies yet.':'Could not load replies.');
+        if(autoplay)autoplayQueue.push(spoken);else speak(spoken);
+      }else if(event.agent===el.agent.value)await load();
+      eventCursor=event.id;
+    }
+    if(completed)eventCursor=result.data.cursor;
+  }finally{polling=false;playQueued();}
+}
 function controls(){el.dictate.disabled=!ready||!Recognition||busy||recording;el.choose.disabled=!ready||!Recognition||busy||recording;el.stop.disabled=!recording;el.review.disabled=!ready||busy||recording||!el.draft.value.trim();el.send.disabled=!ready||busy||recording||!el.draft.value.trim();el.agent.disabled=!ready||busy;el.draft.disabled=!ready||busy||recording;el.listen.disabled=!ready||loading;}
-function cancelAudio(){generation++;recognition?.abort();recognition=null;recording=false;window.speechSynthesis?.cancel();controls();}
-function speak(text,done){if(!window.speechSynthesis){status('Speech playback unavailable. You can read and send the draft.');return;}const token=generation;const utterance=new SpeechSynthesisUtterance(text);utterance.onend=()=>{if(token===generation)done?.();};utterance.onerror=()=>{if(token===generation)status('Audio stopped. Review the draft on screen.');};speechSynthesis.speak(utterance);}
+function cancelAudio(){generation++;recognition?.abort();recognition=null;recording=false;autoplaySpeaking=false;window.speechSynthesis?.cancel();controls();}
+function speak(text,done,failed){if(!window.speechSynthesis){status('Speech playback unavailable. You can read and send the draft.');return;}const token=generation;const utterance=new SpeechSynthesisUtterance(text);utterance.onend=()=>{if(token===generation)done?.();};utterance.onerror=()=>{if(token===generation){status(el.status.textContent+' Audio unavailable; tap Read replies to retry.');failed?.();}};speechSynthesis.speak(utterance);}
 function startRecognition(confirm=false){cancelAudio();if(!Recognition)return;const token=generation;const recipient=el.agent.value;const base=el.draft.value.trim();const r=new Recognition();recognition=r;r.lang=navigator.language||'en-US';r.continuous=!confirm;r.interimResults=!confirm;recording=true;controls();status(confirm?'Say “send” or “cancel”.':'Listening. Tap Finish dictating when ready.');r.onresult=event=>{if(token!==generation||recipient!==el.agent.value)return;const text=Array.from(event.results).map(result=>result[0].transcript).join(' ').trim();if(confirm){const command=text.toLowerCase().replace(/[.!?,]/g,'').trim();cancelAudio();if(command==='send')send();else status(command==='cancel'?'Draft kept. Nothing sent.':'Nothing sent. Say exactly “send”, or use the button.');}else{el.draft.value=[base,text].filter(Boolean).join(' ');pending=null;saveDraft();}};r.onend=()=>{if(token!==generation)return;recording=false;recognition=null;controls();if(!confirm)status('Draft ready. Review aloud or send.');};r.onerror=event=>{if(token===generation)status('Microphone: '+event.error+'. Use keyboard dictation if needed.');};try{r.start();}catch{recording=false;controls();status('Could not start the microphone. Use keyboard dictation.');}}
 function saveDraft(){drafts[el.agent.value]={text:el.draft.value,pending};try{sessionStorage.setItem('voice-draft:'+mock,JSON.stringify({agent:el.agent.value,drafts}));}catch{status('Draft storage unavailable. Keep this page open until sending is resolved.');}}
 async function api(path,body){try{const response=await fetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(20000)});const data=await response.json();return response.ok?{data}:{error:data.error||'Request failed'};}catch{return{error:'Connection lost. Your draft is kept; retry uses the same submission ID.'};}}
@@ -29,7 +90,7 @@ async function load(){const recipient=el.agent.value;loaded=false;loading=true;m
 async function send(){if(!ready||busy||!el.draft.value.trim())return;cancelAudio();const agent=el.agent.value,text=el.draft.value.trim();if(!pending||pending.agent!==agent||pending.text!==text)pending={id:submissionId(),agent,text};saveDraft();busy=true;controls();const result=await api('/api/send',pending);busy=false;if(result.error){status(result.error);controls();return;}pending=null;el.draft.value='';saveDraft();status((mock?'Mock message':'Message')+' delivered to '+conversations.find(c=>c.id===agent).name+'.');await load();controls();}
 el.dictate.onclick=()=>startRecognition();
 el.stop.onclick=()=>recognition?.stop();
-el.quiet.onclick=()=>{cancelAudio();status('Audio stopped.');};
+el.quiet.onclick=()=>{cancelAudio();autoplayQueue.length=0;status('Audio stopped.');};
 el.review.onclick=()=>{cancelAudio();const name=conversations.find(c=>c.id===el.agent.value)?.name;speak('To '+name+'. '+el.draft.value+(Recognition?'. Say send or cancel after the microphone starts.':'. Use the send button to send.'),()=>startRecognition(true));};
 el.choose.onclick=()=>{
   cancelAudio();const token=generation;const r=new Recognition();recognition=r;r.lang=navigator.language||'en-US';recording=true;controls();status('Say an agent name: '+conversations.map(c=>c.name.replace(' (mock)','')).join(', ')+'.');
@@ -58,5 +119,8 @@ else{
 }
 if(!Recognition)status('Browser speech recognition unavailable. Use your keyboard microphone to dictate.');
 controls();
+await pollEvents();
+setInterval(pollEvents,1500);
+if(window.visualViewport)window.visualViewport.addEventListener('resize',()=>{document.body.style.height=window.visualViewport.height+'px';});
 </script>
 </html>

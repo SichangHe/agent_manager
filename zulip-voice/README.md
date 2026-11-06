@@ -6,6 +6,17 @@
 - "Spawn an agent to investigate and propose solutions and work on promising solutions autonomously."
 
 proposed prototype
+- mock replies may contain `[switch: TASK]` on a separate line
+  - backend strips routing lines and emits validated conversation switches; unknown IDs produce a notice
+  - page switches, announces the destination, and reads its latest agent reply
+  - mock mentioning another conversation name emits its switch line
+- auto-play toggle queues new agent replies across conversations in arrival order
+  - polling pauses while dictating, sending, or hidden; resumes from its cursor
+  - iOS playback after polling still needs phone validation
+- compact viewport layout scrolls the transcript; bottom controls hide on transcript scroll up and return on down/bottom
+- mock SSH forwarding accepts `localhost`, `127.0.0.1`, and `[::1]` with any port
+  - submissions require an HTTP origin matching the request host exactly
+  - configured deployment host remains accepted; live host and authentication checks are unchanged
 - private IP fallback: `node ip-mock.mjs`
   - binds only this machine's Tailscale IPv4 address, port 8768
   - always mock; ignores live credentials
@@ -16,7 +27,7 @@ proposed prototype
   - validate Arc Search and Arc on actual devices before claiming compatibility
 - private HTTPS page through Tailscale Serve
 - selected agent remains visible above conversation and draft
-  - spoken agent selection accepts exact displayed names, without the mock suffix
+  - tap selection and agent reply routing replace the hidden spoken agent picker
 - browser speech recognition composes a draft
   - unsupported browsers use keyboard dictation
 - review reads recipient and draft aloud
@@ -43,6 +54,27 @@ integration discovery
   - startup checks `users/me` against configured human ID and rejects bots
   - fixed channel ID and configured exact task topics determine recipients
   - reads newest replies on playback; sends appear as the human in Zulip
+- 🧑 "Make the real thing. We test in prod"
+  - `node auto-live.mjs` waits for credentials, validates identity read-only, then stops `zulip-voice-ssh-8769` and serves live on loopback8769
+    - invalid credentials leave mock running; steering agent receives failures and activation token path
+    - bind failure restarts mock; watcher needs the user systemd bus and `amh` in PATH
+  - `node ssh-live.mjs` runs live on loopback port 8769 through an SSH tunnel
+  - private inputs under `~/.config/zulip-voice/`
+    - `zuliprc`: standard `[api]` section with `email`, `key`, `site`
+      - service-owned mode `0600`, or human-owned mode `0640` with exact `credentialOwnerUid`/`credentialGroupGid` configured in settings and service membership in that group
+      - human-supplied ownership and permissions are never changed by the app
+    - `settings.json`, mode `0600`: `humanId`, `streamId`, `botId`, `stateDir`, optional credential owner/group IDs above
+  - topics discovered from the configured channel and ordered by newest message
+  - only configured human and verified bot appear in history; only that bot can trigger switches
+  - reply events use a forward cursor across all channel messages; initial connection skips old events
+  - `private/login-token`, mode `0600`, contains a single-use token
+    - open `http://127.0.0.1:8769/?t=TOKEN` through the tunnel
+    - rotates on use and redirects to `/` with an HttpOnly, SameSite=Strict session cookie
+    - sessions expire after 12 hours or process restart; every API requires the cookie
+    - token never enters the application bundle; login responses disable caching/referrers
+    - other local users cannot read the private token file; same Unix user remains trusted
+  - loopback host aliases and exact request Origin remain required
+  - this entry point replaces Tailscale identity authentication only for SSH deployment
 - run `node server.mjs` with Node 22
   - default address `http://127.0.0.1:8767`
   - `VOICE_ORIGIN` sets the exact browser origin when behind private HTTPS
@@ -56,7 +88,7 @@ integration discovery
   - survives this terminal; does not survive reboot
   - stop with `systemctl --user stop zulip-voice-mock`
 - mock deployment grants no authorization for live human input
-  - live adapter requires exact configured `Tailscale-User-Login` on every request
+  - legacy `VOICE_CONFIG` deployment requires exact configured `Tailscale-User-Login` on every request
   - Serve removes client-supplied identity headers; loopback remains trusted
   - tagged client devices have no user identity and are rejected
   - https://tailscale.com/kb/1312/serve#identity-headers
@@ -65,7 +97,7 @@ integration discovery
   - required keys
     - `site`: HTTPS Zulip origin
     - `email`, `apiKey`: human API account credentials; never put into browser or logs
-    - `humanId`, `streamId`: existing numeric human and private task-channel IDs
+    - `humanId`, `streamId`, `botId`: existing numeric human, private task-channel, and agent bot IDs
     - `tailscaleLogin`: exact authorized human tailnet login
     - `stateDir`: private receipt directory outside repository, mode `0700`
     - `conversations`: array of `{ "id": "exact_task_topic", "name": "Spoken agent name" }`
@@ -76,8 +108,12 @@ integration discovery
 - run `node test.mjs` with Playwright installed
   - `PLAYWRIGHT_MODULE` optionally points to an existing Playwright module
   - real Chromium and HTTP server exercise drafts, recipients, lost-response retries, origin and host rejection
+  - also runs session and transport checks
+    - single-use login, cookie gating, loopback aliases, Origin rejection, and reply routing over real HTTP
+    - isolated Zulip API simulations check sender identity, topic routing, cursor pagination, durable receipts, and uncertain-send recovery
+    - simulations never contact Zulip and do not establish real-account or iOS usability
 - device validation remains necessary
-  - actual phone access currently failed: blank page; local browser tests do not establish remote usability
+  - private-network attempts failed; phone SSH forwarding now reaches the mock, with reported voice-picker and layout problems
   - evaluate on the human's phone with Arc Search and laptop with Arc
     - open the shared link, select the intended agent, dictate, correct a word, confirm delivery, listen to its reply
     - record completion, taps, permission prompts, time until usable page, time until transcript and audio, wrong recipients and duplicate sends

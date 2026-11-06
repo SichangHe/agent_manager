@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import {readFile} from 'node:fs/promises';
-import {createServer} from './server.mjs';
+import {createServer,routeReply} from './server.mjs';
+await import('./session-test.mjs');
+await import('./transport-test.mjs');
 const {chromium}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
 const origin='http://127.0.0.1:18767';
 const server=createServer(await readFile(new URL('./index.html',import.meta.url)),origin);
@@ -9,6 +11,7 @@ await new Promise(resolve=>server.listen(18767,'127.0.0.1',resolve));
 const browser=await chromium.launch({headless:true});
 try{
   const page=await browser.newPage();
+  await page.setViewportSize({width:390,height:664});
   const errors=[];
   page.on('pageerror',error=>errors.push(error.message));
   await page.goto(origin);
@@ -45,4 +48,43 @@ try{
   await page.locator('#listen').click();
   await page.getByText('Quals assistant (mock): This is a mock conversation.',{exact:false}).waitFor();
   assert.deepEqual(errors,[]);
+  assert.deepEqual(routeReply('Hello\n[switch: missing]',[{id:'quals'}]),{text:'Hello',switchTo:null,notice:'Unknown conversation: missing'});
+  assert.equal(await page.locator('#choose').isVisible(),false);
+  await page.locator('#agent').selectOption('manager');
+  await page.locator('#draft').fill('Please talk to quals');
+  await page.locator('#send').click();
+  await page.waitForFunction(()=>document.getElementById('agent').value==='quals');
+  assert.equal(await page.locator('#agent').inputValue(),'quals');
+  assert.equal(await page.locator('#messages').innerText().then(t=>t.includes('[switch:')),false);
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollHeight<=innerHeight),true);
+  const history=await (await fetch(origin+'/api/events?after=0')).json();
+  assert.equal(history.events.at(-1).switchTo,'quals');
+  const replay=await (await fetch(origin+'/api/events?after='+history.cursor)).json();
+  assert.equal(replay.events.length,0);
+  await page.locator('#auto').click();
+  assert.equal(await page.locator('#auto').getAttribute('aria-pressed'),'true');
+  await page.locator('#auto').click();
+  assert.equal(await page.locator('#auto').getAttribute('aria-pressed'),'false');
+  await page.evaluate(()=>{
+    window.spoken=[];window.currentSpeech=null;
+    Object.defineProperty(window,'speechSynthesis',{value:{speaking:false,pending:false,
+      speak(u){this.speaking=true;window.currentSpeech=u;window.spoken.push(u.text);},
+      cancel(){this.speaking=false;window.currentSpeech=null;}
+    }});
+    window.finishSpeech=()=>{const u=window.currentSpeech;window.currentSpeech=null;speechSynthesis.speaking=false;u?.onend();};
+  });
+  await page.locator('#auto').click();
+  await page.evaluate(()=>window.finishSpeech());
+  await post({id:crypto.randomUUID(),agent:'manager',text:'First queued reply'});
+  await post({id:crypto.randomUUID(),agent:'quals',text:'Second queued reply'});
+  await page.waitForFunction(()=>window.spoken.length===2);
+  assert.match(await page.evaluate(()=>window.spoken[1]),/^Main manager/);
+  await page.locator('#draft').fill('Interrupt playback with a draft');
+  await page.waitForFunction(()=>window.spoken.length===3);
+  assert.equal(await page.evaluate(()=>window.spoken[1]===window.spoken[2]),true);
+  await page.evaluate(()=>window.finishSpeech());
+  await page.waitForFunction(()=>window.spoken.length===4);
+  assert.match(await page.evaluate(()=>window.spoken[3]),/^Quals assistant/);
+  await page.locator('#auto').click();
+  assert.equal(await page.evaluate(()=>window.currentSpeech),null);
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}
