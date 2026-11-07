@@ -128,7 +128,7 @@ function renderFeed() {
   hasEarlier = hasEarlier && !!current;
   if (hasEarlier) { const b = document.createElement('button'); b.className = 'notice'; b.id = 'earlier'; b.textContent = 'Load earlier messages'; b.onclick = loadEarlier; feed.append(b); }
   const messages = model.messages(current);
-  if (!messages.length) { const d = document.createElement('div'); d.className = 'empty'; d.id = 'empty'; d.textContent = current ? 'No messages yet' : 'Choose an agent'; feed.append(d); }
+  if (!messages.length) { const d = document.createElement('div'); d.className = 'empty'; d.id = 'empty'; d.textContent = !current ? 'Choose an agent' : loading === current ? 'Loading…' : 'No messages yet'; feed.append(d); }
   for (const m of messages) appendMessage(m);
   for (const l of locals.get(current) ?? []) feed.append(localEl(l));
   feed.scrollTop = feed.scrollHeight;
@@ -416,8 +416,27 @@ function switchTopic(topic) {
   hasEarlier = false;
   renderFeed();
   $('picker').close();
-  loadTopic(topic).then(() => { if (current === topic) { renderFeed(); maybeAutoplay(); } });
+  loading = model.messages(topic).length ? null : topic;
+  loadTopicUntilLoaded(topic);
   renderUnread();
+}
+
+let loading = null;
+/** Loads `topic`'s history, retrying with backoff (offline, 429) until it arrives; the feed shows "Loading…" meanwhile, never blank. */
+async function loadTopicUntilLoaded(topic) {
+  for (let attempt = 0; current === topic; attempt++) {
+    const r = await zulip.call('GET', 'messages', {narrow: topicQuery(topic), anchor: 'newest', num_before: 40, num_after: 0, apply_markdown: false});
+    if (r.ok) {
+      for (const m of r.data.messages) model.add(m);
+      model.markLoaded(topic);
+      if (current !== topic) return;
+      hasEarlier = !r.data.found_oldest && r.data.messages.length >= 40;
+      loading = null; renderFeed(); renderUnread(); maybeAutoplay();
+      return;
+    }
+    log('app', `loading ${topic} failed (${r.error}); retry ${attempt + 1}`);
+    await new Promise(res => setTimeout(res, Math.min(1000 * 2 ** attempt, 8000)));
+  }
 }
 
 function runSwitch() {
@@ -714,6 +733,13 @@ async function checkVoice() {
 function persist() { clearTimeout(persist.t); persist.t = setTimeout(() => store.set('voice2-cache', model.snapshot(current)), 800); }
 
 const events = createEvents({zulip, log, eventTypes: ['message', 'update_message_flags'], onInit, onEvent, onState: renderConn});
+
+// Blank-feed watchdog and uncaught errors ship the debug log to the server.
+let lastErrLogMs = 0;
+const reportProblem = why => { if (!cfg.relayStreamId || Date.now() - lastErrLogMs < 60000) return; lastErrLogMs = Date.now(); log('app', 'PROBLEM ' + why); sendLog('problem: ' + why.slice(0, 40)); };
+addEventListener('error', e => reportProblem(e.message));
+addEventListener('unhandledrejection', e => reportProblem(String(e.reason?.message ?? e.reason)));
+setInterval(() => { if (current && !feed.querySelector('.msg, #empty, .notice')) { reportProblem('blank feed'); renderFeed(); } }, 3000);
 
 // ---- start ----
 renderRate(); renderAuto();

@@ -505,6 +505,39 @@ scenarios.dictationBlocksPlayback = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.switchNeverBlank = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('beta', '[beta] B\n\nBeta has history.');
+  await L.agentSays('gamma', '[gamma] G\n\nGamma has history too.');
+  await L.agentSays('alpha', '[alpha] A\n\nAlpha first. Second sentence.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  const filled = (want, ms = 10000) => L.waitFor(p, 'feed shows ' + want, w => document.querySelector('#feed').innerText.includes(w), ms, want);
+  const nonBlank = () => p.evaluate(() => document.querySelector('#feed').innerText.trim().length > 0);
+  try {
+    await filled('Alpha first');
+    // chip switch to an uncached topic, with slow network: loading state, never blank
+    await p.route(/\/api\/v1\/messages\?/, async r => { await L.sleep(2500); r.continue().catch(() => {}); });
+    await p.locator('#agent').tap(); await p.locator('#topics li', {hasText: 'beta'}).tap();
+    assert.ok(await nonBlank(), 'blank right after switch');
+    await filled('Beta has history', 15000);
+    await p.unroute(/\/api\/v1\/messages\?/);
+    // switch while offline: loading state, then history once back online
+    await c.context.setOffline(true);
+    await p.locator('#agent').tap(); await p.locator('#topics li', {hasText: 'gamma'}).tap();
+    await L.sleep(3000);
+    assert.ok(await nonBlank(), 'blank while offline');
+    await c.context.setOffline(false);
+    await filled('Gamma has history', 30000);
+    // [switch: TASK] while playing
+    await p.locator('#auto').tap();
+    await L.agentSays('gamma', '[gamma] H\n\nHanding over now.\n[switch: alpha]');
+    await L.waitFor(p, 'switched', () => window.__voice.current() === 'alpha', 40000);
+    assert.ok(await nonBlank(), 'blank after directive switch');
+    await filled('Alpha first');
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
