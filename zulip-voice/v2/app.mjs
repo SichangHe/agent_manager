@@ -131,9 +131,20 @@ function renderFeed() {
   if (!messages.length) { const d = document.createElement('div'); d.className = 'empty'; d.id = 'empty'; d.textContent = !current ? 'Choose an agent' : loading === current ? 'Loading…' : 'No messages yet'; feed.append(d); }
   for (const m of messages) appendMessage(m);
   for (const l of locals.get(current) ?? []) feed.append(localEl(l));
-  feed.scrollTop = feed.scrollHeight;
+  pinBottom();
   $('agent-name').textContent = current ?? 'Choose agent';
   highlight();
+}
+
+/** Keeps the feed at its end while layout settles (fonts, images, late renders), until the user scrolls. Never leaves scrollTop past the content. */
+let pinUntilMs = 0, pinTimer = 0;
+function pinBottom() {
+  const end = () => { feed.scrollTop = Math.max(0, feed.scrollHeight - feed.clientHeight); };
+  end();
+  pinUntilMs = Date.now() + 2000;
+  cancelAnimationFrame(pinTimer);
+  const tick = () => { if (Date.now() < pinUntilMs && Date.now() - userScrollMs > 300) { end(); pinTimer = requestAnimationFrame(tick); } };
+  pinTimer = requestAnimationFrame(tick);
 }
 
 /** Signed temporary link for an upload (one call, cached for 50 s). */

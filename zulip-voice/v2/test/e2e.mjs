@@ -507,12 +507,18 @@ scenarios.dictationBlocksPlayback = async () => {
 
 scenarios.switchNeverBlank = async ({srv}) => {
   await L.wipeTasks();
-  await L.agentSays('beta', '[beta] B\n\nBeta has history.');
-  await L.agentSays('gamma', '[gamma] G\n\nGamma has history too.');
+  await L.agentSays('beta', '[beta] B\n\nBeta has history.\n\n' + Array.from({length: 25}, (_, i) => `Beta paragraph ${i} filling the screen.`).join('\\n\\n'));
+  await L.agentSays('gamma', '[gamma] G\n\nGamma has history too.\n\n' + Array.from({length: 25}, (_, i) => `Gamma paragraph ${i} filling the screen.`).join('\\n\\n'));
   await L.agentSays('alpha', '[alpha] A\n\nAlpha first. Second sentence.');
   const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
   const p = c.page;
   const filled = (want, ms = 10000) => L.waitFor(p, 'feed shows ' + want, w => document.querySelector('#feed').innerText.includes(w), ms, want);
+  const atEnd = async what => {
+    await L.sleep(2500);
+    const m = await p.evaluate(() => { const f = document.querySelector('#feed'), last = [...f.querySelectorAll('.msg')].at(-1), fb = f.getBoundingClientRect(); return {tall: f.scrollHeight > f.clientHeight + 50, over: f.scrollTop + f.clientHeight - f.scrollHeight, gap: fb.bottom - last.getBoundingClientRect().bottom}; });
+    assert.ok(m.over <= 1, what + ': scrolled past content by ' + m.over);
+    assert.ok(!m.tall || m.gap <= 30, what + ': blank space under last message ' + m.gap);
+  };
   const nonBlank = () => p.evaluate(() => document.querySelector('#feed').innerText.trim().length > 0);
   try {
     await filled('Alpha first');
@@ -521,6 +527,7 @@ scenarios.switchNeverBlank = async ({srv}) => {
     await p.locator('#agent').tap(); await p.locator('#topics li', {hasText: 'beta'}).tap();
     assert.ok(await nonBlank(), 'blank right after switch');
     await filled('Beta has history', 15000);
+    await atEnd('after chip switch');
     await p.unroute(/\/api\/v1\/messages\?/);
     // switch while offline: loading state, then history once back online
     await c.context.setOffline(true);
@@ -529,12 +536,14 @@ scenarios.switchNeverBlank = async ({srv}) => {
     assert.ok(await nonBlank(), 'blank while offline');
     await c.context.setOffline(false);
     await filled('Gamma has history', 30000);
+    await atEnd('after offline switch');
     // [switch: TASK] while playing
     await p.locator('#auto').tap();
     await L.agentSays('gamma', '[gamma] H\n\nHanding over now.\n[switch: alpha]');
-    await L.waitFor(p, 'switched', () => window.__voice.current() === 'alpha', 40000);
+    await L.waitFor(p, 'switched', () => window.__voice.current() === 'alpha', 170000);
     assert.ok(await nonBlank(), 'blank after directive switch');
     await filled('Alpha first');
+    await atEnd('after directive switch');
   } finally { await c.close(); }
 };
 
