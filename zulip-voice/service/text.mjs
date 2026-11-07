@@ -22,9 +22,18 @@ function dropPendingFooters(lines) {
   return out;
 }
 
+/** Zulip uploads linked in `content` as `[name](/user_uploads/...)`; returns the text without them and the list. */
+export function extractAttachments(content) {
+  const attachments = [];
+  const text = content.replace(/!?\[([^\]]*)\]\((\/user_uploads\/[^)\s]+)\)/g, (_, name, uri) => { attachments.push({name: name || decodeURIComponent(uri.split('/').pop()), uri}); return ''; });
+  return {text, attachments};
+}
+
 /** Splits an agent message into `{title, body, switchTo}`: the `[task] title` first line and `[switch: TASK]` lines are not body text. */
 export function parseAgentMessage(content) {
   let switchTo = null;
+  const extracted = extractAttachments(content);
+  content = extracted.text;
   const lines = content.split('\n').filter(line => {
     const match = line.match(/^\[switch: (.+?)\]$/);
     if (match) switchTo = match[1].trim().replace(/\.md$/, '');
@@ -32,7 +41,7 @@ export function parseAgentMessage(content) {
   });
   const text = dropPendingFooters(lines).join('\n');
   const first = text.match(/^\[[^\]\n]+\][^\n]*(?:\n|$)/);
-  return {title: first ? first[0].trim() : '', body: (first ? text.slice(first[0].length) : text).trim(), switchTo};
+  return {title: first ? first[0].trim() : '', body: (first ? text.slice(first[0].length) : text).trim(), switchTo, attachments: extracted.attachments};
 }
 
 /** Markdown-ish blocks: `{kind: 'p'|'li'|'h'|'code', text}`. */

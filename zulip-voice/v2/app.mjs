@@ -5,7 +5,7 @@ import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
 import {createRecorder} from './recorder.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
-import {agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
+import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
 const BUILD = 'v2.0';
 const ACCOUNT_KEY = 'zulip-voice-account';
@@ -136,10 +136,21 @@ function renderFeed() {
   highlight();
 }
 
+/** Signed temporary link for an upload (one call, cached for 50 s). */
+const attCache = new Map();
+async function attUrl(uri) {
+  const hit = attCache.get(uri);
+  if (hit && Date.now() - hit.at < 50000) return hit.r;
+  const z = await zulip.call('GET', uri.slice(1));
+  const r = z.ok ? {ok: true, url: new URL(z.data.url, cfg.site).href} : {ok: false};
+  if (r.ok) attCache.set(uri, {at: Date.now(), r});
+  return r;
+}
+
 function appendMessage(m) {
   feed.querySelector('#empty')?.remove();
   if (els.has(m.id)) return;
-  const node = model.isAgent(m) ? agentEl(m) : mineEl(m.content, 'sent', {});
+  const node = model.isAgent(m) ? agentEl(m, attUrl) : mineEl(m.content, 'sent', {}, attUrl);
   node.dataset.id = m.id;
   els.set(m.id, node);
   if (model.isMine(m)) {   // the server copy replaces the local bubble in the same tick: never two copies on screen
@@ -666,6 +677,8 @@ for (const [id, direction] of [['prev', -1], ['next', 1]]) {
 $('slower').onclick = () => setRate(rate - 0.1);
 $('faster').onclick = () => setRate(rate + 0.1);
 $('auto').onclick = () => setAutoplay(!autoplay);
+$('set-hide-att').checked = hideAllAttachments.on;
+$('set-hide-att').onchange = e => { hideAllAttachments.on = e.target.checked; if (e.target.checked) try { localStorage.removeItem('voice2-att-expanded'); } catch { /* ignore */ } store.set('voice2-hide-att', e.target.checked ? '1' : '0'); try { localStorage.setItem('voice2-hide-att', e.target.checked ? '1' : '0'); } catch { /* ignore */ } renderFeed(); };
 $('set-auto').onchange = e => setAutoplay(e.target.checked);
 $('set-rate').oninput = e => setRate(+e.target.value);
 $('settings').onclick = () => { $('account-text').textContent = `${cfg.email} · ${cfg.site} · ${BUILD}`; $('settings-sheet').showModal(); };

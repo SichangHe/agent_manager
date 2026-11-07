@@ -538,6 +538,32 @@ scenarios.switchNeverBlank = async ({srv}) => {
   } finally { await c.close(); }
 };
 
+scenarios.attachments = async ({srv}) => {
+  await L.wipeTasks();
+  // 1x1 png uploaded by the bot, linked in an agent message; plus a text file
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==', 'base64');
+  const uri = await L.uploadAs('bot', 'shot.png', 'image/png', png), uri2 = await L.uploadAs('bot', 'notes.txt', 'text/plain', Buffer.from('hello'));
+  await L.agentSays('alpha', `[alpha] Files\n\nHere is the screenshot and notes.\n\n[shot.png](${uri})\n[notes.txt](${uri2})`);
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'image loaded', () => { const i = document.querySelector('.att img'); return i && i.complete && i.naturalWidth > 0; }, 20000);
+    assert.equal(await p.locator('.att.chip').count(), 1, 'text file is a chip');
+    assert.ok(!(await p.locator('#feed').innerText()).includes('user_uploads'), 'no raw link text');
+    // swipe collapses the image into a chip
+    await p.locator('.att:not(.chip)').dispatchEvent('touchstart', {touches: [{clientX: 300, clientY: 100}]});
+    await p.locator('.att:not(.chip)').dispatchEvent('touchend', {changedTouches: [{clientX: 100, clientY: 100}]});
+    await L.waitFor(p, 'collapsed', () => document.querySelectorAll('.att.chip').length === 2, 3000);
+    await p.reload();
+    await L.waitFor(p, 'still collapsed after reload', () => document.querySelectorAll('.att.chip').length === 2, 15000);
+    await p.locator('.att.chip .chipbtn', {hasText: 'shot.png'}).tap();
+    await L.waitFor(p, 'expanded', () => document.querySelectorAll('.att img').length === 1, 3000);
+    // global hide
+    await p.locator('#settings').tap(); await p.locator('#set-hide-att').check(); await p.keyboard.press('Escape');
+    await L.waitFor(p, 'all hidden', () => document.querySelectorAll('.att img').length === 0, 3000);
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

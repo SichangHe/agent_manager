@@ -131,3 +131,8 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pr
 #composer.tall #cancel-rec { margin-right: auto; }
 #net { margin: 0 12px 6px; padding: 7px 14px; border-radius: 14px; font-size: 13px; text-align: center; background: color-mix(in srgb, var(--warn) 22%, var(--bg)); }
 #jump { position: absolute; left: 50%; transform: translateX(-50%); bottom: calc(130px + var(--safe-b)); z-index: 6; background: var(--accent); color: var(--accent-fg); padding: 8px 16px; border-radius: 18px; font-weight: 600; box-shadow: 0 2px 10px rgba(0,0,0,.25); }
+
+.atts { margin: 4px 0 8px; display: flex; flex-direction: column; gap: 6px; }
+.msg.mine .atts { align-items: flex-end; }
+.att .attimg { display: block; max-width: 100%; max-height: 50vh; border-radius: 12px; background: var(--panel); min-height: 60px; }
+.att.chip .chipbtn { background: var(--panel); border-radius: 14px; padding: 6px 12px; font-size: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

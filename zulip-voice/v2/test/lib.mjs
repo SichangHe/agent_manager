@@ -101,3 +101,11 @@ export async function serverRead(id, timeoutMs = 8000) {
   for (const start = Date.now(); Date.now() - start < timeoutMs; await sleep(1000)) if ((await flagsOf(id)).includes('read')) return true;
   return false;
 }
+
+/** Uploads bytes as `who`; returns the `/user_uploads/...` uri. */
+export async function uploadAs(who, name, type, bytes) {
+  const [email, key] = who === 'bot' ? [botEnv.ZULIP_BOT_EMAIL, botEnv.ZULIP_BOT_API_KEY] : [account.email, account.key];
+  const f = new FormData(); f.append('file', new Blob([bytes], {type}), name);
+  const r = await fetch(account.site + '/api/v1/user_uploads', {method: 'POST', headers: {Authorization: 'Basic ' + Buffer.from(email + ':' + key).toString('base64')}, body: f});
+  return (await r.json()).uri;
+}
