@@ -67,6 +67,7 @@ export function createRecorder({log, onClip, onLevel}) {
   }
 
   function onFrame(frame) {
+    if (!ctx) return;   // frames still queued in the worklet port after stop()
     const ms = frame.length / ctx.sampleRate * 1000;
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];

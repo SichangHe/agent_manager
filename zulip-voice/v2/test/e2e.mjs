@@ -564,6 +564,43 @@ scenarios.attachments = async ({srv}) => {
   } finally { await c.close(); }
 };
 
+scenarios.pauseResume = async ({srv}) => {
+  await L.wipeTasks();
+  const wav = await L.speechWav('Quick dictation.');
+  const srv2 = await L.serve(undefined, {'/__mic.wav': wav});
+  const c = await L.openClient({url: srv2.url, mic: '/__mic.wav', prefs: {'voice2-topic': 'alpha'}});
+  const p = c.page;
+  const t = () => p.evaluate(() => window.__voice.player.currentTime());
+  try {
+    const id = await L.agentSays('alpha', '[alpha] One\n\n' + 'This single chunk of speech is deliberately long so that it plays for a while. '.repeat(1).trim() + ' It keeps going with some more words to stretch it out a little further.');
+    await L.waitFor(p, 'banner', () => document.querySelector('#banner').innerText.includes('Tap to listen'));
+    await p.locator('#banner').tap();
+    await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing' && window.__voice.player.currentTime() > 1.5, 20000);
+    // resume mid-chunk continues near where it stopped (backs up at most 2 s), never from the chunk start
+    await p.evaluate(() => window.__voice.player.pause());
+    const before = await t();
+    await p.evaluate(() => window.__voice.player.resume());
+    await L.waitFor(p, 'playing again', () => window.__voice.player.snapshot().status === 'playing', 5000);
+    const after = await t();
+    assert.ok(after >= before - 0.3 && after <= before + 1, `resumed at ${after}, paused at ${before}`);
+    // pausing when the chunk is almost heard counts it as heard: resume advances (no replay) and the message is read
+    const paused = await p.evaluate(async () => {
+      const pl = window.__voice.player;
+      for (let i = 0; i < 400; i++) { const el = [...document.querySelectorAll('audio')].find(a => !a.paused); if (el && el.duration && el.currentTime / el.duration > 0.85) { pl.pause(); return true; } await new Promise(r => setTimeout(r, 50)); }
+      return false;
+    });
+    assert.ok(paused, 'caught the chunk near its end');
+    await p.evaluate(() => window.__voice.player.resume());
+    await L.waitFor(p, 'done without replay', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 10000);
+    assert.ok(await L.serverRead(id));
+    assert.equal((await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio\s+start/.test(l)).length, 2, 'started once, plus one mid-chunk resume, no replay after the near-end pause');
+    // rapid dictation start/stop: no errors from late worklet frames
+    for (let i = 0; i < 3; i++) { await p.locator('#mic').tap(); await L.sleep(400); await p.locator('#cancel-rec').tap(); await L.sleep(300); }
+    await L.sleep(1500);
+    assert.deepEqual(c.errors.filter(e => /sampleRate|null is not an object/.test(e)), []);
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

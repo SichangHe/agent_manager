@@ -15,6 +15,8 @@ const STALL_MS = 7000;
 const RETRY_CAP_MS = 8000;
 const N_SLOTS = 6;      // audio elements, each holding one downloaded bundle: the client's audio cache (bytes themselves cannot be read cross-origin)
 const WARM_AHEAD = 3;
+const HEARD_FRACTION = 0.8;
+const RESUME_BACKUP_MS = 2000;
 
 export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStatus}) {
   const slots = Array.from({length: N_SLOTS}, () => ({used: 0, el: Object.assign(new Audio(), {preload: 'auto', playsInline: true}), index: -1, ready: false, bundleId: null, chunk: null}));
@@ -108,7 +110,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   }
 
   /** Once the playing bundle is fully buffered, loads the next bundle into the idle slot so the hand-over is instant and survives a dead network. */
-  let warming = false;
+  let warming = false, pausedMs = null, pausedDone = false;
   async function warmNext() {
     if (warming || !active || status !== 'playing') return;
     const el = active.el;
@@ -148,6 +150,8 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   }
 
   function start(slot, myGen, seekMs, bundle) {
+    if (pausedMs !== null && seekMs !== undefined) { seekMs = Math.max(seekMs, pausedMs - RESUME_BACKUP_MS); }
+    pausedMs = null;
     for (const s of slots) if (s !== slot) s.el.pause();
     active = slot;
     slot.chunk = bundle ? {endMs: bundle.endMs} : null;
@@ -214,8 +218,15 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     play(newItems, startIndex = 0) { items = newItems; clips.clear(); if (status === 'paused') status = 'idle'; playIndex(startIndex); },
     /** Adds items; if the queue had drained, plays the first new one. */
     append(more) { const wasIdle = status === 'idle' && index >= items.length - 1; items = items.concat(more); if (wasIdle && more.length) playIndex(items.length - more.length); else if (status === 'playing') prefetch(index + 1); },
-    pause() { if (status === 'playing' || status === 'loading' || status === 'blocked') { active?.el.pause(); setStatus('paused'); } },
-    resume() { if (status === 'paused') { if (active?.ready) { setStatus('loading'); const myGen = ++gen; start(active, myGen); } else playIndex(index); } else if (status === 'error') playIndex(index); },
+    /** Remembers where in the chunk it stopped; a chunk that was mostly heard counts as heard on resume. */
+    pause() {
+      if (status !== 'playing' && status !== 'loading' && status !== 'blocked') return;
+      const b = status === 'playing' && items[index] ? bundleOf(items[index]) : null;
+      pausedMs = b && active ? active.el.currentTime * 1000 : null;
+      pausedDone = !!b && pausedMs >= b.startMs + HEARD_FRACTION * (b.endMs - b.startMs);
+      active?.el.pause(); setStatus('paused');
+    },
+    resume() { if (status === 'paused') { if (pausedDone) { pausedDone = false; pausedMs = null; if (active) active.chunk = null; itemEnded(); return; } if (active?.ready) { setStatus('loading'); const myGen = ++gen; start(active, myGen); } else playIndex(index); } else if (status === 'error') playIndex(index); },
     retry() { if (status === 'error' || status === 'blocked') playIndex(index); },
     stop() { gen++; for (const s of slots) { s.el.pause(); s.index = -1; s.ready = false; s.bundleId = null; s.chunk = null; } clips.clear(); items = []; index = -1; active = null; setStatus('idle'); },
     setRate(value) { rate = value; for (const s of slots) { s.el.playbackRate = value; s.el.defaultPlaybackRate = value; } },
