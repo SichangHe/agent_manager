@@ -71,7 +71,7 @@ export async function openClient({url, prefs = {}, browserName = process.env.BRO
         const ctx = new AudioContext();
         const buf = await ctx.decodeAudioData(await (await fetch(mic)).arrayBuffer());
         const dest = ctx.createMediaStreamDestination();
-        const src = ctx.createBufferSource(); src.buffer = buf; src.connect(dest); src.start();
+        const src = ctx.createBufferSource(); src.buffer = buf; src.loop = true; src.connect(dest); src.start();   // looped, like a live microphone that keeps producing sound
         return dest.stream;
       };
     }

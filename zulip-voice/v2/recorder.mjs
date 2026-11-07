@@ -9,6 +9,7 @@ const PAUSE_MS = 700;
 const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
 const MIN_LEVEL = 0.012;
+const GRACE_MS = 45000;
 
 const WORKLET = `registerProcessor('cap', class extends AudioWorkletProcessor {
   constructor() { super(); this.buf = new Float32Array(2048); this.n = 0; }
@@ -53,7 +54,7 @@ function resampleToWav(frames, fromHz) {
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export function createRecorder({log, onClip, onLevel}) {
-  let ctx = null, stream = null, node = null, sourceNode = null;
+  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -67,7 +68,7 @@ export function createRecorder({log, onClip, onLevel}) {
   }
 
   function onFrame(frame) {
-    if (!ctx) return;   // frames still queued in the worklet port after stop()
+    if (!ctx || !capturing) return;   // frames after stop(), or while idle in the grace period
     const ms = frame.length / ctx.sampleRate * 1000;
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
@@ -82,41 +83,61 @@ export function createRecorder({log, onClip, onLevel}) {
     if (silentMs >= PAUSE_MS || clipMs >= MAX_CLIP_S * 1000) cut(false);
   }
 
+  /** Builds the context, stream and worklet once; reused by later dictations until `GRACE_MS` after the last one. */
+  async function build() {
+    try { navigator.audioSession.type = 'play-and-record'; } catch { /* unsupported */ }
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const resumed = ctx.resume();
+    stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
+    await resumed;
+    const url = URL.createObjectURL(new Blob([WORKLET], {type: 'text/javascript'}));
+    await ctx.audioWorklet.addModule(url);
+    URL.revokeObjectURL(url);
+    sourceNode = ctx.createMediaStreamSource(stream);
+    node = new AudioWorkletNode(ctx, 'cap');
+    node.connect(ctx.destination);
+    node.port.onmessage = event => onFrame(event.data);
+    sourceNode.connect(node);
+    log('mic', `ready at ${ctx.sampleRate}Hz`);
+  }
+
+  function teardown() {
+    node?.disconnect(); sourceNode?.disconnect();
+    stream?.getTracks().forEach(track => track.stop());
+    ctx?.close().catch(() => {});
+    try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
+    ctx = stream = node = sourceNode = warm = null;
+    log('mic', 'released');
+  }
+
   return {
+    /** Starts capturing at once; the first call also pays the one-time setup. Safe to call repeatedly or during startup. */
     async start() {
+      clearTimeout(idleTimer);
+      if (capturing) return {ok: true};
+      capturing = true;
+      frames = []; preroll = []; speechMs = silentMs = clipMs = 0; clipsOut = 0;
       try {
         try { navigator.audioSession.type = 'play-and-record'; } catch { /* unsupported */ }
-        ctx = new (window.AudioContext || window.webkitAudioContext)();
-        const resumed = ctx.resume();
-        stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
-        await resumed;
-        const url = URL.createObjectURL(new Blob([WORKLET], {type: 'text/javascript'}));
-        await ctx.audioWorklet.addModule(url);
-        URL.revokeObjectURL(url);
-        sourceNode = ctx.createMediaStreamSource(stream);
-        node = new AudioWorkletNode(ctx, 'cap');
-        node.connect(ctx.destination);
-        node.port.onmessage = event => onFrame(event.data);
-        sourceNode.connect(node);
-        frames = []; preroll = []; speechMs = silentMs = clipMs = 0; clipsOut = 0;
-        log('mic', `recording at ${ctx.sampleRate}Hz`);
-        return {ok: true};
+        warm ??= build().catch(error => { teardown(); throw error; });
+        await warm;
+        if (ctx?.state === 'suspended') await ctx.resume();
+        return capturing ? {ok: true} : {ok: false, cancelled: true};
       } catch (error) {
-        this.stop();
+        capturing = false;
         log('mic', `start failed: ${error.name} ${error.message}`);
         return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied. Allow it in Settings > Safari > Microphone.' : `Microphone unavailable (${error.name}).`};
       }
     },
-    /** Emits the last partial clip, then releases the microphone. */
+    /** Emits the last partial clip and stops capturing; the microphone is released after the grace period. Also cancels a startup in progress. */
     stop() {
-      if (ctx && frames.length) cut(true);
-      node?.disconnect(); sourceNode?.disconnect();
-      stream?.getTracks().forEach(track => track.stop());
-      ctx?.close().catch(() => {});
-      try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
-      ctx = stream = node = sourceNode = null;
+      if (capturing && ctx && frames.length) cut(true);
+      capturing = false;
       onLevel?.(0);
+      try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { if (!capturing) teardown(); }, GRACE_MS);
     },
-    active: () => !!ctx,
+    active: () => capturing,
   };
 }

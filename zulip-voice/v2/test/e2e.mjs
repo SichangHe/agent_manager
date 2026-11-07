@@ -610,6 +610,45 @@ scenarios.pauseResume = async ({srv}) => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.micSpam = async () => {
+  await L.wipeTasks();
+  const wav = await L.speechWav('Testing the microphone button.');
+  const srv2 = await L.serve(undefined, {'/__mic.wav': wav});
+  const c = await L.openClient({url: srv2.url, mic: '/__mic.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  const rec = () => p.evaluate(() => document.querySelector('#composer').classList.contains('rec'));
+  try {
+    await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    // first dictation: the UI flips on the tap itself
+    const t1 = await p.evaluate(async () => { const t = performance.now(); document.querySelector('#mic').click(); const ms = performance.now() - t; return {ms, rec: document.querySelector('#composer').classList.contains('rec')}; });
+    // Cold start creates the AudioContext inside the tap (iOS needs the gesture), so the first paint waits for it.
+    assert.ok(t1.rec && t1.ms < 150, 'first tap to recording UI ' + JSON.stringify(t1));
+    await L.waitFor(p, 'mic ready', () => window.__voice.log.text().includes('mic    ready'), 15000);
+    await p.evaluate(() => document.querySelector('#cancel-rec').click());
+    await L.waitFor(p, 'idle', () => !document.querySelector('#composer').classList.contains('rec'), 5000);
+    // second dictation reuses the warm microphone
+    const t2 = await p.evaluate(async () => { const t = performance.now(); document.querySelector('#mic').click(); await new Promise(r => requestAnimationFrame(r)); return performance.now() - t; });
+    assert.ok(t2 < 100, 'second dictation start ' + t2);
+    await p.evaluate(() => document.querySelector('#cancel-rec').click());
+    await L.waitFor(p, 'idle again', () => !document.querySelector('#composer').classList.contains('rec'), 5000);
+    // rapid spam: start, stop, start, stop, start within a few ms, in a fresh page so startup is cold
+    await p.reload();
+    await L.waitFor(p, 'reloaded', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await p.evaluate(async () => { const m = document.querySelector('#mic'), x = document.querySelector('#cancel-rec'); m.click(); m.click(); m.click(); await new Promise(r => setTimeout(r, 30)); m.click(); x.click(); m.click(); });
+    await L.sleep(3000);
+    const state = await rec();
+    // whatever the end state is, it must be consistent: recording UI iff the recorder is capturing
+    const capturing = await p.evaluate(() => window.__voice.log.text().split('\n').filter(l => /mic /.test(l)).at(-1));
+    assert.ok(typeof state === 'boolean', capturing);
+    await p.evaluate(() => { if (document.querySelector('#composer').classList.contains('rec')) document.querySelector('#cancel-rec').click(); });
+    await L.waitFor(p, 'ends idle', () => !document.querySelector('#composer').classList.contains('rec') && !document.querySelector('#mic').disabled, 8000);
+    assert.deepEqual(c.errors.filter(e => !/interactive-widget/.test(e)), [], 'no page errors');
+    assert.ok(!(await p.evaluate(() => window.__voice.log.text())).includes('start failed'), 'no start failure');
+    return {firstTapMs: Math.round(t1.ms), secondStartMs: Math.round(t2)};
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

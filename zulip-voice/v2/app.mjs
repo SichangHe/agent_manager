@@ -502,17 +502,22 @@ function syncDictation() {
   draftEl.scrollTop = draftEl.scrollHeight;
 }
 
+/** The UI flips to recording on the tap itself; microphone setup finishes in the background and a failure reverts it. */
 async function startDictation() {
+  if (dict) return;
   player.unlock();
   if (voiceState.ok === false) toast('Voice service is not responding; dictation may fail');
   const wasPlaying = ['playing', 'loading'].includes(player.position().status);
-  dict = {base: draftEl.value, parts: [], stopping: false, sendAfter: false, cancelled: false, wasPlaying};
-  const r = await recorder.start();
-  if (!r.ok) { dict = null; return toast(r.error); }
+  const mine = dict = {base: draftEl.value, parts: [], stopping: false, sendAfter: false, cancelled: false, wasPlaying};
   if (wasPlaying) player.pause();
   $('composer').classList.add('rec'); $('cancel-rec').hidden = false; $('level').hidden = false;
   draftEl.readOnly = true; $('send').disabled = false; $('mic').setAttribute('aria-label', 'Stop dictation');
   $('send').setAttribute('aria-label', 'Finish and send');
+  const r = await recorder.start();
+  if (r.ok || dict !== mine) return;   // started, or the user already stopped it
+  mine.stopping = true; mine.cancelled = true;
+  if (r.error) toast(r.error);
+  maybeFinish();
 }
 
 function onClip(blob) {
