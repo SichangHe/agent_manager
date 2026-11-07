@@ -1,12 +1,12 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cpu"]
+# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128"]
 # [[tool.uv.index]]
-# name = "pytorch-cpu"
-# url = "https://download.pytorch.org/whl/cpu"
+# name = "pytorch-cuda"
+# url = "https://download.pytorch.org/whl/cu128"
 # explicit = true
 # [tool.uv.sources]
-# torch = { index = "pytorch-cpu" }
+# torch = { index = "pytorch-cuda" }
 # ///
 """Local speech worker; the UI server validates browser requests before proxying."""
 
@@ -14,6 +14,7 @@ import io
 import json
 import os
 import subprocess
+import time
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -28,21 +29,38 @@ MAX_AUDIO_S = 120
 SAMPLE_RATE_HZ = 24000
 
 
-# 🧑 "Use the server to do STT and TTS instead of the client, i.e., send audio around"
+# 🧑 "Use the server to do STT and TTS instead of the client, i.e., send audio around"; "It must not merely run. It has to be performant and run smoothly"
 class Speech:
-    """Keep both models resident; requests run sequentially to bound resource use."""
+    """Own one warmed GPU model per process so dictation never queues behind TTS."""
 
     def __init__(self) -> None:
         torch.set_num_threads(4)
-        self.tts = KPipeline(lang_code="a", repo_id="hexgrad/Kokoro-82M", device="cpu")
-        self.stt = WhisperModel(
-            "small.en", device="cpu", compute_type="int8", cpu_threads=4
-        )
+        self.kind = os.environ.get("VOICE_AUDIO_KIND", "tts")
+        if self.kind not in {"tts", "stt"}:
+            raise ValueError("VOICE_AUDIO_KIND must be tts or stt")
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is required for speech")
+        self.model = os.environ.get("VOICE_STT_MODEL", "small.en")
+        if self.kind == "tts":
+            self.tts = KPipeline(
+                lang_code="a", repo_id="hexgrad/Kokoro-82M", device="cuda"
+            )
+            self.speak("Speech is ready. Please choose your conversation.")
+        else:
+            self.stt = WhisperModel(
+                self.model, device="cuda", compute_type="float16", cpu_threads=4
+            )
+            list(
+                self.stt.transcribe(
+                    np.zeros(16000, dtype=np.float32), language="en", beam_size=1
+                )[0]
+            )
+        torch.cuda.synchronize()
 
     def speak(self, text: str) -> bytes | str:
         """Return a mono WAV or an error, without retaining conversation text."""
         chunks = [
-            result.audio.numpy()
+            result.audio.cpu().numpy()
             for result in self.tts(text, voice="af_heart")
             if result.audio is not None
         ]
@@ -129,7 +147,13 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
                 self.reply(403, {"error": "Use the voice UI server."})
             elif self.path == "/health":
                 self.reply(
-                    200, {"ready": True, "tts": "Kokoro-82M", "stt": "Whisper small.en"}
+                    200,
+                    {
+                        "ready": True,
+                        "kind": speech.kind,
+                        "device": "cuda",
+                        "model": speech.model if speech.kind == "stt" else "Kokoro-82M",
+                    },
                 )
             else:
                 self.reply(404, {"error": "Not found."})
@@ -138,7 +162,7 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
             if not self.allowed():
                 self.reply(403, {"error": "Use the voice UI server."})
                 return
-            if self.path not in {"/tts", "/stt"}:
+            if self.path != f"/{speech.kind}":
                 self.reply(404, {"error": "Not found."})
                 return
             try:
@@ -153,6 +177,7 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
             if len(data) != size:
                 self.reply(400, {"error": "Incomplete request body."})
                 return
+            started_s = time.monotonic()
             try:
                 if self.path == "/tts":
                     request = json.loads(data)
@@ -172,6 +197,17 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
                     {
                         "error": "Speech processing failed; retry this recording or sentence."
                     },
+                )
+            finally:
+                print(
+                    json.dumps(
+                        {
+                            "kind": speech.kind,
+                            "bytes": size,
+                            "duration_ms": round((time.monotonic() - started_s) * 1000),
+                        }
+                    ),
+                    flush=True,
                 )
 
     return Handler

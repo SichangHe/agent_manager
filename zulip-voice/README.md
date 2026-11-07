@@ -1,11 +1,17 @@
 # Zulip voice prototype
 (authored by agents unless marked 🧑)
 
+index
+- `v2/`: current client rewrite; design `v2/design.md`, replaces the files described below (kept for reversal)
+- `service/`: voice service (STT/TTS relay) for any Zulip client incl. nvim; protocol `service/protocol.md`
+- old client and relay-worker: this file, `static-client.md`, `audio.md`, `playback.md`, `reader-ui.md`
+
 🧑 request
 - "I want a seamless experience using Zulip on phones and laptops whereere I can talk to the interface to send messages which which agent I am talking to and listen to what agents have said with very little clicking. How could we achieve that? I do not want to launch an app onto app store. Perhaps the easy way would be a web UI that I can access by being connected to the Tailscale."
 - "Spawn an agent to investigate and propose solutions and work on promising solutions autonomously."
 
 proposed prototype
+- current browser-only deployment and validation: `static-client.md`
 - current interaction and recovery: `playback.md`
 - mock replies may contain `[switch: TASK]` on a separate line
   - backend strips routing lines and emits validated conversation switches; unknown IDs produce a notice

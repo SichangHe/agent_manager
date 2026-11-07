@@ -11,14 +11,14 @@ export async function resilientFetch(url, init={}, {retries=3,baseDelayMs=500,ma
     const abort=()=>controller.abort();
     signal?.addEventListener('abort',abort,{once:true});
     const timer=setTimeout(abort,timeoutMs);
-    let response;
-    try{response=await fetch(url,{...init,signal:controller.signal});}
-    catch{}
+    let response,failure;
+    try{const incoming=await fetch(url,{...init,signal:controller.signal});const body=await incoming.arrayBuffer();response=new Response(body,{status:incoming.status,statusText:incoming.statusText,headers:incoming.headers});}
+    catch(error){failure=error;}
     finally{clearTimeout(timer);signal?.removeEventListener('abort',abort);}
     if(signal?.aborted){await response?.body?.cancel().catch(()=>{});return aborted();}
     const transient=!response||[502,503,504].includes(response.status);
     if(!transient){onState({state:'connected',attempt});return {response};}
-    if(attempt===retries){onState({state:'offline',attempt});return response?{response}:{error:'Connection unavailable. Saved items will retry when connected.',aborted:false,retryable:true};}
+    if(attempt===retries){onState({state:response?'server-error':'offline',attempt});return response?{response}:{error:`${init.method||'GET'} ${String(url).split('?')[0]}: ${failure?.name||'Network error'}: ${failure?.message||'Request timed out'}. Saved item retained.`,aborted:false,retryable:true};}
     await response?.body?.cancel().catch(()=>{});
     const delayMs=Math.min(maxDelayMs,baseDelayMs*2**attempt);
     onState({state:'retrying',attempt:attempt+1,delayMs});

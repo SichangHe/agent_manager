@@ -5,7 +5,7 @@
 <title>Zulip voice · mock prototype</title>
 <style>
 :root{font:18px system-ui;color:#162b37;background:#edf3f5}body{max-width:740px;margin:auto;padding:20px}header{position:sticky;top:0;background:#edf3f5;padding:12px 0}h1{font-size:1.6rem;margin:0}label{display:block;margin:16px 0 6px}button,select,textarea{font:inherit;border:1px solid #90a5af;border-radius:12px;padding:14px}button{background:white;cursor:pointer;min-height:52px}button.primary{background:#135b66;color:white}button:disabled{opacity:.45;cursor:default}select,textarea{width:100%;box-sizing:border-box}textarea{min-height:130px}section{background:white;border-radius:18px;padding:18px;margin-top:16px}.actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:12px}.note{font-size:.9rem;color:#46606e}#status{min-height:2.7em}article{border-bottom:1px solid #dae4e8;padding:12px 0;white-space:pre-wrap}article:last-child{border:0}#mode{color:#905400}button:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #10898c;outline-offset:3px}
-*{box-sizing:border-box}body{margin:0;padding:4px;height:100vh;height:100dvh;max-width:none;display:flex;flex-direction:column;gap:4px;font-size:16px}header{position:static;padding:0}h1{font-size:17px}#mode{font-size:12px;margin:0}label{margin:2px 0}button,select,textarea{padding:6px;border-radius:6px}button{min-height:42px}main{display:flex;flex-direction:column;flex:1;min-height:0;gap:4px}section{padding:4px;margin:0;border-radius:6px}section:first-child{display:flex;flex-direction:column;flex:1;min-height:0}#messages{overflow:auto;flex:1;min-height:30px}textarea{min-height:64px;height:64px;max-height:20dvh}.actions{gap:4px;margin-top:2px}#status{min-height:18px;max-height:46px;overflow:auto;font-size:13px;margin:3px 0}.note{font-size:12px;margin:0}article{padding:5px 0}#choose{display:none}button[aria-pressed=true]{background:#135b66;color:white}
+*{box-sizing:border-box}body{margin:0;padding:4px;height:100vh;height:100dvh;max-width:none;display:flex;flex-direction:column;gap:4px;font-size:16px}header{position:static;padding:0}h1{font-size:17px}#mode{font-size:12px;margin:0}label{margin:2px 0}button,select,textarea{padding:6px;border-radius:6px}button{min-height:42px}main{display:flex;flex-direction:column;flex:1;min-height:0;gap:4px}section{padding:4px;margin:0;border-radius:6px}section:first-child{display:flex;flex-direction:column;flex:1;min-height:0}#messages{overflow:auto;flex:1;min-height:30px}textarea{min-height:64px;height:64px;max-height:20dvh}.actions{gap:4px;margin-top:2px}#status{min-height:18px;max-height:46px;overflow:auto;font-size:13px;margin:3px 0}.note{font-size:12px;margin:0}article{padding:5px 0}#choose{display:none}header{display:flex;flex-wrap:nowrap;align-items:center;gap:4px}header h1,header #mode,header label{display:none}header select{flex:1;min-width:0;padding:4px}header>span{font-size:11px;white-space:nowrap}button[aria-pressed=true]{background:#135b66;color:white}
 </style>
 <link rel="stylesheet" href="/reader-ui.css">
 <header><h1>Zulip voice</h1><p id="mode">Mock conversations · nothing goes to Zulip</p><label for="agent">Talking to</label><select id="agent"></select><div class="actions"><button id="choose">Choose agent by voice</button></div></header>
@@ -21,41 +21,68 @@ import {resilientFetch,openDurableQueue} from '/resilient-fetch.mjs';
 const el = Object.fromEntries(['agent','choose','messages','draft','status','dictate','stop','review','send','listen','quiet'].map(id=>[id,document.getElementById(id)]));
 const Recognition = window.isSecureContext && navigator.mediaDevices?.getUserMedia && window.MediaRecorder;
 const submissionId=()=>Array.from(crypto.getRandomValues(new Uint8Array(18)),byte=>byte.toString(16).padStart(2,'0')).join('');
+let resumeAutoplay=false;
 let generation=0, busy=false, pending=null, conversations=[], messages=[], recording=false, loaded=false, loading=false, drafts={}, mock=true, ready=false;
 const status = text=>{el.status.textContent=text;};
 let outbox=null,storageScope='pending',flushing=false,audioDraft=null;
 const activeRecordings=new Set();
+let dictationClips=[];
+let finishingSend=false,captureReady=false;
+const finishSend=document.createElement('button');finishSend.textContent='Finish & send';finishSend.id='finish-send';finishSend.disabled=true;el.stop.after(finishSend);
 const appliedRecordings=new Set();
 const connection=document.createElement('span');connection.id='connection';connection.style.fontSize='12px';document.querySelector('header').append(connection);
 const networkState=({state})=>{connection.textContent=state==='connected'?'':state==='retrying'?'Reconnecting…':'Offline · drafts kept';};
-const audio=createAudio({status,transcribe:async(blob,signal,meta)=>{
-  const id=submissionId();
+const clipList=document.createElement('div');document.getElementById('draft').after(clipList);
+const audio=createAudio({status,clipsChanged:clips=>{dictationClips=clips;clipList.replaceChildren();const failed=clips.filter(c=>c.error),busyClips=clips.length-failed.length;if(!clips.length)return;const row=document.createElement('div');row.style.cssText='font-size:12px;display:flex;gap:6px;align-items:center';row.textContent=(busyClips?busyClips+' transcribing':'')+(busyClips&&failed.length?' · ':'')+(failed.length?failed.length+' failed':'');if(failed.length){const retry=document.createElement('button');retry.textContent='Retry';retry.style.cssText='min-height:0;padding:2px 8px';retry.onclick=()=>failed.forEach(c=>audio.retryClip(c.id));row.append(retry);}clipList.append(row);},transcribe:async(blob,signal,meta)=>{
+  const id=meta.id;
   activeRecordings.add(id);
   try{
   if(!outbox)throw new Error('Offline storage unavailable. Recording cannot be saved.');
-  const saved=await outbox.add({id,kind:'audio',agent:meta.agent,blob,prefix:meta.prefix,confirmation:meta.confirm});if(saved.error)throw new Error(saved.error);
-  const result=await resilientFetch('/api/stt',{method:'POST',body:blob,signal},{timeoutMs:120000,onState:networkState});
+  const existing=await outbox.get(id);if(!existing.data){const saved=await outbox.add({id,kind:'audio',agent:meta.agent,blob,prefix:meta.prefix,confirmation:meta.confirm});if(saved.error)throw new Error(saved.error);}
+  const result=await resilientFetch('/api/stt',{method:'POST',body:blob,signal},{retries:1,timeoutMs:30000,onState:networkState});
   if(result.error)throw new Error(result.error);const data=await result.response.json();if(!result.response.ok)throw new Error(data.error);
-  if(!meta.confirm){if(!storeTranscript(id,meta.agent,data.text,meta.prefix))throw new Error('Draft storage failed; recording retained.');await outbox.remove(id);}
   return {text:data.text,id};
   }finally{activeRecordings.delete(id);}
 }});let speaking=false;
-const speed=document.createElement('select');speed.setAttribute('aria-label','Playback speed');speed.style.width='auto';
-for(const rate of [0.5,0.75,1,1.25,1.5,1.75,2,2.5,3]){const option=new Option(rate+'×',String(rate));speed.add(option);}speed.value=String(audio.getRate());speed.onchange=()=>audio.setRate(Number(speed.value));document.querySelector('section:first-child .actions').append(speed);
+window.startVoicePreload?.(data=>audio.cachePrepared(data)).catch(()=>status('Voice preloading disconnected; retrying in the background.'));
+const speed=document.createElement('span'),slower=document.createElement('button'),faster=document.createElement('button');
+slower.textContent='−';faster.textContent='+';slower.setAttribute('aria-label','Slower playback');faster.setAttribute('aria-label','Faster playback');
+function showSpeed(){speed.textContent=audio.getRate().toFixed(1)+'×';slower.disabled=audio.getRate()<=0.5;faster.disabled=audio.getRate()>=3;}
+slower.onclick=()=>{audio.setRate(audio.getRate()-0.1);showSpeed();};faster.onclick=()=>{audio.setRate(audio.getRate()+0.1);showSpeed();};showSpeed();document.querySelector('section:first-child .actions').append(slower,speed,faster);
 document.addEventListener('click',()=>audio.unlock());
 let resumeReading=null,responseAgent=null,readingPosition=null,promptDone=null;
-const handsfreeButton=document.createElement('button');handsfreeButton.textContent='Hands-free: off';handsfreeButton.setAttribute('aria-pressed','false');document.querySelector('section:first-child .actions').append(handsfreeButton);
+let pausedPosition=null,compactControls;
+const pauseButton=document.createElement('button');pauseButton.id='pause';pauseButton.textContent='Play';pauseButton.className='primary';document.querySelector('section:first-child .actions').append(pauseButton);
+function rememberPosition(position){pausedPosition=position;try{if(position)localStorage.setItem('voice-position:'+storageScope,JSON.stringify(position));else localStorage.removeItem('voice-position:'+storageScope);}catch{status('Playback position could not be saved.');}}
+pauseButton.onclick=async()=>{
+  if(busy)return;
+  if(pauseButton.textContent==='Pause'){
+    if(readingPosition)rememberPosition({agent:el.agent.value,id:readingPosition.message.id,index:readingPosition.index,completeRead:readingPosition.completeRead});
+    if(!pausedPosition){status('Start reading a message first.');return;}
+    autoplay=false;handsfree.stop();cancelAudio();autoButton.textContent='Auto-play: off';autoButton.setAttribute('aria-pressed','false');pauseButton.textContent='Play';return;
+  }
+  pauseButton.disabled=true;
+  try{
+    if(recording)return;
+    const saved=pausedPosition;if(!saved){if(!autoplay)autoButton.click();return;}
+    if(saved.agent!==el.agent.value){status('Return to '+saved.agent+' to resume this message.');return;}
+    await load(saved.id);const message=messages.find(m=>m.id===saved.id);if(!message){status('Saved message could not be loaded.');return;}
+    cancelAudio();autoplay=true;autoButton.textContent='Auto-play: on';autoButton.setAttribute('aria-pressed','true');pauseButton.textContent='Pause';compactControls?.open(false);audio.unlock();
+    autoplaySpeaking=true;
+    readMessage(message,saved.index,()=>{autoplaySpeaking=false;queueUnread().then(playQueued);},()=>{autoplaySpeaking=false;},saved.completeRead);
+  }finally{pauseButton.disabled=false;}
+};
+const listeningState=document.createElement('span');listeningState.setAttribute('role','status');document.querySelector('header').append(listeningState);
 const handsfree=createHandsfree({
   getContext:()=>({agent:el.agent.value}),
   onRecording:async(blob,meta)=>{if(!outbox)throw new Error('Offline storage unavailable.');const id=submissionId();const result=await outbox.add({id,kind:'audio',agent:meta.context.agent,blob,handsfree:true,prefix:meta.draft||'',command:meta.state==='listening'});if(result.error)throw new Error(result.error);return id;},
   onTranscribed:async id=>{if(id)await outbox.remove(id);},
-  onState:state=>{handsfreeButton.textContent='Hands-free: '+state;handsfreeButton.setAttribute('aria-pressed',String(state!=='off'));},
+  onState:state=>{listeningState.textContent=state==='off'?'':state==='listening'?'Listening for “pause”':state;},
   onError:status,
   onDraft:(text,id)=>{const previous=drafts[el.agent.value],oldText=el.draft.value,oldPending=pending;el.draft.value=text;pending=null;if(id)appliedRecordings.add(id);if(!saveDraft()){drafts[el.agent.value]=previous;el.draft.value=oldText;pending=oldPending;if(id)appliedRecordings.delete(id);throw new Error('Draft storage unavailable. Recording retained.');}controls();},
   onPause:async()=>{responseAgent=el.agent.value;resumeReading=readingPosition?{...readingPosition,index:Math.max(0,readingPosition.index-(audio.elapsed()<1?1:0))}:null;audio.pause();await new Promise((resolve,reject)=>{promptDone=resolve;audio.speak('Paused. Give your response. Say resume autoplay when finished.',()=>{promptDone=null;resolve();},()=>{promptDone=null;reject(new Error('Could not play the response prompt.'));});});},
   onReply:async text=>{const token=generation;if(responseAgent!==el.agent.value)return false;if(text&&!await send(true))return false;if(token!==generation||handsfree.state!=='sending')return false;if(resumeReading){const r=resumeReading;readMessage(r.message,r.index,r.done,r.failed,r.completeRead);}else{speaking=false;autoplaySpeaking=false;playQueued();}return true;}
 });
-handsfreeButton.onclick=()=>{if(handsfree.state!=='off'){handsfree.stop();return;}if(el.draft.value.trim()){status('Send or clear your current draft before enabling hands-free.');return;}handsfree.start();};
 const cancelQueued=document.createElement('button');cancelQueued.textContent='Stop retries; edit draft';el.send.after(cancelQueued);
 cancelQueued.onclick=async()=>{if(busy||!pending)return;busy=true;controls();const result=await outbox?.remove(pending.id);busy=false;if(!result||result.error){status(result?.error||'Cannot cancel saved submission.');controls();return;}pending=null;saveDraft();controls();status('Retries stopped. If delivery was uncertain, check Zulip before sending an edited version.');};
 const composer=document.querySelector('section:last-child');
@@ -90,16 +117,18 @@ async function playQueued(){
   const finished=()=>{autoplayQueue.shift();autoplaySpeaking=false;playQueued();};
   const text=spokenText(message.text);
   if(!text){finished();return;}
-  readMessage(message,0,finished,()=>{autoplaySpeaking=false;autoplay=false;autoButton.textContent='Auto-play: off';autoButton.setAttribute('aria-pressed','false');});
+  // 🧑 "Why does autoplay turn off by itself? it should stay on": a failed message is skipped, autoplay stays on.
+  readMessage(message,0,finished,()=>{status('Could not play a message; skipped it.');finished();});
 }
-function readMessage(message,start=0,done,failed,completeRead=start===0){
+let lastRead=null;
+function readMessage(message,start=0,done,failed,completeRead=start===0){lastRead=message;
   const parts=splitSentences(spokenText(message.text));
-  function next(index){if(index>=parts.length){readingPosition=null;reader.clear();if(completeRead&&Number.isSafeInteger(message.id)){spokenIds.add(message.id);unsavedReads.add(message.id);saveReads();}done?.();return;}readingPosition={message,index,done,failed,completeRead};speak(parts[index],()=>next(index+1),failed,()=>reader.highlight(message.id,index));}
+  function next(index){if(index>=parts.length){readingPosition=null;rememberPosition(null);reader.clear();if(completeRead&&Number.isSafeInteger(message.id)){spokenIds.add(message.id);unsavedReads.add(message.id);saveReads();}done?.();return;}readingPosition={message,index,done,failed,completeRead};pauseButton.textContent='Pause';rememberPosition({agent:el.agent.value,id:message.id,index,completeRead});speak(parts[index],()=>next(index+1),failed,()=>reader.highlight(message.id,index));const following=autoplay?autoplayQueue.filter(m=>m.id!==message.id&&m.agent===el.agent.value).flatMap(m=>splitSentences(spokenText(m.text))):[];audio.prefetch([...parts.slice(index+1),...following].flatMap(part=>part.match(/[\s\S]{1,1800}/g)||[]));}
   next(start);
 }
 const autoButton=document.getElementById('auto');
 // 🧑 "A button that automatically plays everything new received" ... "Should be a toggle"
-autoButton.onclick=()=>{autoplay=!autoplay;cancelAudio();if(!autoplay)autoplayQueue.length=0;autoButton.textContent='Auto-play: '+(autoplay?'on':'off');autoButton.setAttribute('aria-pressed',String(autoplay));if(autoplay)speak('Auto-play on.',async()=>{await queueUnread();playQueued();});};
+autoButton.onclick=async()=>{if(autoplay){autoplay=false;handsfree.stop();cancelAudio();autoplayQueue.length=0;}else{cancelAudio();autoplay=true;audio.unlock();await queueUnread();const saved=pausedPosition;if(saved?.agent===el.agent.value){await load(saved.id);const message=messages.find(m=>m.id===saved.id);if(message){autoplaySpeaking=true;readMessage(message,saved.index,()=>{autoplaySpeaking=false;queueUnread().then(playQueued);},()=>{autoplaySpeaking=false;},saved.completeRead);}else{autoplay=false;status('Saved message could not be loaded. Tap a message to choose a new position.');}}else playQueued();}autoButton.textContent='Auto-play: '+(autoplay?'on':'off');autoButton.setAttribute('aria-pressed',String(autoplay));};
 // 🧑 "allow agents to produce some fixed texts that would make the backend do the switch to another agent specified"
 async function pollEvents(){
   if(!ready||polling||busy||recording||document.hidden||!['off','listening'].includes(handsfree.state))return;
@@ -136,10 +165,10 @@ async function pollEvents(){
     if(completed)eventCursor=result.data.cursor;
   }finally{if(autoplay)await queueUnread();polling=false;playQueued();}
 }
-function controls(){el.dictate.disabled=!ready||!Recognition||busy||recording||!!pending;el.choose.disabled=!ready||!Recognition||busy||recording;el.stop.disabled=!recording;el.review.disabled=!ready||busy||recording||!el.draft.value.trim();el.send.disabled=!ready||busy||recording||!el.draft.value.trim();el.agent.disabled=!ready||busy;el.draft.disabled=!ready||busy||recording||!!pending;el.listen.disabled=!ready||loading;cancelQueued.hidden=!pending;cancelQueued.disabled=busy;handsfreeButton.disabled=busy;}
-function cancelAudio(){generation++;promptDone?.();promptDone=null;recording=false;autoplaySpeaking=false;speaking=false;readingPosition=null;audio.stop();reader.clear();controls();}
+function controls(){el.dictate.disabled=!ready||!Recognition||busy||recording||!!pending||finishingSend;el.choose.disabled=!ready||!Recognition||busy||recording;el.stop.disabled=!recording||!captureReady;finishSend.disabled=!recording||!captureReady||finishingSend;el.review.disabled=!ready||busy||recording||!el.draft.value.trim()||finishingSend;el.send.disabled=!ready||busy||recording||!el.draft.value.trim()||finishingSend;el.agent.disabled=!ready||busy||finishingSend;el.draft.disabled=!ready||busy||recording||!!pending||finishingSend;el.listen.disabled=!ready||loading;cancelQueued.hidden=!pending;cancelQueued.disabled=busy;}
+function cancelAudio(keepPrepared=true){generation++;promptDone?.();promptDone=null;recording=false;captureReady=false;autoplaySpeaking=false;speaking=false;pauseButton.textContent='Play';readingPosition=null;audio.stop(keepPrepared);reader.clear();controls();}
 function speak(text,done,failed,started){speaking=true;const parts=splitSentences(text).flatMap(part=>part.match(/[\s\S]{1,1800}/g)||[]);function next(index){if(index===parts.length){speaking=false;done?.();return;}audio.speak(parts[index],()=>next(index+1),()=>{speaking=false;failed?.();},started);}next(0);}
-function startRecognition(confirm=false){cancelAudio();if(!Recognition)return;const token=generation,recipient=el.agent.value,base=el.draft.value.trim();audioDraft={agent:recipient,prefix:base,confirm};recording=true;controls();audio.record(async result=>{if(token!==generation||recipient!==el.agent.value)return;recording=false;controls();if(confirm){await outbox.remove(result.id);const command=result.text.toLowerCase().replace(/[.!?,]/g,'').trim();if(command==='send')send();else status(command==='cancel'?'Draft kept. Nothing sent.':'Nothing sent. Say exactly “send”, or use the button.');}else{el.draft.value=drafts[recipient]?.text||base;pending=null;saveDraft();controls();status('Draft ready. Review aloud or send.');}},()=>{recording=false;controls();},{...audioDraft});}
+function startRecognition(confirm=false){cancelAudio();if(!Recognition)return;const token=generation,recipient=el.agent.value,base=el.draft.value.trim();audioDraft={id:submissionId(),agent:recipient,prefix:base,confirm};recording=true;controls();audio.record(async(result,meta)=>{if(confirm){if(token!==generation||recipient!==el.agent.value)return;await outbox.remove(result.id);const command=result.text.toLowerCase().replace(/[.!?,]/g,'').trim();if(command==='send')send();else status(command==='cancel'?'Draft kept. Nothing sent.':'Nothing sent. Say exactly “send”, or use the button.');}else{if(!storeTranscript(result.id,meta.agent,result.text,meta.prefix))throw new Error('Draft storage failed; recording retained.');await outbox.remove(result.id);controls();status('Transcript added to '+meta.agent+'.');}},()=>{controls();},{...audioDraft},()=>{recording=false;captureReady=false;controls();if(resumeAutoplay&&!finishingSend){resumeAutoplay=false;setTimeout(()=>{if(!autoplay)autoButton.onclick();},0);}}).then(()=>{if(token===generation&&recording){captureReady=true;controls();}});}
 function persistDrafts(){try{localStorage.setItem('voice-draft:'+storageScope,JSON.stringify({agent:el.agent.value,drafts,appliedRecordings:[...appliedRecordings]}));return true;}catch{status('Draft storage unavailable. Keep this page open until sending is resolved.');return false;}}
 function saveDraft(){drafts[el.agent.value]={text:el.draft.value,pending};return persistDrafts();}
 function storeTranscript(id,agent,text,prefix=''){
@@ -151,16 +180,15 @@ function storeTranscript(id,agent,text,prefix=''){
   if(el.agent.value===agent){el.draft.value=drafts[agent].text;pending=drafts[agent].pending;}
   return true;
 }
-async function api(path,body){try{const result=await resilientFetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined},{onState:networkState});if(result.error)return{error:'Connection lost. Your draft is kept; retry uses the same submission ID.'};const response=result.response,data=await response.json();return response.ok?{data}:{error:data.error||'Request failed'};}catch{return{error:'Connection lost. Your draft is kept; retry uses the same submission ID.'};}}
+async function api(path,body){try{const result=await resilientFetch(path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined},{onState:networkState});if(result.error)return{error:result.error};const response=result.response,data=await response.json();return response.ok?{data}:{error:data.error||'Request failed'};}catch(error){return{error:path+': '+error.message};}}
 function render(){reader.render(messages.map((message,index)=>({...message,id:message.id??'history-'+index,text:message.sender==='agent'?spokenText(message.text):message.text})),conversations.find(c=>c.id===el.agent.value)?.name);}
 async function flushOutbox(){
   if(!ready||!outbox||flushing||busy||recording||handsfree.state!=='off'||document.hidden)return;
   flushing=true;
-  busy=true;controls();
   try{
     const items=await outbox.list();if(items.error){status(items.error);return;}
     for(const item of items.data){
-      if(activeRecordings.has(item.id))continue;
+      if(busy||item.id===pending?.id||activeRecordings.has(item.id)||dictationClips.some(clip=>clip.metadata.id===item.id))continue;
       if(appliedRecordings.has(item.id)){await outbox.remove(item.id);continue;}
       if(recording||handsfree.state!=='off')break;
       if(!conversations.some(c=>c.id===item.agent)){status('Saved item awaits its original conversation: '+item.agent);continue;}
@@ -171,7 +199,7 @@ async function flushOutbox(){
         if(drafts[item.agent]?.pending?.id===item.id){drafts[item.agent]={text:'',pending:null};if(el.agent.value===item.agent){pending=null;el.draft.value='';}saveDraft();}
         status('Queued message delivered to '+item.agent+'.');
       }else{
-        const result=await resilientFetch('/api/stt',{method:'POST',body:item.blob},{timeoutMs:120000,onState:networkState});
+        const result=await resilientFetch('/api/stt',{method:'POST',body:item.blob},{retries:1,timeoutMs:30000,onState:networkState});
         if(result.error){status(result.error);break;}const data=await result.response.json();if(!result.response.ok){status(data.error);break;}
         if(!item.confirmation&&!item.command){
           const text=item.handsfree?data.text.replace(/\bresume[\s.!?,;:]+auto[\s-]*play\b[\s.!?,;:]*$/i,'').trim():data.text;
@@ -182,20 +210,33 @@ async function flushOutbox(){
       }
     }
     controls();
-  }finally{flushing=false;busy=false;controls();}
+  }finally{flushing=false;controls();}
 }
 async function load(anchor=readingPosition?.message.id){const recipient=el.agent.value;loaded=false;loading=true;controls();const result=await api('/api/messages?agent='+encodeURIComponent(recipient)+(Number.isSafeInteger(anchor)?'&anchor='+anchor:''));if(recipient!==el.agent.value)return;loading=false;if(result.error){status(result.error);controls();return;}messages=result.data;loaded=true;render();controls();}
 // 🧑 "talk to the interface to send messages ... which agent I am talking to"
 async function send(preserveAudio=false){if(!ready||busy||!el.draft.value.trim())return false;if(!preserveAudio)cancelAudio();const agent=el.agent.value,text=el.draft.value.trim();if(!pending||pending.agent!==agent||pending.text!==text)pending={id:submissionId(),agent,text};saveDraft();busy=true;controls();const submission={...pending};if(!outbox){busy=false;controls();status('Offline storage unavailable. Nothing sent.');return false;}const existing=await outbox.get(submission.id);if(!existing.data){const saved=await outbox.add({id:submission.id,agent,kind:'send',payload:submission});if(saved.error){busy=false;controls();status(saved.error);return false;}}const result=await api('/api/send',submission);busy=false;if(result.error){status(result.error);controls();return false;}await outbox.remove(submission.id);pending=null;el.draft.value='';saveDraft();status((mock?'Mock message':'Message')+' delivered to '+conversations.find(c=>c.id===agent).name+'.');await load();controls();return true;}
-el.dictate.onclick=()=>{handsfree.stop();startRecognition();};
+el.dictate.onclick=()=>{resumeAutoplay=autoplay||resumeAutoplay;handsfree.stop();startRecognition();};
 el.stop.onclick=()=>audio.finish();
-el.quiet.onclick=()=>{handsfree.stop();cancelAudio();autoplay=false;autoButton.textContent='Auto-play: off';autoButton.setAttribute('aria-pressed','false');autoplayQueue.length=0;status('Audio stopped.');};
-el.review.onclick=()=>{cancelAudio();const name=conversations.find(c=>c.id===el.agent.value)?.name;speak('To '+name+'. '+el.draft.value+(Recognition?'. Say send or cancel after the microphone starts.':'. Use the send button to send.'),()=>startRecognition(true));};
+// 🧑 "after finishing dictating there should be an option to directly send so I don't need to click two things."
+finishSend.onclick=async()=>{
+  if(!recording||!captureReady||finishingSend)return;
+  const recipient=audioDraft.agent;finishingSend=true;audio.finish();controls();
+  try{
+    const deadline=Date.now()+20000;
+    do{await new Promise(resolve=>setTimeout(resolve,50));if(dictationClips.some(clip=>clip.state==='error')){status('Transcription failed. Retry the clip, then send your draft.');return;}}while((recording||dictationClips.length)&&Date.now()<deadline);
+    if(recording||dictationClips.length){status('Transcription is still pending. Your recording is saved; send after it finishes.');return;}
+    if(recipient!==el.agent.value){status('Draft kept for '+recipient+'. Return there to send.');return;}
+    await send();
+  }finally{finishingSend=false;controls();if(resumeAutoplay){resumeAutoplay=false;if(!autoplay)autoButton.onclick();}}
+};
+el.quiet.onclick=()=>{handsfree.stop();cancelAudio(false);autoplay=false;autoButton.textContent='Auto-play: off';autoButton.setAttribute('aria-pressed','false');autoplayQueue.length=0;status('Audio stopped.');};
+el.review.remove();
 el.send.onclick=()=>{handsfree.stop();send();};
 el.listen.onclick=async()=>{cancelAudio();const token=generation;await load();if(token!==generation||!loaded)return;const replies=messages.filter(m=>m.sender==='agent');function next(index){if(index<replies.length)readMessage(replies[index],0,()=>next(index+1));}next(0);};
 el.draft.oninput=()=>{cancelAudio();pending=null;saveDraft();controls();};
-el.agent.onchange=()=>{handsfree.stop();cancelAudio();const draft=drafts[el.agent.value];pending=draft?.pending||null;el.draft.value=draft?.text||'';saveDraft();status('Talking to '+conversations.find(c=>c.id===el.agent.value).name+'.');load();controls();};
+el.agent.onchange=()=>{handsfree.stop();cancelAudio(false);const draft=drafts[el.agent.value];pending=draft?.pending||null;el.draft.value=draft?.text||'';saveDraft();status('Talking to '+conversations.find(c=>c.id===el.agent.value).name+'.');load();controls();};
 document.addEventListener('visibilitychange',()=>{if(document.hidden){saveDraft();cancelAudio();}});
+document.querySelector('.note').textContent='Tap Dictate, then Finish. Review your draft and tap Send. Keep the page open for playback.';
 controls();
 const mode=await api('/api/mode');
 if(mode.data){storageScope=mode.data.scope+':'+mode.data.mock;const opened=await openDurableQueue(storageScope);outbox=opened.data;if(opened.error)status(opened.error);}
@@ -210,11 +251,42 @@ else{
   try{const saved=JSON.parse(localStorage.getItem('voice-draft:'+storageScope)||sessionStorage.getItem('voice-draft:'+mock));if(saved&&conversations.some(c=>c.id===saved.agent)){drafts=saved.drafts||{};for(const id of saved.appliedRecordings||[])appliedRecordings.add(id);el.agent.value=saved.agent;el.draft.value=drafts[saved.agent]?.text||'';pending=drafts[saved.agent]?.pending||null;}}catch{}
   await load();
 }
-if(!Recognition)status('Browser speech recognition unavailable. Use your keyboard microphone to dictate.');
+if(!Recognition)status('Microphone capture is unavailable in this browser. You can use keyboard dictation.');
 controls();
 await pollEvents();
-installCompactControls({composer,draft:el.draft,dictate:el.dictate});
-setInterval(pollEvents,1500);
+compactControls=installCompactControls({composer,draft:el.draft,dictate:el.dictate});
+// 🧑 "have some sort of buttons to go to before and after"
+{const dock=document.querySelector('.reader-dock');const step=delta=>{const replies=messages.filter(m=>m.sender==='agent');if(!replies.length){status('No agent messages here.');return;}let i=replies.findIndex(m=>m.id===lastRead?.id);i=i<0?(delta<0?replies.length-1:0):Math.min(replies.length-1,Math.max(0,i+delta));handsfree.stop();cancelAudio();const m=replies[i];readMessage(m,0);document.querySelector('article[data-message-id="'+m.id+'"]')?.scrollIntoView({block:'start'});};for(const [label,delta] of [['⏮',-1],['⏭',1]]){const b=document.createElement('button');b.textContent=label;b.title=delta<0?'Previous agent message':'Next agent message';b.style.cssText='min-width:40px;padding:4px';b.onclick=()=>step(delta);dock.insertBefore(b,document.getElementById('pause'));}}
+// 🧑 "get rid of it Merge the things inside the bottom. are think account configuration should be hidden behind another screen."
+{const header=document.querySelector('header'),dock=document.querySelector('.reader-dock');el.agent.style.cssText='width:auto;flex:1 1 30%;min-width:0;padding:4px';dock.prepend(el.agent);connection.style.alignSelf='center';el.agent.after(connection);const rowBreak=document.createElement('div');rowBreak.style.flexBasis='100%';rowBreak.style.height='0';connection.after(rowBreak);dock.style.flexWrap='wrap';el.agent.style.flex='1 1 auto';for(const b of dock.querySelectorAll('button')){b.style.flex='1 1 0';b.style.minWidth='0';b.style.padding='4px 2px';b.style.fontSize='14px';}for(const node of [...header.children])if(node!==el.agent&&node!==connection&&!['H1','LABEL'].includes(node.tagName)&&node.id!=='mode'&&!node.contains(el.choose))composer.append(node);header.hidden=true;}
+// 🧑 "Look at your interface, it looks so ugly." One tidy icon row; names stay as accessible labels.
+{const dock=document.querySelector('.reader-dock'),style=document.createElement('style');
+style.textContent=`body{background:#f4f6f7;color:#1d2a30;font:16px -apple-system,system-ui,sans-serif}
+section{background:#fff;border-radius:10px}
+#messages article{padding:8px 4px;border-bottom:1px solid #e6ecee}
+.reader-dock{gap:6px;padding:6px 4px calc(6px + env(safe-area-inset-bottom,0px));background:#f4f6f7;border-top:1px solid #dde4e7}
+.reader-dock select{border:1px solid #cfd8dc;border-radius:8px;background:#fff;font-size:15px;padding:6px 8px}
+.reader-dock button{border:1px solid #cfd8dc;border-radius:22px;background:#fff;min-height:44px;color:#1d2a30}
+.reader-dock button.icon{font-size:0}.reader-dock button.icon::before{content:attr(data-icon);font-size:20px;line-height:1}
+.reader-dock button[aria-pressed=true],.reader-dock button.primary{background:#135b66;border-color:#135b66;color:#fff}
+.reader-dock button:disabled{opacity:.35}
+#connection{font-size:11px;color:#8a5a00}
+#status{font-size:12px;color:#5b6b72}
+section:last-child button{border-radius:8px;border:1px solid #cfd8dc;background:#fff;min-height:40px}
+section:last-child button.primary{background:#135b66;color:#fff;border-color:#135b66}
+textarea{border:1px solid #cfd8dc;border-radius:8px;font:inherit}`;
+document.head.append(style);
+const iconize=(b,icon,label)=>{if(!b)return;b.style.fontSize='';b.classList.add('icon');b.dataset.icon=icon;b.setAttribute('aria-label',label);b.title=label;};
+const toggle=[...dock.querySelectorAll('button')].find(b=>b.textContent==='Compose');
+iconize(toggle,'⋯','Compose');iconize(el.dictate,'🎙','Dictate');iconize(el.quiet,'⏹','Stop audio');
+iconize(autoButton,'∞','Auto-play');
+for(const b of dock.querySelectorAll('button'))if(b.textContent==='⏮'||b.textContent==='⏭')iconize(b,b.textContent,b.title);
+const syncPlay=()=>{const playing=pauseButton.textContent==='Pause';iconize(pauseButton,playing?'⏸':'▶',playing?'Pause':'Play');};new MutationObserver(syncPlay).observe(pauseButton,{childList:true,characterData:true,subtree:true});syncPlay();
+el.listen.hidden=true;
+const order=[toggle,...[...dock.querySelectorAll('button')].filter(b=>b.textContent==='⏮'),pauseButton,...[...dock.querySelectorAll('button')].filter(b=>b.textContent==='⏭'),autoButton,el.dictate,el.quiet];for(const b of order)if(b)dock.append(b);}
+try{const saved=JSON.parse(localStorage.getItem('voice-position:'+storageScope));if(saved&&conversations.some(c=>c.id===saved.agent)){pausedPosition=saved;el.agent.value=saved.agent;el.draft.value=drafts[saved.agent]?.text||'';pending=drafts[saved.agent]?.pending||null;await load(saved.id);pauseButton.textContent='Play';}}catch{}
+setInterval(pollEvents,window.voiceBrowserOnly?5000:1500);
+window.addEventListener('voice-task-update',pollEvents);
 setInterval(flushOutbox,10000);
 window.addEventListener('online',()=>{if(!ready)location.reload();else{flushOutbox();pollEvents();}});
 if(window.visualViewport)window.visualViewport.addEventListener('resize',()=>{document.body.style.height=window.visualViewport.height+'px';});

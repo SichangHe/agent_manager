@@ -17,6 +17,10 @@ try{
   await page.goto(origin);
   await page.locator('body.reader-layout').waitFor();
   assert.ok((await page.locator('#messages').boundingBox()).height>664*0.7);
+  await page.evaluate(()=>{const dock=document.querySelector('.reader-dock');const swipe=(from,to)=>{for(const [type,y] of [['touchstart',from],['touchend',to]]){const touch=new Touch({identifier:1,target:dock,clientX:80,clientY:y});dock.dispatchEvent(new TouchEvent(type,{bubbles:true,cancelable:true,touches:type==='touchstart'?[touch]:[],changedTouches:[touch]}));}};window.swipeDock=swipe;swipe(600,540);});
+  assert.equal(await page.getByRole('button',{name:'Faster playback'}).isVisible(),true);
+  await page.evaluate(()=>window.swipeDock(540,600));
+  assert.equal(await page.getByRole('button',{name:'Faster playback'}).isVisible(),false);
   await page.getByRole('button',{name:'Compose',exact:true}).click();
   await page.locator('#draft').fill('A draft for the manager');
   await page.locator('#agent').selectOption('quals');
@@ -64,7 +68,10 @@ try{
   assert.equal(history.events.at(-1).switchTo,'quals');
   const replay=await (await fetch(origin+'/api/events?after='+history.cursor)).json();
   assert.equal(replay.events.length,0);
+  await page.locator('#draft').fill('');
+  await page.evaluate(()=>{navigator.mediaDevices.getUserMedia=async()=>{const context=new AudioContext();await context.resume();return context.createMediaStreamDestination().stream;};});
   await page.locator('#auto').click();
+  await page.waitForFunction(()=>document.getElementById('auto').getAttribute('aria-pressed')==='true');
   assert.equal(await page.locator('#auto').getAttribute('aria-pressed'),'true');
   await page.locator('#auto').click();
   assert.equal(await page.locator('#auto').getAttribute('aria-pressed'),'false');
@@ -80,19 +87,17 @@ try{
   });
   await page.locator('#agent').selectOption('manager');
   await page.locator('#auto').click();
-  await page.waitForFunction(()=>window.currentSpeech?.onended&&window.spoken.length===1);
-  await page.evaluate(()=>window.finishSpeech());
   await post({id:crypto.randomUUID(),agent:'manager',text:'First queued reply'});
   await post({id:crypto.randomUUID(),agent:'quals',text:'Other conversation must stay silent'});
   await post({id:crypto.randomUUID(),agent:'manager',text:'Second queued reply'});
-  await page.waitForFunction(()=>window.spoken.length===2);
-  assert.match(await page.evaluate(()=>window.spoken[1]),/Main manager/);
+  await page.waitForFunction(()=>window.spoken.length===1);
+  assert.match(await page.evaluate(()=>window.spoken[0]),/Main manager/);
   await page.locator('#draft').fill('Interrupt playback with a draft');
-  await page.waitForFunction(()=>window.spoken.length===3);
-  assert.equal(await page.evaluate(()=>window.spoken[1]===window.spoken[2]),true);
+  await page.waitForFunction(()=>window.spoken.length===2);
+  assert.equal(await page.evaluate(()=>window.spoken[0]===window.spoken[1]),true);
   await page.evaluate(()=>window.finishSpeech());
-  await page.waitForFunction(()=>window.spoken.length===4);
-  assert.match(await page.evaluate(()=>window.spoken[3]),/Main manager/);
+  await page.waitForFunction(()=>window.spoken.length===3);
+  assert.match(await page.evaluate(()=>window.spoken[2]),/Main manager/);
   await page.locator('#auto').click();
   assert.equal(await page.evaluate(()=>window.currentSpeech),null);
 }finally{await browser.close();await new Promise(resolve=>server.close(resolve));}

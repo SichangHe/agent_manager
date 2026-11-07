@@ -13,7 +13,7 @@ BASE = "http://127.0.0.1:8770"
 
 def request(path: str, data: bytes, content_type: str) -> bytes:
     req = urllib.request.Request(
-        BASE + path, data=data, headers={"Content-Type": content_type}
+        ("http://127.0.0.1:8771" if path == "/stt" else BASE) + path, data=data, headers={"Content-Type": content_type}
     )
     with urllib.request.urlopen(req, timeout=120) as response:
         return response.read()

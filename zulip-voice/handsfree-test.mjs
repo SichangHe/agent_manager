@@ -20,7 +20,7 @@ const server=http.createServer(async(req,res)=>{
     if(req.url==='/api/stt'){
       const parts=[];for await(const part of req)parts.push(part);attempts++;
       if(failures>0){failures--;res.writeHead(503,{'Content-Type':'application/json'});res.end('{"error":"Temporary test outage"}');return;}
-      const response=await fetch(worker+'/stt',{method:'POST',body:Buffer.concat(parts),signal:AbortSignal.timeout(90000)});
+      const response=await fetch((process.env.VOICE_STT_URL||'http://127.0.0.1:8771')+'/stt',{method:'POST',body:Buffer.concat(parts),signal:AbortSignal.timeout(90000)});
       res.writeHead(response.status,{'Content-Type':'application/json'});res.end(await response.text());return;
     }
     res.setHeader('Content-Type','text/html');res.end('<button>Start</button>');
@@ -30,7 +30,7 @@ await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const browser=await chromium.launch({headless:true,...(process.env.CHROMIUM_EXECUTABLE?{executablePath:process.env.CHROMIUM_EXECUTABLE}:{}),args:['--autoplay-policy=no-user-gesture-required','--no-sandbox']});
 try{
   for(const {sendSuccess,outage} of [{sendSuccess:true,outage:false},{sendSuccess:false,outage:false},{sendSuccess:false,outage:true}]){
-    failures=outage?4:1;attempts=0;
+    failures=outage?1:0;attempts=0;
     const page=await browser.newPage();await page.goto('http://127.0.0.1:'+server.address().port);
     await page.evaluate(async sendSuccess=>{
       const {createHandsfree}=await import('/handsfree.mjs');
@@ -56,7 +56,7 @@ try{
     const result=await page.evaluate(()=>({...result,state:h.state,draft:h.draft}));
     if(outage){
       assert.equal(result.state,'off');assert.equal(result.prompted,false);assert.deepEqual(result.calls,[]);
-      assert.ok(result.saved.length>0);assert.equal(result.removed.length,0);assert.equal(attempts,4);
+      assert.ok(result.saved.length>0);assert.equal(result.removed.length,0);assert.equal(attempts,1);
       console.log(JSON.stringify({outage,attempts,state:result.state,retained:result.saved.length}));
       await page.close();continue;
     }
@@ -65,7 +65,7 @@ try{
     assert.equal(new Set(result.removed).size,result.removed.length);
     assert.ok(result.saved.every(item=>item.metadata.context.agent==='manager'));
     assert.equal(result.state,sendSuccess?'listening':'off');assert.equal(result.draft,sendSuccess?'':result.calls[0]);
-    assert.equal(result.errors.length,sendSuccess?0:1);assert.ok(attempts>=4);
+    assert.equal(result.errors.length,sendSuccess?0:1);assert.ok(attempts>=3);
     console.log(JSON.stringify({sendSuccess,attempts,state:result.state,reply:result.calls[0],saved:result.saved.length,consumed:result.removed.length}));
     await page.evaluate(()=>h.stop());await page.close();
   }

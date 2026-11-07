@@ -11,12 +11,14 @@ reading
   - omit first-line `[task]` titles
 - sentence tap starts rereading; highlight begins when audio playback starts
   - manual scrolling suspends following; Follow reading restores it
-- Compose expands controls; playback speed persists locally
+- Compose or swiping up on the bottom dock expands controls; swipe down hides them
+  - playback speed persists locally, 0.5–3.0× in 0.1 increments
 - Stop audio disables autoplay and hands-free
 
 hands-free
 - 🧑 "listen constantly and identify when I Say pause"
-- enabled toggle records complete speech segments while the page is visible
+- autoplay enables microphone listening while the page is visible; no separate hands-free toggle
+  - microphone permission failure leaves autoplay off with an explanation
   - silence threshold 600 ms; segment limit 6 s; bounded queue of 4
   - server transcription recognizes standalone pause
 - pause stops playback and speaks the response prompt
@@ -27,6 +29,10 @@ hands-free
 - actual iOS permission, speaker echo, background suspension and Bluetooth behavior require device evaluation
   - echo cancellation requested; headphones reduce speaker feedback
   - server processing latency delays recognition; no instantaneous interruption claim
+  - `echo-test.mjs [PAUSE.wav]` exercises actual recording and transcription with digitally mixed reply audio
+    - synthesized command: 9/9 detections with reply gains 0, 0.03, 0.1; 0/3 at 0.3
+    - reply gain multiplies original waveform amplitude; command gain remains 1, not calibrated microphone loudness
+    - no real human pause fixture available; these results do not validate acoustic echo cancellation on iOS
 
 connection recovery
 - 🧑 "The client also needs to be able to handle connection drops in intermittently"

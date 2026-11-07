@@ -57,10 +57,22 @@ export function installCompactControls({composer,draft,dictate}) {
   const dock=document.createElement('div');dock.className='reader-dock';
   const toggle=document.createElement('button');toggle.type='button';toggle.textContent='Compose';toggle.setAttribute('aria-expanded','false');
   dock.append(toggle);
-  for(const id of ['dictate','auto','quiet']){const button=document.getElementById(id);if(button)dock.append(button);}
+  for(const id of ['pause','dictate','auto','quiet']){const button=document.getElementById(id);if(button)dock.append(button);}
   composer.before(dock);
-  function open(value){composer.hidden=!value;toggle.setAttribute('aria-expanded',String(value));toggle.textContent=value?'Hide controls':'Compose';}
+  function open(value){composer.hidden=!value;toggle.hidden=value;toggle.setAttribute('aria-expanded',String(value));toggle.textContent='Compose';}
   toggle.onclick=()=>open(composer.hidden);
+  let touchStart=null;
+  dock.style.touchAction='none';
+  // 🧑 "the controls does not shrink down when I swipe it"
+  // 🧑 "The bottom portion of the controls do not scroll." The open panel scrolls; a downward swipe collapses it only when already at its top.
+  composer.style.overflowY='auto';composer.style.maxHeight='60dvh';composer.style.overscrollBehavior='contain';
+  for(const surface of [dock,composer]){
+    surface.addEventListener('touchstart',event=>{const touch=event.touches[0];touchStart={x:touch.clientX,y:touch.clientY,top:composer.scrollTop};},{passive:true});
+    surface.addEventListener('touchend',event=>{if(!touchStart)return;const touch=event.changedTouches[0],dy=touch.clientY-touchStart.y,dx=touch.clientX-touchStart.x,top=touchStart.top;touchStart=null;if(Math.abs(dy)<=25||Math.abs(dy)<=Math.abs(dx))return;if(surface===composer&&(dy<0||top>0||composer.scrollTop>0||dy<60))return;event.preventDefault();open(dy<0);},{passive:false});
+    surface.addEventListener('touchcancel',()=>{touchStart=null;},{passive:true});
+  }
+  const messages=document.getElementById('messages');
+  for(const name of ['scroll','wheel','touchmove'])messages.addEventListener(name,()=>open(false),{passive:true});
   dictate.addEventListener('click',()=>open(true));
   draft.addEventListener('focus',()=>open(true));
   open(Boolean(draft.value.trim()));

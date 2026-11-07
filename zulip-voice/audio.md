@@ -4,11 +4,14 @@
 server speech worker
 - 🧑 "Use the server to do STT and TTS instead of the client, i.e., send audio around"
 - start: `uv run audio-service.py`
-  - persistent CPU Kokoro and Whisper small.en models; cached model downloads reused
-  - loopback port 8770; override with `VOICE_AUDIO_PORT`
+  - CUDA models resident and warmed before listening; cached model downloads reused
+  - `VOICE_AUDIO_KIND=tts VOICE_AUDIO_PORT=8770 CUDA_VISIBLE_DEVICES=0` for Kokoro
+  - `VOICE_AUDIO_KIND=stt VOICE_AUDIO_PORT=8771 CUDA_VISIBLE_DEVICES=1 VOICE_STT_MODEL=turbo` for Whisper large-v3-turbo float16
+  - persistent enabled user units: `zulip-voice-audio.service`, `zulip-voice-stt.service`
+  - `VOICE_STT_MODEL` optionally selects another Whisper model; CUDA failure stops startup
 - UI server proxies requests after its Host, Origin and deployment access checks
-  - send worker Host `127.0.0.1:8770`; omit browser Origin
-  - `GET /health` reports ready after both models load
+  - send worker Host matching its loopback port; omit browser Origin
+  - `GET /health` reports ready after that model loads and warms
   - `POST /tts`, JSON `{"text":"One sentence."}`, returns `audio/wav`
     - 2000 characters maximum; use one sentence per request for exact sentence highlighting and seeking
   - `POST /stt`, raw MediaRecorder bytes, returns `{"text":"recognized draft"}`
@@ -18,11 +21,35 @@ server speech worker
 - browser records audio and plays returned WAV; no client speech recognition/synthesis needed
   - browser microphone still requires a secure context, including localhost
   - iOS playback still requires a user gesture and actual device validation
-- requests run sequentially; proxy should bound its queue and use a 120-second timeout
+- each model has its own process, GPU and request queue; STT never waits behind TTS
+  - proxy bounds processing deadlines; client shows recoverable errors on timeout
   - client cancellation must not mark a message read
   - transcription only creates a draft; existing send review remains responsible for recipient and submission
-- audio and text stay in memory; no request/content logs or disk audio cache
+- audio and text stay in memory; logs contain kind, byte count and processing milliseconds only
 - validate: `python3 audio-test.py` against the running worker
   - real Kokoro speech encoded into MP4/AAC and WebM/Opus, then transcribed with Whisper
-  - measured locally: 4.05 seconds of speech generated in 1.46 seconds; MP4/WebM transcription took 1.67/1.45 seconds
-  - both returned the exact synthetic sentence; this does not validate human accents, phone microphone, or iOS playback
+  - CUDA worker: real human JFK first 10 seconds transcribed in 173–306 ms; short sentence TTS 104 ms
+  - source recording: `https://raw.githubusercontent.com/openai/whisper/main/tests/jfk.flac`
+  - turbo comparison took about 240 ms versus small.en about 175 ms; deployed large-v3-turbo for stronger recognition within the latency target
+  - these local measurements do not validate phone network latency, accents, microphone, or iOS playback
+- UI latency: `node browser-latency-test.mjs RECORDING.wav`, with `PLAYWRIGHT_MODULE` if needed
+  - real 10-second JFK recording through Chromium MediaRecorder and UI proxy, large-v3-turbo: Finish to draft 357 ms
+  - short sentence first playback 101 ms; prefetched next sentence gap 5 ms
+  - `node latency-test.mjs RECORDING.wav` measures serial and concurrent UI proxy requests
+- foreground transcription: 10-second complete-response deadline, no immediate repeated attempts; saved recordings remain recoverable
+  - server processing deadline 8 seconds; separate per-model admission limits
+  - proxy logs upload and processing milliseconds; workers log model processing milliseconds
+  - previous 40-second incident lacks historical request timings; CPU serialization and long retry deadlines were confirmed risks, not a proven incident trace
+- sentence prefetch overlaps current playback, includes next unread messages in the open conversation
+  - at most 12 prepared clips and 9000 text characters, plus the playing clip
+  - at most 2 speculative requests in flight
+  - playback completion, eviction, explicit stop, conversation change and playback failure release client buffers and acknowledge relay uploads
+    - explicit-request uploads are deleted; shared proactive uploads remain until bounded server expiry or eviction for other devices
+  - pause and dictation retain prepared clips; playback uses the already-loaded media element
+  - autoplay off/dictate/send/on resumes saved message and sentence
+  - real private-channel `relay-gap-test.mjs`: WebKit sentence gaps 1/1/1 ms, first audio 2340 ms; cleanup verified
+  - media permission rejection falls back to the original gesture-unlocked player
+    - if both players reject, retain the clip and ask for Play; physical iOS remains unverified
+  - `live-cadence-test.mjs` uses real private-channel speech and iPhone-sized WebKit
+    - paced build: 36 API requests in 23.216 s during four sentences; no HTTP errors
+    - budget belongs to each page, not the whole account across devices

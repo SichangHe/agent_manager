@@ -56,7 +56,7 @@ export function createHandsfree({onPause,onReply,onState=()=>{},onDraft=()=>{},o
         if(token!==generation)return;
         if(item.epoch!==captureGeneration)continue;
         const requestController=new AbortController();controller=requestController;
-        const fetched=await resilientFetch('/api/stt',{method:'POST',headers:{'Content-Type':item.blob.type||'application/octet-stream'},body:item.blob,signal:requestController.signal},{retries:3,timeoutMs:30000});
+        const fetched=await resilientFetch('/api/stt',{method:'POST',headers:{'Content-Type':item.blob.type||'application/octet-stream'},body:item.blob,signal:requestController.signal},{retries:0,timeoutMs:10000});
         if(fetched.error)throw new Error(fetched.error);
         const result=await fetched.response.json();
         if(!fetched.response.ok)throw new Error(result.error||'Transcription failed.');

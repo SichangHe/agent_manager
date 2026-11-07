@@ -436,6 +436,14 @@ pub fn send(
     Ok(format!("zulip:{id}"))
 }
 
+/// Drop a queued deletion; another amh process (or the watcher) draining the same queue may have dropped it first.
+fn forget(path: &std::path::Path) -> Result<(), String> {
+    match fs::remove_file(path) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+        _ => Ok(()),
+    }
+}
+
 pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
     let folder = settings::state_dir().join("amh-zulip-deletions");
     fs::create_dir_all(&folder)
@@ -472,7 +480,7 @@ pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
         };
         match answered(settings, id) {
             Ok(true) => {
-                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                forget(&path)?;
                 kept.push(format!("zulip:{id}"));
                 continue;
             }
@@ -485,10 +493,10 @@ pub fn replace(settings: &Settings, ids: &[String]) -> Result<(), String> {
         let deleted = api(settings, "DELETE", &format!("messages/{id}"), &[]);
         match deleted {
             Ok(_) => {
-                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                forget(&path)?;
             }
             Err(error) if error.contains("Invalid message(s)") => {
-                fs::remove_file(&path).map_err(|error| error.to_string())?;
+                forget(&path)?;
             }
             Err(error) => failures.push(error),
         }

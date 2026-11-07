@@ -22,7 +22,7 @@ export function createServer(html, origin, live=null,sessionAuth=null,ssh=false)
   const messages=new Map(conversations.map(c=>[c.id,[{sender:'agent',text:'This is a mock conversation. Try dictating a message and reviewing it aloud.'}]]));
   const receipts=new Map();
   const events=[];
-  let audioRequests=0;
+  const audioRequests={tts:0,stt:0};
   return http.createServer(async(req,res)=>{
     const reply=(code,data)=>{res.writeHead(code,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));};
     const loopback=/^(localhost|127\.0\.0\.1|\[::1\])(?::[0-9]{1,5})?$/.test(req.headers.host||'');
@@ -50,14 +50,19 @@ export function createServer(html, origin, live=null,sessionAuth=null,ssh=false)
     if(req.method==='GET'&&url.pathname==='/api/mode')return reply(200,{mock:!live,scope:live?.scope||'mock'});
     if(req.method==='POST'&&['/api/tts','/api/stt'].includes(url.pathname)){
       if(req.headers.origin!==requestOrigin)return reply(403,{error:'Expected same-origin audio request.'});
-      if(audioRequests>=3)return reply(503,{error:'Speech server busy; retry shortly.'});
-      audioRequests++;
+      const kind=url.pathname.slice(5),startedMs=performance.now();let uploadedMs=startedMs;
+      const controller=new AbortController(),deadline=setTimeout(()=>controller.abort(),8000);
+      const disconnected=()=>{if(!res.writableEnded)controller.abort();};res.on('close',disconnected);
+      if(audioRequests[kind]>=2){clearTimeout(deadline);res.off('close',disconnected);return reply(503,{error:'Speech server busy; retry shortly.'});}
+      audioRequests[kind]++;
       try{
         const chunks=[];let size=0;const limit=url.pathname==='/api/tts'?16000:12*1024*1024;
         for await(const chunk of req){size+=chunk.length;if(size>limit)return reply(413,{error:'Recording or text too large.'});chunks.push(chunk);}
-        const response=await fetch('http://127.0.0.1:8770/'+url.pathname.slice(5),{method:'POST',headers:{'Content-Type':url.pathname==='/api/tts'?'application/json':'application/octet-stream'},body:Buffer.concat(chunks),signal:AbortSignal.timeout(120000)});
-        res.writeHead(response.status,{'Content-Type':response.headers.get('content-type'),'Cache-Control':'no-store'});res.end(Buffer.from(await response.arrayBuffer()));
-      }catch{reply(503,{error:'Speech server unavailable. Retry shortly.'});}finally{audioRequests--;}
+        uploadedMs=performance.now();
+        const response=await fetch('http://127.0.0.1:'+(kind==='stt'?8771:8770)+'/'+kind,{method:'POST',headers:{'Content-Type':kind==='tts'?'application/json':'application/octet-stream'},body:Buffer.concat(chunks),signal:controller.signal});
+        const body=Buffer.from(await response.arrayBuffer());
+        res.writeHead(response.status,{'Content-Type':response.headers.get('content-type'),'Cache-Control':'no-store'});res.end(body);
+      }catch{if(!res.destroyed)reply(503,{error:'Speech processing exceeded its deadline or is unavailable. Recording stays saved; retry shortly.'});}finally{clearTimeout(deadline);res.off('close',disconnected);audioRequests[kind]--;console.log(JSON.stringify({speech:kind,upload_ms:Math.round(uploadedMs-startedMs),processing_ms:Math.round(performance.now()-uploadedMs),status:res.statusCode}));}
       return;
     }
     if(req.method==='GET'&&url.pathname==='/api/unread'){
