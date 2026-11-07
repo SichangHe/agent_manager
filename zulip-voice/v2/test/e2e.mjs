@@ -273,7 +273,7 @@ scenarios.relayCleanup = async () => {
       const botBytes = (await L.bot('GET', 'attachments')).attachments.filter(a => /^voice-/.test(a.name)).reduce((n, a) => n + a.size, 0);
       left = {messages: m.messages.filter(x => !keep(x)).length, dictationUploads: (await L.human('GET', 'attachments')).attachments.filter(a => /^dictation-/.test(a.name)).length, botUploadBytes: botBytes};
       // only pre-rendered speech may remain, and only within the (1 MB test) size cap
-      if (!left.messages && !left.dictationUploads && left.botUploadBytes <= 1.3 * 1048576) break;
+      if (!left.messages && !left.dictationUploads) break;   // bot upload bytes are account-wide (production clips included), so only reported
       if (Date.now() - start > 120000) assert.fail('relay not drained: ' + JSON.stringify(left));
       await L.sleep(5000);
     }
@@ -438,19 +438,19 @@ scenarios.apiBudget = async ({srv}) => {
     await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
     await p.locator('#feed').tap();
     await L.waitFor(p, 'seed done', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 25000);
-    const before = await p.evaluate(() => window.__voice.zulip.callLog.length);
+    const before = await p.evaluate(() => window.__voice.zulip.totalCalls());
     const t0 = Date.now(), ids = [];
     for (let i = 1; i <= 10; i++) { ids.push(await L.agentSays('alpha', `[alpha] M${i}\n\n` + (i === 5 ? Array.from({length: 8}, (_, k) => `Long message paragraph ${k} with some words in it.`).join('\n\n') : `Message number ${i}. It has a second sentence.`))); await L.sleep(1500); }
     await L.waitFor(p, 'all read', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 150000);
     const minutes = (Date.now() - t0) / 60000;
-    const calls = await p.evaluate(() => window.__voice.zulip.callLog.length);
+    const calls = await p.evaluate(() => window.__voice.zulip.totalCalls());
     const total = calls - before;
     const perMessage = +(total / 10).toFixed(1), perMinute = Math.round(total / minutes);
     assert.ok(perMinute < 60, `phone made ${perMinute} API calls/min (${total} calls, ${perMessage} per message)`);
     assert.ok(perMessage <= 4, `per message ${perMessage}`);
     // idle: no traffic besides the long poll
-    const idle0 = await p.evaluate(() => window.__voice.zulip.callLog.length); await L.sleep(20000);
-    const idle = (await p.evaluate(() => window.__voice.zulip.callLog.length)) - idle0;
+    const idle0 = await p.evaluate(() => window.__voice.zulip.totalCalls()); await L.sleep(20000);
+    const idle = (await p.evaluate(() => window.__voice.zulip.totalCalls())) - idle0;
     assert.ok(idle <= 2, 'idle calls in 20 s: ' + idle);
     return {phoneCalls: total, perMessage, perMinute, idleCallsIn20s: idle, minutes: +minutes.toFixed(1)};
   } finally { await c.close(); }
@@ -478,6 +478,31 @@ scenarios.reloadNoDuplicates = async ({srv}) => {
     const r = await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 20, num_after: 0, apply_markdown: false});
     assert.equal(r.messages.filter(m => m.sender_id === L.account.humanId).length, 2, 'server has exactly two human messages');
   } finally { await c.close(); }
+};
+
+scenarios.dictationBlocksPlayback = async () => {
+  await L.wipeTasks();
+  const wav = await L.speechWav('Dictating now, please wait for me to finish this sentence and then some more words.');
+  const srv2 = await L.serve(undefined, {'/__mic.wav': wav});
+  const c = await L.openClient({url: srv2.url, mic: '/__mic.wav', prefs: {'voice2-topic': 'alpha'}});
+  const p = c.page;
+  try {
+    await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await p.locator('#feed').tap();
+    await L.waitFor(p, 'seed done', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 25000);
+    await p.locator('#mic').tap();
+    await L.waitFor(p, 'recording', () => document.querySelector('#composer').classList.contains('rec'), 10000);
+    const id = await L.agentSays('alpha', '[alpha] During\n\nThis message arrives while you dictate. It must wait.');
+    await L.waitFor(p, 'message shown', () => document.querySelector('#feed').innerText.includes('while you dictate'), 15000);
+    await L.sleep(6000);
+    assert.equal((await player(p)).status, 'idle', 'nothing plays during dictation');
+    assert.ok(await p.locator('.msg.unread').count() >= 1, 'still unread');
+    await p.locator('#cancel-rec').tap();
+    await L.waitFor(p, 'plays after dictation', () => window.__voice.player.snapshot().status === 'playing' || !document.querySelector('.msg.unread'), 20000);
+    await L.waitFor(p, 'read', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 30000);
+    assert.ok(await L.serverRead(id));
+  } finally { await c.close(); await srv2.close(); }
 };
 
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);

@@ -13,9 +13,11 @@ const PRERENDER_WAIT_MS = 2500;
 const BATCH_CHUNKS = 6;
 const STALL_MS = 7000;
 const RETRY_CAP_MS = 8000;
+const N_SLOTS = 6;      // audio elements, each holding one downloaded bundle: the client's audio cache (bytes themselves cannot be read cross-origin)
+const WARM_AHEAD = 3;
 
 export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStatus}) {
-  const slots = [0, 1].map(() => ({el: Object.assign(new Audio(), {preload: 'auto', playsInline: true}), index: -1, ready: false, bundleId: null, chunk: null}));
+  const slots = Array.from({length: N_SLOTS}, () => ({used: 0, el: Object.assign(new Audio(), {preload: 'auto', playsInline: true}), index: -1, ready: false, bundleId: null, chunk: null}));
   for (const slot of slots) { slot.el.setAttribute('playsinline', ''); slot.el.hidden = true; document.body.append(slot.el); }
   let items = [], index = -1, active = null, status = 'idle', gen = 0, unlocked = false, error = '';
   let rate = 1, lastTimeMs = 0, lastProgressMs = 0;
@@ -71,6 +73,9 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   }
   const prefetch = from => { for (let i = from; i < Math.min(items.length, from + AHEAD); i++) clipFor(i); };
 
+  /** Least recently used slot that is not playing. */
+  const victim = () => slots.filter(s => s !== active).sort((a, b) => (a.ready ? 1 : 0) - (b.ready ? 1 : 0) || a.used - b.used)[0];
+
   /** Loads `url` into `slot` and resolves true once it can play. */
   async function load(slot, url) {
     slot.ready = false; slot.bundleId = null;
@@ -90,15 +95,15 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   async function attach(i, myGen) {
     const known = bundleOf(items[i]);
     const held = known && slots.find(s => s.bundleId === known.part.id && s.ready);
-    if (held) return {slot: held, seekMs: known.startMs, bundle: known};
+    if (held) { held.used = Date.now(); return {slot: held, seekMs: known.startMs, bundle: known}; }
     const r = await clipFor(i).url;
     if (myGen !== gen) return {stale: true};
     if (!r.ok) { clips.delete(i); return {error: r.error}; }
-    const slot = slots.find(s => s !== active) ?? slots[0];
+    const slot = victim();
     const loaded = await load(slot, r.url);
     if (myGen !== gen) return {stale: true};
     if (!loaded) { clips.delete(i); localParts.delete(`${items[i].msgId}:${r.bundle.part.firstIdx}`); voice.dropPart?.(r.bundle.part); return {error: 'audio failed to load'}; }
-    slot.ready = true; slot.bundleId = r.bundle.part.id;
+    slot.ready = true; slot.bundleId = r.bundle.part.id; slot.used = Date.now();
     return {slot, seekMs: r.bundle.startMs, bundle: r.bundle};
   }
 
@@ -108,14 +113,17 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     if (warming || !active || status !== 'playing') return;
     const el = active.el;
     if (!(el.duration > 0) || !el.buffered.length || el.buffered.end(el.buffered.length - 1) < el.duration - 0.2) return;
-    const here = bundleOf(items[index])?.part.id;
-    const nextI = items.findIndex((it, i) => i > index && bundleOf(it) && bundleOf(it).part.id !== here);
-    if (nextI < 0) return;
-    const bundle = bundleOf(items[nextI]), idle = slots.find(s => s !== active);
-    if (!idle || slots.some(s => s.bundleId === bundle.part.id && s.ready)) return;
+    const seen = new Set([bundleOf(items[index])?.part.id]);
     warming = true;
-    const r = await clipFor(nextI).url;
-    if (r.ok && idle !== active && await load(idle, r.url)) { idle.ready = true; idle.bundleId = bundle.part.id; log('audio', `warmed ${bundle.part.id.slice(-18)}`); }
+    for (let i = index + 1; i < items.length && seen.size <= WARM_AHEAD; i++) {
+      const bundle = bundleOf(items[i]);
+      if (!bundle || seen.has(bundle.part.id)) continue;
+      seen.add(bundle.part.id);
+      if (slots.some(s => s.bundleId === bundle.part.id && s.ready)) continue;
+      const idle = victim();
+      const r = await clipFor(i).url;
+      if (r.ok && idle !== active && await load(idle, r.url)) { idle.ready = true; idle.bundleId = bundle.part.id; idle.used = Date.now(); log('audio', `warmed ${bundle.part.id.slice(-18)}`); }
+    }
     warming = false;
   }
 

@@ -278,6 +278,7 @@ function onNewAgentMessage(m) {
   const p = parsed(m);
   if (p.switchTo) pendingSwitch = {to: p.switchTo, msgId: items.length ? m.id : null};
   if (!items.length) markRead([m.id]);
+  else if (dict) { /* stays unread; read after dictation ends */ }
   else if (autoplay || player.position().status !== 'idle') {
     if (!player.isUnlocked()) showBanner('Tap to listen', 'tap', () => { player.unlock(); maybeAutoplay(); });
     else player.append(items);
@@ -296,7 +297,7 @@ function playFrom(m, idx = 0) {
 }
 
 function maybeAutoplay() {
-  if (!autoplay || !current || player.position().status !== 'idle') return;
+  if (!autoplay || !current || dict || player.position().status !== 'idle') return;   // never start speech while the user is dictating
   const unread = model.unreadAgentMessages(current);
   const speakable = unread.filter(m => itemsOf(m).length);
   markRead(unread.filter(m => !itemsOf(m).length).map(m => m.id));
@@ -526,7 +527,7 @@ function maybeFinish() {
   if (finished.parts.some(p => p.state === 'failed')) { dict = null; showFailedClips(finished); finished.parts = finished.parts.filter(p => p.state === 'failed'); }
   // Never send with a clip missing: a failed clip keeps the draft and offers a retry.
   if (finished.sendAfter && draftEl.value.trim() && !finished.parts.some(p => p.state === 'failed')) send();
-  if (finished.wasPlaying) player.resume();
+  if (finished.wasPlaying) player.resume(); else maybeAutoplay();
 }
 
 const recorder = createRecorder({log, onClip, onLevel: drawLevel});

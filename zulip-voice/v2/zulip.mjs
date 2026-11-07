@@ -6,10 +6,11 @@ const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(...a)) {
   const authorization = 'Basic ' + btoa(String.fromCharCode(...new TextEncoder().encode(email + ':' + key)));
   let rateLimitedUntilMs = 0;
+  let totalCalls = 0;
   const callTimes = [];   // start times of API calls in the last minute, for the budget display and tests
   async function call(method, path, fields = {}, {timeoutMs = 15000, signal} = {}) {
     const started = performance.now();
-    if (path !== 'events') { callTimes.push(Date.now()); while (callTimes[0] < Date.now() - 60000) callTimes.shift(); }
+    if (path !== 'events') { totalCalls++; callTimes.push(Date.now()); while (callTimes[0] < Date.now() - 60000) callTimes.shift(); }
     const label = `${method} ${path.split('?')[0]}`;
     if (Date.now() < rateLimitedUntilMs) return {ok: false, kind: 'http', status: 429, code: 'RATE_LIMIT', error: `${label}: rate limited`, uncertain: false};
     const body = fields instanceof FormData ? fields : new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
@@ -39,7 +40,7 @@ export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(.
     if (path !== 'events') log('http', `${label} ok ${ms}ms`);
     return {ok: true, data, ms};
   }
-  return {site, call, callsLastMinute: () => { while (callTimes[0] < Date.now() - 60000) callTimes.shift(); return callTimes.length; }, rateLimitedForMs: () => Math.max(0, rateLimitedUntilMs - Date.now()), callLog: callTimes};
+  return {site, call, callsLastMinute: () => { while (callTimes[0] < Date.now() - 60000) callTimes.shift(); return callTimes.length; }, totalCalls: () => totalCalls, rateLimitedForMs: () => Math.max(0, rateLimitedUntilMs - Date.now()), callLog: callTimes};
 }
 
 /**
