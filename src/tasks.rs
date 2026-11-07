@@ -270,33 +270,6 @@ pub fn show(task: &Task) -> String {
     format!("{}\n{fields}{items}", task.name)
 }
 
-/// The email text listing the human's items that were created and deleted in one call; empty when none is theirs.
-// 🧑 “Pending items originated from the human need emails, ones from agents do not.”
-// 🧑 "when we make agents add/remove pending items we urge them to do multiple at a time and also attach any other things to be emailed to the human. I don't want any additional latency from debounce"
-pub fn changes_text(created: &[String], deleted: &[String]) -> String {
-    let mut text = String::new();
-    for (change, items) in [("created", created), ("deleted", deleted)] {
-        let theirs: String = items
-            .iter()
-            .filter_map(|item| item.strip_prefix(HUMAN_MARK))
-            .map(|item| format!("- {item}\n"))
-            .collect();
-        if !theirs.is_empty() {
-            text += &format!("pending item {change}:\n{theirs}");
-        }
-    }
-    text
-}
-
-/// An email body with the item changes under it.
-pub fn with_changes(body: &str, changes: &str) -> String {
-    match (body.trim().is_empty(), changes.is_empty()) {
-        (_, true) => body.to_owned(),
-        (true, false) => changes.to_owned(),
-        (false, false) => format!("{}\n\n{changes}", body.trim_end()),
-    }
-}
-
 /// Every disagreement between the task list and the task files that belong in it: the active ones and the pinned ones.
 // 🧑 "Maybe we should have a validation script that agents should run after editing task file/TODO file?"
 pub fn check(list: &str, all: &[Task]) -> Vec<String> {
@@ -594,28 +567,6 @@ mod tests {
                 "t_gone.md: listed as open work in TODO.md but it is done or not a task file",
             ]
         );
-    }
-
-    #[test]
-    fn the_humans_item_changes_of_one_call_make_one_text() {
-        let created = [
-            "🧑 ship it".to_owned(),
-            "write the code".to_owned(),
-            "🧑 second".to_owned(),
-        ];
-        let deleted = ["🧑 old one".to_owned()];
-        let text = changes_text(&created, &deleted);
-        assert_eq!(
-            text,
-            "pending item created:\n- ship it\n- second\npending item deleted:\n- old one\n"
-        );
-        assert_eq!(changes_text(&created[1..2], &[]), "");
-        assert_eq!(
-            with_changes("Report.\n", &text),
-            format!("Report.\n\n{text}")
-        );
-        assert_eq!(with_changes("Report.\n", ""), "Report.\n");
-        assert_eq!(with_changes(" \n", &text), text);
     }
 
     #[test]

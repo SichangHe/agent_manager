@@ -536,12 +536,20 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
         "h",
         "--evidence",
         "requested behavior delivered",
-        "--quiet-because",
-        "do not email this completion",
     ])?;
     let h = fs::read_to_string(root.join("h.md"))?;
     assert!(h.contains("pending_task_items: []"));
     assert!(h.contains("stage\":\"resolved"));
+    workspace.ok(&[
+        "todo",
+        "add",
+        "another human request",
+        "--from-human",
+        "--task-file",
+        "h",
+    ])?;
+    let h = fs::read_to_string(root.join("h.md"))?;
+    assert!(h.contains("another human request"));
     let database = rusqlite::Connection::open(workspace.0.join("state/amh.sqlite3"))?;
     let mut query = database.prepare("SELECT kind || ' ' || actor FROM events ORDER BY id")?;
     let events = query

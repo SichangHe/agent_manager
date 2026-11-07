@@ -95,8 +95,9 @@ modules
     - after a send, `tell human` lists the agent's earlier emails the human has not read and tells it to replace them with one email; left out of that list and of `mail unread`: item notices and watcher emails (`X-AMH-From: amh ...`), and emails sent outside amh (no `X-AMH-From`), such as a mail-compression job's summaries
     - an email to the human that Gmail refuses (e.g. the account's daily sending limit, `550 5.4.5`) is kept in `outbox/` in the state folder; the watcher tries the outbox every 10 min, oldest first, and stops at the limit; `tell human` then says the email is queued, and nothing it replaces is trashed
     - 🧑 "when we make agents add/remove pending items we urge them to do multiple at a time and also attach any other things to be emailed to the human. I don't want any additional latency from debounce"
-        - `todo add`, `todo done`, `task give` take several items per call; a call that changes the human's items emails them at once, one email per call, and then prints a hint to batch
-        - `amh tell human --add ITEM --done ITEM` records the item changes and lists them under the message in the same email, sent at once
+        - 🧑 "hide the parts about pending item created or deleted"
+            - `todo add`, `todo done`, `task give` record changes without bookkeeping emails
+            - `amh tell human --add ITEM --done ITEM` records changes and sends only the supplied message
         - nothing waits: no record of unreported changes, no later digest
         - 🧑 "Get some agent to fix it, and don’t bother me afterwards": `todo done ... --quiet-because WORDS` removes the human's items without the email and notes the human's words in the task file
 - short commands for the human, top level (`src/cli.rs`, `short` in `src/actions.rs`)
