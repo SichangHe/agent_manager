@@ -1,0 +1,147 @@
+# Zulip voice prototype
+(authored by agents unless marked 🧑)
+
+index
+- `v2/`: current client rewrite; design `v2/design.md`, replaces the files described below (kept for reversal)
+- `service/`: voice service (STT/TTS relay) for any Zulip client incl. nvim; protocol `service/protocol.md`
+- old client and relay-worker: this file, `static-client.md`, `audio.md`, `playback.md`, `reader-ui.md`
+
+🧑 request
+- "I want a seamless experience using Zulip on phones and laptops whereere I can talk to the interface to send messages which which agent I am talking to and listen to what agents have said with very little clicking. How could we achieve that? I do not want to launch an app onto app store. Perhaps the easy way would be a web UI that I can access by being connected to the Tailscale."
+- "Spawn an agent to investigate and propose solutions and work on promising solutions autonomously."
+
+proposed prototype
+- current browser-only deployment and validation: `static-client.md`
+- current interaction and recovery: `playback.md`
+- mock replies may contain `[switch: TASK]` on a separate line
+  - backend strips routing lines and emits validated conversation switches; unknown IDs produce a notice
+  - page switches and announces the destination; autoplay reads only unread replies
+  - mock mentioning another conversation name emits its switch line
+- auto-play toggle queues Zulip unread agent replies in the open conversation, oldest first
+  - read flags saved after completed playback; failed writes retry without repeating audio
+  - stopped/interrupted messages stay unread; Stop audio also disables autoplay
+  - first-line `[task]` titles omitted from reading
+  - tap a sentence to reread from there; reading from the start marks the complete message read
+  - polling pauses while dictating, sending, or hidden; resumes from its cursor
+  - iOS playback after polling still needs phone validation
+- compact viewport layout reserves most space for messages; Compose expands controls
+  - sentence highlighting follows actual playback; manual scrolling pauses following
+  - reader details: `reader-ui.md`
+- mock SSH forwarding accepts `localhost`, `127.0.0.1`, and `[::1]` with any port
+  - submissions require an HTTP origin matching the request host exactly
+  - configured deployment host remains accepted; live host and authentication checks are unchanged
+- private IP fallback: `node ip-mock.mjs`
+  - binds only this machine's Tailscale IPv4 address, port 8768
+  - always mock; ignores live credentials
+  - keyboard dictation and reply playback; browser microphone disabled on HTTP
+- 🧑 browser preference, Zulip message 636474570: "Currently using Arc Search and Arc, but kind of want to switch. Can also use other browsers"
+- 🧑 response to "Also, should speaking require one tap": "Yes"
+  - one tap starts dictation; no always-listening mode
+  - validate Arc Search and Arc on actual devices before claiming compatibility
+- private HTTPS page through Tailscale Serve
+- selected agent remains visible above conversation and draft
+  - tap selection and agent reply routing replace the hidden spoken agent picker
+- server speech recognition composes a draft from browser MediaRecorder audio
+  - unsupported browsers use keyboard dictation
+- review reads recipient and draft aloud
+  - separate confirmation recognizer accepts only send or cancel
+  - transcript containing the word send never sends during composition
+- changing agent restores that agent's draft and stops recognition and playback
+- replies use server Kokoro speech through a shared browser audio player
+  - explicit playback starts from user interaction
+  - worker setup, format checks and measured limits: `audio.md`
+- mock conversations first
+  - visibly labeled; no Zulip credentials or network writes
+- local server owns allowed recipients and submission receipts
+  - browser-generated submission ID binds to exact recipient and text
+  - retries return same receipt
+  - conflicting reuse rejected
+
+integration discovery
+- existing `agent_managers/src/zulip.rs`, `incoming` filters by configured human sender ID
+  - bot-authored messages cannot serve as human input through that route
+- existing `agent_managers/docs/zulip.md`
+  - "one topic per task tag preserves independent task threads"
+  - "replies route by topic without requiring a task header"
+- optional native human Zulip API adapter in `zulip.mjs`
+  - human credentials stay server-side
+  - startup checks `users/me` against configured human ID and rejects bots
+  - fixed channel ID and configured exact task topics determine recipients
+  - reads newest replies on playback; sends appear as the human in Zulip
+- 🧑 "Make the real thing. We test in prod"
+  - `node auto-live.mjs` waits for credentials, validates identity read-only, then stops `zulip-voice-ssh-8769` and serves live on loopback8769
+    - invalid credentials leave mock running; steering agent receives failures and activation status
+    - bind failure restarts mock; watcher needs the user systemd bus and `amh` in PATH
+  - `node ssh-live.mjs` runs live on loopback port 8769 through an SSH tunnel
+  - private inputs under `~/.config/zulip-voice/`
+    - `zuliprc`: standard `[api]` section with `email`, `key`, `site`
+      - service-owned mode `0600`, or human-owned mode `0640` with exact `credentialOwnerUid`/`credentialGroupGid` configured in settings and service membership in that group
+      - human-supplied ownership and permissions are never changed by the app
+    - `settings.json`, mode `0600`: `humanId`, `streamId`, `botId`, `stateDir`, optional credential owner/group IDs above
+  - topics discovered from the configured channel and ordered by newest message
+  - only configured human and verified bot appear in history; only that bot can trigger switches
+  - reply events use a forward cursor across all channel messages; initial connection skips old events
+  - 🧑 "Rid the secret. I don't see a point. We are already inside VPN"
+    - SSH mode requires no login token or session cookie; startup deletes the old token file
+    - local processes that can reach the listener can access it; SSH access is the deployment boundary
+  - switch targets accept an optional `.md` suffix
+  - loopback host aliases and exact request Origin remain required
+  - this entry point replaces Tailscale identity authentication only for SSH deployment
+- run `node server.mjs` with Node 22
+  - default address `http://127.0.0.1:8767`
+  - `VOICE_ORIGIN` sets the exact browser origin when behind private HTTPS
+  - `VOICE_PORT` changes the loopback port
+- mock server keeps conversations and duplicate-submission receipts in memory
+  - restarting clears both
+  - live adapter reserves submission IDs in private durable files before network writes
+    - retries return completed receipt or uncertain status; never resend
+    - ambiguous errors require checking the actual Zulip topic
+- running SSH deployment uses enabled persistent user services `zulip-voice-auto-live` and `zulip-voice-audio`
+  - user lingering enabled; startup after an actual reboot remains untested
+  - stop with `systemctl --user stop zulip-voice-auto-live zulip-voice-audio`
+- mock deployment grants no authorization for live human input
+  - legacy `VOICE_CONFIG` deployment requires exact configured `Tailscale-User-Login` on every request
+  - Serve removes client-supplied identity headers; loopback remains trusted
+  - tagged client devices have no user identity and are rejected
+  - https://tailscale.com/kb/1312/serve#identity-headers
+- live configuration
+  - set `VOICE_CONFIG` to a private JSON file outside the repository, mode `0600`
+  - required keys
+    - `site`: HTTPS Zulip origin
+    - `email`, `apiKey`: human API account credentials; never put into browser or logs
+    - `humanId`, `streamId`, `botId`: existing numeric human, private task-channel, and agent bot IDs
+    - `tailscaleLogin`: exact authorized human tailnet login
+    - `stateDir`: private receipt directory outside repository, mode `0700`
+    - `conversations`: array of `{ "id": "exact_task_topic", "name": "Spoken agent name" }`
+  - live API remains untested against actual account until credentials are supplied
+  - keep one server instance and preserve receipt directory across restarts
+  - https://zulip.com/api/get-own-user
+  - https://zulip.com/api/send-message
+- run `node test.mjs` with Playwright installed
+  - `PLAYWRIGHT_MODULE` optionally points to an existing Playwright module
+  - real Chromium and HTTP server exercise drafts, recipients, lost-response retries, origin and host rejection
+  - also runs session and transport checks
+    - single-use login, cookie gating, loopback aliases, Origin rejection, and reply routing over real HTTP
+    - isolated Zulip API simulations check sender identity, topic routing, cursor pagination, durable receipts, and uncertain-send recovery
+    - simulations never contact Zulip and do not establish real-account or iOS usability
+- device validation remains necessary
+  - private-network attempts failed; phone SSH forwarding now reaches the mock, with reported voice-picker and layout problems
+  - evaluate on the human's phone with Arc Search and laptop with Arc
+    - open the shared link, select the intended agent, dictate, correct a word, confirm delivery, listen to its reply
+    - record completion, taps, permission prompts, time until usable page, time until transcript and audio, wrong recipients and duplicate sends
+    - repeat after switching agents, interrupting audio, locking the screen, and losing connectivity
+    - separate first use from later use with permissions already granted
+  - mock success establishes interaction behavior only; live success requires the intended Zulip topic receiving exactly one message and its actual reply playing
+  - current evidence does not establish a seamless experience or working phone microphone
+  - microphone permission and dictation
+  - spoken confirmation after playback
+  - Bluetooth output and screen locking
+  - tab switching stops speech and recognition; restores drafts
+- browser recognition may use an external service
+  - MDN: "Your audio is sent to a web service for recognition processing, so it won't work offline."
+  - https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition
+- private deployment uses Tailscale Serve
+  - Tailscale: "Tailscale Serve requires you to enable HTTPS certificates in your tailnet"
+  - https://tailscale.com/kb/1312/serve
+  - `tailscale serve --bg --https 443 http://127.0.0.1:8767`
+  - requires operator or administrator rights
