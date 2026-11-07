@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark"><title>Voice self-test</title>
+<style>
+:root{--bg:#fff;--fg:#1b1b1f;--panel:#f4f5f7;--ok:#2e9b57;--bad:#c62828;--accent:#2f6fed;font:16px/1.4 -apple-system,system-ui,sans-serif}
+@media(prefers-color-scheme:dark){:root{--bg:#000;--fg:#ececf0;--panel:#17181b;--accent:#4c8dff}}
+body{margin:0;padding:14px calc(14px + env(safe-area-inset-right)) 40px 14px;background:var(--bg);color:var(--fg)}
+h1{font-size:20px;margin:0 0 4px}p{margin:4px 0 10px;opacity:.7}
+.step{background:var(--panel);border-radius:14px;padding:12px;margin:10px 0}
+.step h2{font-size:16px;margin:0}.step small{display:block;opacity:.7;margin:2px 0 8px}
+button{font:inherit;font-weight:600;padding:10px 16px;border-radius:12px;border:0;background:var(--accent);color:#fff}
+.bar #copy{background:var(--panel);color:var(--fg);border:1px solid var(--accent)}button:disabled{opacity:.4}
+.res{margin-top:8px;font:13px ui-monospace,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.pass{color:var(--ok)}.fail{color:var(--bad)}.run{opacity:.6}
+</style></head><body>
+<h1>Voice self-test</h1><p>Tap Start once. All checks run by themselves (allow the microphone when asked; airplane-mode and lock checks prompt with a countdown and skip if you ignore them). The report goes to the server at the end.</p>
+<div class="bar"><button id="start">Start</button> <button id="copy">Copy</button> <a href="index.html">Back to app</a></div>
+<p id="prompt" style="font-weight:700;opacity:1"></p><p id="summary"></p>
+<div id="steps"></div>
+<script type="module" src="selftest.mjs"></script>
+</body></html>

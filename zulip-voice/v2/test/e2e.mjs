@@ -1,0 +1,492 @@
+/** End-to-end scenarios: real WebKit (iPhone viewport), real Zulip, real relay service and GPU workers. Prints only failures. */
+import assert from 'node:assert/strict';
+import * as L from './lib.mjs';
+
+const only = process.argv[2];
+const scenarios = {};
+const results = [];
+
+const player = p => p.evaluate(() => window.__voice.player.snapshot());
+const feedText = p => p.evaluate(() => document.querySelector('#feed').innerText);
+const tap = (p, sel) => p.locator(sel).tap();
+
+scenarios.autoplayChain = async ({srv}) => {
+  // "It plays one message and gets stuck": five messages arrive spaced out; all must play in order and be flagged read.
+  await L.wipeTasks();
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.agentSays('alpha', '[alpha] Seed\n\nSeed message to open the topic.');
+    await L.waitFor(c.page, 'seed in feed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await c.page.locator('#feed').tap(); // gesture unlocks audio
+    await L.waitFor(c.page, 'seed finished', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 25000);
+    const ids = [];
+    const arrivals = [];
+    for (let i = 1; i <= 5; i++) {
+      ids.push(await L.agentSays('alpha', `[alpha] Report ${i}\n\nThis is report number ${i}. It has a second sentence for length. And a third one so that playback takes a moment.`));
+      arrivals.push(Date.now());
+      await L.sleep(i % 2 ? 2500 : 9000);
+    }
+    await L.waitFor(c.page, 'all five read', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 60000);
+    const log = await c.page.evaluate(() => window.__voice.log.text());
+    const started = [...log.matchAll(/audio\s+start \d+:/g)].length;
+    assert.ok(started >= 5, `expected >=5 playbacks, got ${started}`);
+    for (const id of ids) assert.ok(await L.serverRead(id), `message ${id} not flagged read on server`);
+    assert.equal(c.errors.filter(e => !/interactive-widget/.test(e)).length, 0, c.errors.join('\n'));
+    return {playbacks: started};
+  } finally { await c.close(); }
+};
+
+scenarios.unreadOnlyAndReread = async ({srv}) => {
+  await L.wipeTasks();
+  const old = await L.agentSays('alpha', '[alpha] Old\n\nThis is an old message that was already read.');
+  await L.human('POST', 'messages/flags', {messages: [old], op: 'add', flag: 'read'});
+  const fresh = await L.agentSays('alpha', '[alpha] Fresh\n\nThis is a fresh unread message.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.waitFor(c.page, 'banner', () => document.querySelector('#banner').innerText.includes('Tap to listen (1 unread)'));
+    await c.page.locator('#banner').tap();
+    await L.waitFor(c.page, 'fresh read', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 25000);
+    const log = await c.page.evaluate(() => window.__voice.log.text());
+    assert.equal([...log.matchAll(/audio\s+start \d+:/g)].length, 1, 'only the unread message may be read');
+    assert.ok(await L.serverRead(fresh), 'fresh not flagged read on server');
+    // tap the old message: it plays and continues into the following (already read) message
+    await c.page.locator(`.msg.agent[data-id="${old}"] .s`).first().tap();
+    await L.waitFor(c.page, 'old message playing', id => document.querySelector(`.msg[data-id="${id}"] .s.now`) !== null, 15000, old);
+    await L.waitFor(c.page, 'continues into next', id => document.querySelector(`.msg[data-id="${id}"] .s.now`) !== null, 20000, fresh);
+    // next/prev buttons and pause
+    await tap(c.page, '#play');
+    assert.equal((await player(c.page)).status, 'paused');
+    await tap(c.page, '#prev');
+    await L.waitFor(c.page, 'prev plays old', id => document.querySelector(`.msg[data-id="${id}"] .s.now`) !== null, 15000, old);
+    await tap(c.page, '#faster'); await tap(c.page, '#faster');
+    assert.equal(await c.page.locator('#rate').innerText(), '1.2×');
+    await tap(c.page, '#next');
+    await L.waitFor(c.page, 'next plays fresh', id => document.querySelector(`.msg[data-id="${id}"] .s.now`) !== null, 15000, fresh);
+    assert.equal(await c.page.evaluate(() => window.__voice.player.snapshot().slots.some(s => s.t >= 0)), true);
+  } finally { await c.close(); }
+};
+
+scenarios.switchDirective = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('beta', '[beta] Beta task\n\nBeta is waiting with news.');
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.waitFor(c.page, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await c.page.locator('#feed').tap();
+    await L.waitFor(c.page, 'seed done', () => window.__voice.player.snapshot().status === 'idle', 25000);
+    await L.agentSays('alpha', '[alpha] Handoff\n\nI am passing you to beta now.\n[switch: beta]');
+    await L.waitFor(c.page, 'switched to beta', () => window.__voice.current() === 'beta', 30000);
+    assert.ok(!(await feedText(c.page)).includes('switch:'), 'switch line must not be shown');
+    await L.waitFor(c.page, 'beta unread played', () => !document.querySelector('.msg.unread'), 30000);
+  } finally { await c.close(); }
+};
+
+scenarios.sendText = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  try {
+    await L.waitFor(c.page, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await c.page.locator('#draft').fill('hello from the e2e test');
+    const t0 = Date.now();
+    await tap(c.page, '#send');
+    await L.waitFor(c.page, 'echo', () => [...document.querySelectorAll('.msg.mine')].length === 1 && !document.querySelector('.msg.mine .state button'), 5000);
+    const sendMs = Date.now() - t0;
+    await L.sleep(1500);
+    const r = await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 5, num_after: 0, apply_markdown: false});
+    assert.equal(r.messages.filter(m => m.content === 'hello from the e2e test').length, 1, 'exactly one copy on the server');
+    await L.sleep(4500);
+    assert.equal(await c.page.locator('.msg.mine').count(), 1, 'echo must not duplicate the bubble');
+    return {sendMs};
+  } finally { await c.close(); }
+};
+
+scenarios.dictation = async () => {
+  // Real recorder pipeline: speech WAV -> fake mic hardware -> worklet -> VAD clips -> upload -> relay -> Whisper -> draft.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+  const phrase = 'Please run the build now. Then tell me when the tests have finished.';
+  const wav = await L.speechWav(phrase + ' ' + phrase.replace('build', 'deployment'));
+  const srv2 = await L.serve(undefined, {'/__mic.wav': wav});
+  const c = await L.openClient({url: srv2.url, mic: '/__mic.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  try {
+    await L.waitFor(c.page, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    const t0 = Date.now();
+    await tap(c.page, '#mic');
+    await L.waitFor(c.page, 'recording', () => document.querySelector('#composer').classList.contains('rec'), 5000);
+    const firstMs = await L.waitFor(c.page, 'first transcript', () => /build/i.test(document.querySelector('#draft').value), 30000);
+    // stop and keep text in the box
+    await tap(c.page, '#mic');
+    await L.waitFor(c.page, 'finished', () => !document.querySelector('#composer').classList.contains('rec'), 20000);
+    const draft = await c.page.locator('#draft').inputValue();
+    assert.match(draft, /build/i);
+    assert.ok(await c.page.locator('#send').isEnabled(), 'send enabled after dictation');
+    const log = await c.page.evaluate(() => window.__voice.log.text());
+    const clips = [...log.matchAll(/mic\s+clip/g)].length;
+    const sttMs = [...log.matchAll(/relay\s+stt \S+ ok total=(\d+)ms/g)].map(m => +m[1]);
+    assert.ok(clips >= 1, 'clips recorded');
+    // finish-and-send in one tap
+    await c.page.locator('#draft').fill('');
+    await tap(c.page, '#mic');
+    await L.waitFor(c.page, 'recording 2', () => document.querySelector('#composer').classList.contains('rec'), 5000);
+    await L.waitFor(c.page, 'transcript 2', () => /build|deployment/i.test(document.querySelector('#draft').value), 30000);
+    const t1 = Date.now();
+    await tap(c.page, '#send');
+    await L.waitFor(c.page, 'sent', () => !document.querySelector('#composer').classList.contains('rec') && document.querySelectorAll('.msg.mine').length === 1, 20000);
+    const finishToSentMs = Date.now() - t1;
+    await L.sleep(1500);
+    const r = await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 5, num_after: 0, apply_markdown: false});
+    const mine = r.messages.filter(m => m.sender_id === L.account.humanId);
+    assert.equal(mine.length, 1, 'exactly one dictated message sent');
+    assert.match(mine[0].content, /build|deployment/i);
+    // cancel discards
+    await tap(c.page, '#mic');
+    await L.waitFor(c.page, 'recording 3', () => document.querySelector('#composer').classList.contains('rec'), 5000);
+    await tap(c.page, '#cancel-rec');
+    await L.waitFor(c.page, 'cancelled', () => !document.querySelector('#composer').classList.contains('rec'), 10000);
+    assert.equal(await c.page.locator('#draft').inputValue(), '');
+    return {firstTranscriptMs: firstMs, clips, sttRoundTripMs: sttMs.join(','), finishToSentMs, transcript: mine[0].content.slice(0, 80)};
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.connectionDrops = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.waitFor(c.page, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await c.page.locator('#feed').tap();
+    await L.waitFor(c.page, 'seed done', () => window.__voice.player.snapshot().status === 'idle' && document.querySelector('#conn').dataset.state === 'live', 25000);
+    // 1. network goes away for 8 s; a message arrives meanwhile
+    await c.context.setOffline(true);
+    await L.waitFor(c.page, 'client notices offline', () => document.querySelector('#conn').dataset.state !== 'live', 15000);
+    await L.agentSays('alpha', '[alpha] Offline\n\nThis message was sent while the phone had no network.');
+    await L.sleep(8000);
+    const t0 = Date.now();
+    await c.context.setOffline(false);
+    await L.waitFor(c.page, 'live again', () => document.querySelector('#conn').dataset.state === 'live', 20000);
+    await L.waitFor(c.page, 'offline message shown', () => document.querySelector('#feed').innerText.includes('sent while the phone had no network'), 15000);
+    const recoverMs = Date.now() - t0;
+    await L.waitFor(c.page, 'offline message played and read', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 25000);
+    // 2. the server forgets the event queue
+    await c.page.route('**/api/v1/events*', route => route.fulfill({status: 400, contentType: 'application/json', body: JSON.stringify({result: 'error', code: 'BAD_EVENT_QUEUE_ID', msg: 'Bad event queue id'})}), {times: 1});
+    await L.agentSays('alpha', '[alpha] Lost queue\n\nThis message follows an expired event queue.');
+    await L.waitFor(c.page, 'message after queue loss', () => document.querySelector('#feed').innerText.includes('follows an expired event queue'), 20000);
+    const log = await c.page.evaluate(() => window.__voice.log.text());
+    assert.match(log, /queue expired; re-registering/);
+    await L.waitFor(c.page, 'read after queue loss', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 25000);
+    // 3. a half-open socket: the poll never answers; resuming the page must restart it at once
+    await c.page.route('**/api/v1/events*', () => {});
+    await L.sleep(1500);
+    await c.page.unroute('**/api/v1/events*');
+    await L.agentSays('alpha', '[alpha] Hung\n\nThis message follows a hung connection.');
+    const t1 = Date.now();
+    await c.page.evaluate(() => { Object.defineProperty(document, 'visibilityState', {value: 'visible', configurable: true}); document.dispatchEvent(new Event('visibilitychange')); });
+    await L.waitFor(c.page, 'message after hang', () => document.querySelector('#feed').innerText.includes('follows a hung connection'), 15000);
+    const resumeMs = Date.now() - t1;
+    return {recoverMs, resumeMs};
+  } finally { await c.close(); }
+};
+
+scenarios.debugViewAndReload = async ({srv}) => {
+  await L.wipeTasks();
+  const id = await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 8}, (_, i) => `This is sentence number ${i} of a long message that takes a while to speak.`).join(' '));
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.waitFor(c.page, 'banner', () => document.querySelector('#banner').innerText.includes('Tap to listen'));
+    await c.page.locator('#banner').tap();
+    await L.waitFor(c.page, 'playing', () => window.__voice.player.snapshot().status === 'playing');
+    await tap(c.page, '#conn');
+    await L.waitFor(c.page, 'debug filled', () => /events: live[\s\S]*voice: ok/.test(document.querySelector('#debug-status').textContent) && document.querySelector('#debug-log').textContent.includes('audio'), 8000);
+    await tap(c.page, '#dbg-ping');
+    await L.waitFor(c.page, 'ping toast', () => /ok rtt=/.test(document.querySelector('#toast').textContent), 10000);
+    await c.page.keyboard.press('Escape');
+    // reload mid-message: the unfinished message stays unread and offers to resume
+    await c.page.reload();
+    await L.waitFor(c.page, 'banner after reload', () => document.querySelector('#banner').innerText.includes('Tap to listen (1 unread)'), 15000);
+    const logAfter = await c.page.evaluate(() => window.__voice.log.text());
+    assert.match(logAfter, /session start[\s\S]*session start/, 'previous session log survives the reload');
+    assert.ok(!(await L.flagsOf(id)).includes('read'), 'interrupted message is still unread on the server');
+    await c.page.locator('#banner').tap();
+    await L.waitFor(c.page, 'plays after reload', () => window.__voice.player.snapshot().status === 'playing', 15000);
+  } finally { await c.close(); }
+};
+
+scenarios.gaplessLongMessage = async ({srv}) => {
+  // One long message = many chunks; measures first-audio latency and the silence between consecutive chunks.
+  await L.wipeTasks();
+  const body = Array.from({length: 14}, (_, i) => `Paragraph ${i} explains one more detail of the long report in plain words.`).join('\n\n');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+    await L.waitFor(c.page, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await c.page.locator('#feed').tap();
+    await L.waitFor(c.page, 'seed done', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 25000);
+    const t0 = Date.now();
+    const id = await L.agentSays('alpha', '[alpha] Long\n\n' + body);
+    await L.waitFor(c.page, 'playing', () => window.__voice.player.snapshot().status === 'playing', 20000);
+    const firstAudioMs = Date.now() - t0;
+    await L.waitFor(c.page, 'finished', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 140000);
+    const lines = (await c.page.evaluate(() => window.__voice.log.text())).split('\n');
+    const time = l => { const [h, m, s] = l.slice(0, 12).split(':'); return (+h * 60 + +m) * 60000 + +s * 1000; };
+    const gaps = [];
+    for (let i = 0; i < lines.length; i++) {
+      const e = lines[i].match(/audio\s+ended (\d+):(\d+)/);
+      if (!e || +e[1] !== id) continue;
+      const next = lines.slice(i + 1).find(l => /audio\s+start \d+:/.test(l));
+      if (next) gaps.push(time(next) - time(lines[i]));
+    }
+    assert.ok(gaps.length >= 5, 'multiple chunks played: ' + gaps.length);
+    assert.ok(Math.max(...gaps) < 900, 'gap between chunks: ' + gaps);
+    return {firstAudioMs, chunks: gaps.length + 1, maxGapMs: Math.max(...gaps), gapsMs: gaps.join(',')};
+  } finally { await c.close(); }
+};
+
+scenarios.relayCleanup = async () => {
+  // After every kind of relay traffic (and an orphan from a vanished client) the relay channel and uploads must drain to empty.
+  await L.wipeTasks();
+  const wav = await L.speechWav('Cleanup check for the relay channel.');
+  const srv2 = await L.serve(undefined, {'/__mic.wav': wav});
+  const c = await L.openClient({url: srv2.url, prefs: {'voice2-topic': 'alpha'}});
+  try {
+    await L.agentSays('alpha', '[alpha] Cleanup\n\nThis message makes the relay pre-render speech. It has two sentences.');
+    await L.waitFor(c.page, 'client up', () => window.__voice.events.info().state === 'live', 20000);
+    const r = await c.page.evaluate(async () => {
+      const v = window.__voice.voice;
+      const tts = await v.ttsBatch(['A one off sentence for the cleanup test.']);
+      const blob = await (await fetch('/__mic.wav')).blob();
+      const stt = await v.stt(blob);
+      const ping = await v.ping();
+      await v.sendLog('cleanup-test', 'hello');
+      return {tts: tts.ok, stt: stt.ok && stt.text, ping: ping.ok};
+    });
+    assert.ok(r.tts && r.stt && r.ping, JSON.stringify(r));
+    // an orphan: a request from a client that vanished before cleaning up
+    await L.human('POST', 'messages', {type: 'stream', to: L.RELAY, topic: 'tts', content: JSON.stringify({voice: 1, id: 'orphan_' + Date.now(), op: 'tts', text: 'Nobody will clean this up.'})});
+    await c.close();
+    const start = Date.now();
+    let left;
+    for (;;) {
+      const m = await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.RELAY}], anchor: 'newest', num_before: 200, num_after: 0, apply_markdown: false});
+      const keep = x => { try { return String(JSON.parse(x.content).id).startsWith('proactive_'); } catch { return false; } };
+      const botBytes = (await L.bot('GET', 'attachments')).attachments.filter(a => /^voice-/.test(a.name)).reduce((n, a) => n + a.size, 0);
+      left = {messages: m.messages.filter(x => !keep(x)).length, dictationUploads: (await L.human('GET', 'attachments')).attachments.filter(a => /^dictation-/.test(a.name)).length, botUploadBytes: botBytes};
+      // only pre-rendered speech may remain, and only within the (1 MB test) size cap
+      if (!left.messages && !left.dictationUploads && left.botUploadBytes <= 1.3 * 1048576) break;
+      if (Date.now() - start > 120000) assert.fail('relay not drained: ' + JSON.stringify(left));
+      await L.sleep(5000);
+    }
+    return {drainedAfterMs: Date.now() - start};
+  } finally { await c.close().catch(() => {}); await srv2.close(); }
+};
+
+scenarios.clipDeletedRecovers = async ({srv}) => {
+  // The pre-rendered clip's upload disappears (evicted or expired): playback must recover by rendering a fresh clip.
+  await L.wipeTasks();
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  try {
+    const id = await L.agentSays('alpha', '[alpha] Victim\n\nThis clip will lose its upload before it plays.');
+    await L.waitFor(c.page, 'prepared clip known', () => window.__voice.voice.preparedCount() > 0 && document.querySelector('.msg.agent'), 20000);
+    const att = (await L.bot('GET', 'attachments')).attachments.filter(a => a.name.startsWith('voice-proactive_' + id));
+    assert.ok(att.length, 'found the prepared upload');
+    for (const a of att) await L.bot('DELETE', 'attachments/' + a.id);
+    await c.page.evaluate(() => { for (const e of window.__voice.voice.preparedEntries()) e.arrivedMs = 0; });
+    await c.page.locator('.msg.agent .s').first().tap();
+    await L.waitFor(c.page, 'recovered and playing', () => window.__voice.player.snapshot().status === 'playing', 30000);
+    await L.waitFor(c.page, 'read', () => !document.querySelector('.msg.unread'), 30000);
+    assert.ok(await L.serverRead(id));
+  } finally { await c.close(); }
+};
+
+scenarios.walkingNetwork = async () => {
+  // A phone walking outside: random 0-2.5 s latency, 20% aborted requests, and two 6 s blackouts. The UI must stay responsive,
+  // show a clear state for every pending item, and everything must end consistent once the network is good again.
+  await L.wipeTasks();
+  const wav = await L.speechWav('Please run the build now and tell me when it is done.');
+  const srv2 = await L.serve(undefined, {'/__mic.wav': wav});
+  const c = await L.openClient({url: srv2.url, mic: '/__mic.wav', prefs: {'voice2-topic': 'alpha'}});
+  const p = c.page;
+  try {
+    await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await p.locator('#feed').tap();
+    await L.waitFor(p, 'seed done', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 25000);
+    await p.evaluate(() => { window.__lag = []; let last = performance.now(); setInterval(() => { const n = performance.now(); if (n - last - 100 > 250) window.__lag.push(Math.round(n - last - 100)); last = n; }, 100); });
+    let blackoutUntil = 0, aborted = 0, passed = 0;
+    await p.route(/\/(api\/v1|user_uploads)\//, async route => {
+      const now = Date.now();
+      if (now < blackoutUntil) { await L.sleep(1500); aborted++; return route.abort('connectionfailed').catch(() => {}); }
+      if (Math.random() < 0.2) { await L.sleep(Math.random() * 1500); aborted++; return route.abort('connectionreset').catch(() => {}); }
+      await L.sleep(Math.random() * 2500);
+      passed++;
+      return route.continue().catch(() => {});
+    });
+    const agentIds = [];
+    const mineWanted = [];
+    const t0 = Date.now();
+    const blackout = () => { blackoutUntil = Date.now() + 6000; };
+    // 1. messages arrive while the network is bad
+    agentIds.push(await L.agentSays('alpha', '[alpha] W1\n\nFirst walking message with a couple of sentences. Second sentence here.'));
+    await L.sleep(3000); blackout();
+    agentIds.push(await L.agentSays('alpha', '[alpha] W2\n\nSecond walking message that arrives during a blackout. It should still be read.'));
+    // 2. the human sends text meanwhile
+    await p.locator('#draft').fill('walking text one'); mineWanted.push('walking text one');
+    const tSend = Date.now(); await p.locator('#send').tap();
+    const sendTapMs = Date.now() - tSend;
+    assert.ok(await p.locator('.msg.mine').count() >= 1, 'bubble appears at once');
+    const bubbleState = await p.locator('.msg.mine .state').first().innerText();
+    // 3. controls respond during the bad network
+    const respond = [];
+    for (let i = 0; i < 4; i++) { const t = Date.now(); const before = await p.locator('#rate').innerText(); await p.locator('#faster').tap(); await L.waitFor(p, 'rate changes', b => document.querySelector('#rate').innerText !== b, 2000, before); respond.push(Date.now() - t); await L.sleep(700); }
+    // 4. dictation and stop-and-send under bad network
+    await L.sleep(4000); blackout();
+    await p.locator('#mic').tap();
+    await L.waitFor(p, 'recording', () => document.querySelector('#composer').classList.contains('rec'), 10000);
+    await L.waitFor(p, 'dictated text or pending marker', () => /build|…/.test(document.querySelector('#draft').value), 40000);
+    await p.locator('#send').tap();
+    agentIds.push(await L.agentSays('alpha', '[alpha] W3\n\nThird walking message after the dictation. Last sentence.'));
+    // everything has a visible state while it is flaky
+    const sawNet = await p.evaluate(() => !document.querySelector('#net').hidden || document.querySelector('#conn').dataset.state !== 'live' || !!document.querySelector('.msg.mine.sending'));
+    await L.sleep(Math.max(0, 40000 - (Date.now() - t0)));
+    // good network again
+    await p.unroute(/\/(api\/v1|user_uploads)\//);
+    const tGood = Date.now();
+    await L.waitFor(p, 'everything settled', () => document.querySelector('#conn').dataset.state === 'live' && document.querySelector('#net').hidden && !document.querySelector('.msg.mine.sending, .msg.mine.failed') && !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 90000);
+    const settleMs = Date.now() - tGood;
+    for (const id of agentIds) assert.ok(await L.serverRead(id), `agent message ${id} not read on server`);
+    const r = await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 30, num_after: 0, apply_markdown: false});
+    const mine = r.messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content);
+    assert.equal(mine.filter(t => t === 'walking text one').length, 1, 'typed message exactly once: ' + JSON.stringify(mine));
+    assert.equal(mine.length, 2, 'typed and dictated messages exactly once each: ' + JSON.stringify(mine));
+    const lag = await p.evaluate(() => window.__lag);
+    const calls = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /\shttp\s/.test(l)).length;
+    assert.ok(Math.max(0, ...lag) < 400, 'main thread stalls: ' + lag);
+    assert.ok(Math.max(...respond) < 700, 'controls slow: ' + respond);
+    assert.ok(sendTapMs < 500, 'send tap blocked ' + sendTapMs);
+    assert.ok(sawNet, 'a visible network/pending state was shown');
+    return {pageHttpLogLines: calls, requestsPassed: passed, requestsAborted: aborted, sendTapMs, bubbleState, controlResponseMs: respond.join(','), maxMainThreadStallMs: Math.max(0, ...lag), settleAfterGoodNetworkMs: settleMs};
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.chunkSkip = async ({srv}) => {
+  await L.wipeTasks();
+  const long = await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 5}, (_, i) => `Paragraph ${i} of the long message, spoken as its own chunk.`).join('\n\n'));
+  const second = await L.agentSays('alpha', '[alpha] Second\n\nThe second message.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  const now = () => p.evaluate(() => { const n = document.querySelector('.s.now'); return n ? n.closest('.msg').dataset.id + ':' + n.dataset.from : null; });
+  const at = async want => { await L.waitFor(p, 'chunk ' + want, w => { const n = document.querySelector('.s.now'); return n && n.closest('.msg').dataset.id + ':' + n.dataset.from === w; }, 15000, want); };
+  try {
+    await L.waitFor(p, 'messages', () => document.querySelectorAll('.msg.agent').length === 2);
+    await p.locator(`.msg[data-id="${long}"] .s`).first().tap();
+    await at(`${long}:0`);
+    await tap(p, '#next'); await at(`${long}:1`);
+    await tap(p, '#next'); await at(`${long}:2`);
+    await tap(p, '#prev'); await at(`${long}:1`);          // within 2 s: previous chunk
+    await L.sleep(2600);
+    await tap(p, '#prev'); await at(`${long}:1`);          // after 2 s: restarts this chunk
+    assert.ok(await p.evaluate(() => window.__voice.player.currentTime()) < 2, 'restarted from the start');
+    // long press next: whole next message
+    await p.locator('#next').dispatchEvent('pointerdown'); await L.sleep(700); await p.locator('#next').dispatchEvent('pointerup');
+    await p.locator('#next').dispatchEvent('click');
+    await at(`${second}:0`);
+    // chunk next from the last chunk of a message crosses into the next message
+    await p.locator(`.msg[data-id="${long}"] .s`).last().tap(); await at(`${long}:4`);
+    await tap(p, '#next'); await at(`${second}:0`);
+  } finally { await c.close(); }
+};
+
+scenarios.skipSpam = async ({srv}) => {
+  await L.wipeTasks();
+  const id = await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 12}, (_, i) => `Paragraph ${i} of a long message, spoken as its own chunk.`).join('\n\n'));
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  const nowIdx = () => p.evaluate(() => { const n = document.querySelector('.s.now'); return n ? +n.dataset.from : -1; });
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.evaluate(() => { window.__lag = []; let last = performance.now(); setInterval(() => { const n = performance.now(); if (n - last - 100 > 250) window.__lag.push(Math.round(n - last - 100)); last = n; }, 100); });
+    await p.locator(`.msg[data-id="${id}"] .s`).first().tap();
+    await L.waitFor(p, 'chunk 0 playing', () => window.__voice.player.snapshot().status === 'playing');
+    // first tap acts at once; 4 more quick taps accumulate; the highlight moves instantly, audio loads only the final target
+    const t = await p.evaluate(async () => {
+      const b = document.querySelector('#next'), t0 = performance.now(), seen = [];
+      for (let i = 0; i < 5; i++) { b.click(); await new Promise(r => setTimeout(r, 60)); const n = document.querySelector('.s.now'); seen.push(n ? +n.dataset.from : -1); }
+      return {ms: Math.round(performance.now() - t0), seen, disabled: b.disabled};
+    });
+    assert.deepEqual(t.seen.slice(1), [2, 3, 4, 5], 'highlight follows each tap instantly: ' + t.seen);
+    assert.equal(t.disabled, false, 'button never disabled');
+    await L.waitFor(p, 'audio at chunk 5', () => window.__voice.player.snapshot().status === 'playing' && document.querySelector('.s.now').dataset.from === '5', 8000);
+    const starts = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio\s+start/.test(l)).map(l => l.split(':').pop());
+    assert.ok(!starts.includes('2') && !starts.includes('3') && !starts.includes('4'), 'skipped chunks never started: ' + starts);
+    // and backwards spam
+    await p.evaluate(async () => { const b = document.querySelector('#prev'); for (let i = 0; i < 3; i++) { b.click(); await new Promise(r => setTimeout(r, 60)); } });
+    await L.waitFor(p, 'audio at chunk 3 (restart + 2 back)', () => document.querySelector('.s.now').dataset.from === '3' && window.__voice.player.snapshot().status === 'playing', 8000);
+    const lag = await p.evaluate(() => window.__lag);
+    assert.ok(Math.max(0, ...lag) < 300, 'stalls ' + lag);
+    return {fiveTapsMs: t.ms, highlightPath: t.seen.join('>')};
+  } finally { await c.close(); }
+};
+
+scenarios.apiBudget = async ({srv}) => {
+  // 10 agent messages (one long) played by autoplay: Zulip calls on the phone's key must stay far below the 200/min limit.
+  await L.wipeTasks();
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha'}});
+  const p = c.page;
+  try {
+    await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await p.locator('#feed').tap();
+    await L.waitFor(p, 'seed done', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 25000);
+    const before = await p.evaluate(() => window.__voice.zulip.callLog.length);
+    const t0 = Date.now(), ids = [];
+    for (let i = 1; i <= 10; i++) { ids.push(await L.agentSays('alpha', `[alpha] M${i}\n\n` + (i === 5 ? Array.from({length: 8}, (_, k) => `Long message paragraph ${k} with some words in it.`).join('\n\n') : `Message number ${i}. It has a second sentence.`))); await L.sleep(1500); }
+    await L.waitFor(p, 'all read', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 150000);
+    const minutes = (Date.now() - t0) / 60000;
+    const calls = await p.evaluate(() => window.__voice.zulip.callLog.length);
+    const total = calls - before;
+    const perMessage = +(total / 10).toFixed(1), perMinute = Math.round(total / minutes);
+    assert.ok(perMinute < 60, `phone made ${perMinute} API calls/min (${total} calls, ${perMessage} per message)`);
+    assert.ok(perMessage <= 4, `per message ${perMessage}`);
+    // idle: no traffic besides the long poll
+    const idle0 = await p.evaluate(() => window.__voice.zulip.callLog.length); await L.sleep(20000);
+    const idle = (await p.evaluate(() => window.__voice.zulip.callLog.length)) - idle0;
+    assert.ok(idle <= 2, 'idle calls in 20 s: ' + idle);
+    return {phoneCalls: total, perMessage, perMinute, idleCallsIn20s: idle, minutes: +minutes.toFixed(1)};
+  } finally { await c.close(); }
+};
+
+scenarios.reloadNoDuplicates = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    for (const text of ['first sent message', 'second sent message']) {
+      await p.locator('#draft').fill(text); await p.locator('#send').tap();
+      await L.waitFor(p, text, t => [...document.querySelectorAll('.msg.mine')].some(n => n.innerText.includes(t)) && !document.querySelector('.msg.mine.sending'), 8000, text);
+    }
+    await L.sleep(5000);
+    const count = async () => (await p.evaluate(() => [...document.querySelectorAll('.msg.mine .bubble')].map(b => b.innerText))).sort();
+    assert.deepEqual(await count(), ['first sent message', 'second sent message'], 'before reload');
+    const seen = [];
+    await p.reload();
+    for (let i = 0; i < 40; i++) { seen.push((await count()).join('|')); await L.sleep(200); }
+    const bad = seen.filter(s => s && s !== 'first sent message|second sent message');
+    assert.equal(bad.length, 0, 'bubbles during reload: ' + [...new Set(bad)].join(' // '));
+    const r = await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 20, num_after: 0, apply_markdown: false});
+    assert.equal(r.messages.filter(m => m.sender_id === L.account.humanId).length, 2, 'server has exactly two human messages');
+  } finally { await c.close(); }
+};
+
+const wanted = Object.keys(scenarios).filter(n => !only || n === only);
+const srv = await L.serve();
+for (const name of wanted) {
+  const t0 = Date.now();
+  try { const extra = await scenarios[name]({srv}); results.push({name, ok: true, ms: Date.now() - t0, ...extra}); }
+  catch (error) { results.push({name, ok: false, ms: Date.now() - t0, error: error.message}); }
+}
+await srv.close();
+for (const r of results) console.log(r.ok ? `ok   ${r.name} ${r.ms}ms ${JSON.stringify({...r, name: undefined, ok: undefined, ms: undefined})}` : `FAIL ${r.name}: ${r.error}`);
+process.exit(results.every(r => r.ok) ? 0 : 1);
