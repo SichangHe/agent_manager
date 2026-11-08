@@ -171,6 +171,35 @@ fn systemctl(args: &[&str]) -> Result<u8, String> {
         .unwrap_or(1))
 }
 
+const BATCH_HINT: &str = "This emailed the human by itself. Next time batch: give several items in one call, and when you also have something to tell the human, send it all in one email with `amh tell human --add ITEM --done ITEM`.\n";
+
+/// Email the human at once about the changes one call made to their items on a task; returns the hint to print when an email went out.
+// 🧑 “Pending items originated from the human need emails, ones from agents do not.”
+fn report_items(
+    settings: &Settings,
+    store: &Store,
+    task: &Task,
+    created: &[String],
+    deleted: &[String],
+) -> Result<&'static str, String> {
+    let text = tasks::changes_text(created, deleted);
+    if text.is_empty() {
+        return Ok("");
+    }
+    let sender = format!("{} {}", mail::NOTICE_SENDER, task.address());
+    mail::send(
+        settings,
+        &store.state_dir,
+        task.tag(),
+        "",
+        &text,
+        &sender,
+        &[],
+    )
+    .map_err(|error| format!("amh: the items are saved, but {error}"))?;
+    Ok(BATCH_HINT)
+}
+
 /// Email the human on the caller's thread, then say which earlier emails of the caller the human has not read.
 // 🧑 "Make the emailing script combine emails into one. ... Merge those, which also requires caller interface to change and encourage batched calling of amh tell human"
 fn tell_human(
@@ -674,9 +703,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if text("report_label").is_some() && task.tag() != "stock_news_watch" {
                 return Err("amh: --report-label requires stock_news_watch".to_owned());
             }
+            let mut added = Vec::new();
             for item in many("add") {
                 if let Some(item) = tasks::add_item(&mut task, item, true)? {
                     requests::register(&mut task, &item, "human", "amh tell human --add")?;
+                    added.push(item);
                 }
             }
             let mut done = Vec::new();
@@ -690,7 +721,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 store.save(&task)?;
             }
             drop(lock);
-            // 🧑 "hide the parts about pending item created or deleted"
+            // The item changes made by this same call go out in this email, under the agent's own text.
+            let body = tasks::with_changes(&body, &tasks::changes_text(&added, &done));
             let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
             let attach: Vec<PathBuf> = many("attach").into_iter().map(PathBuf::from).collect();
             // 🧑 "Send the news via email like done before instead of through Zulip"
@@ -802,12 +834,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 store.save(&task)?;
             }
             drop(lock);
+            let hint = report_items(&settings, &store, &task, &new, &[])?;
             let to = if action.0 == "task" {
                 format!(" to {}", task.name)
             } else {
                 String::new()
             };
-            format!("added {} open item(s){to}\n", new.len())
+            format!("added {} open item(s){to}\n{hint}", new.len())
         }
         ("todo", "done") => {
             let lock = store.lock()?;
@@ -828,7 +861,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             // 🧑 "Get some agent to fix it, and don’t bother me afterwards"
             let hint = match text("quiet_because") {
                 Some(_) => "the human is not emailed, as they asked\n",
-                None => "",
+                None => report_items(&settings, &store, &task, &[], &done)?,
             };
             let _lock = store.lock()?;
             request_effects(&store)?;

@@ -25,7 +25,7 @@ scope
 transitions
 - `todo add` records the caller as creator; `--from-human` records `human`
 - `todo done` accepts item text or ID
-    - human: resolves immediately, without a bookkeeping email
+    - human: resolves immediately, with one email for the batch
     - agent: requests resolution, retains the item, queues a message to its creator
 - `todo approve ID` resolves a request created by the caller
     - also before the owner asked for resolution: that withdraws the request, so a creator whose worker is gone can still close
