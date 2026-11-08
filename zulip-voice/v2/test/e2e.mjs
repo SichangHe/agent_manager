@@ -946,6 +946,31 @@ scenarios.voiceFollowUp = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceSwitchInSession = async () => {
+  // "pause" opens a session, then a whole utterance "switch agent to UI client" is a command: read back, "yes", switched.
+  await L.wipeTasks();
+  await L.agentSays('uiclient_steer', '[uiclient_steer] U\n\nUI client agent is here.');
+  await L.agentSays('vl_meeting_work', '[vl] V\n\nMeeting agent is here.');
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const ws = await Promise.all(['Pause. Pause.', 'Switch agent to UI client.', 'Yes.'].map(t => L.speechWav(t))), pcm = w => w.subarray(w.indexOf('data') + 8), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(2000), pcm(ws[0]), gap(2500), pcm(ws[1]), gap(10000), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__ss.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__ss.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'alpha', () => document.querySelector('#feed').innerText.includes('Paragraph 0'));
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 3, 15000);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing');
+    await p.locator('#settings').tap(); await p.locator('#set-voice').check(); await p.keyboard.press('Escape');
+    await L.waitFor(p, 'switched to uiclient_steer', () => window.__voice.current() === 'uiclient_steer', 60000);
+    const log = await p.evaluate(() => window.__voice.log.text());
+    assert.match(log, /switch command inside an open session/);
+    assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'command text not left in the draft');
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

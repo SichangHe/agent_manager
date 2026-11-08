@@ -689,9 +689,19 @@ async function handleCommandClip(blob) {
     openSession(rest);
     return;
   }
+  const sw = normalize(heard).match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
+  if (sw) {
+    clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
+    log('vc', 'switch command inside an open session');
+    draftEl.value = vc.base; autosize();
+    vc = null; recorder.setReplyMode(false);
+    voiceSwitch(sw[1]); vcIdle();
+    return;
+  }
   addToSession(heard);
 }
 let pendingChoice = null;
+const SWITCH_RE = /^(?:switch agents? to|switch agents?|switch to|go to|open|switch)\s+(.+)$/;
 /** "switch to <name>": one clear match switches (with a chime); otherwise show the top 3 and accept first/second/third. */
 function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.say(text).then(ms => recorder.muteFor(ms)); }
 function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); } }
@@ -715,7 +725,7 @@ function openSession(rest) {
   recorder.setReplyMode(true); recorder.beep('ready');
   log('vc', `session opened by start word; rest "${rest}"`);
   const words = normalize(rest);
-  const sw = words.match(/^(?:switch to|go to|open|switch)\s+(.+)$/);
+  const sw = words.match(SWITCH_RE);
   if (sw) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }
   const action = /^(next|skip|forward)$/.test(words) ? 1 : /^(back|previous|again|repeat)$/.test(words) ? -1 : 0;
   if (action) { log('vc', action > 0 ? 'action next' : 'action previous'); vc = null; recorder.setReplyMode(false); jump(action); vcIdle(); return; }
