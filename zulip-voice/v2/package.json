@@ -1,0 +1,6 @@
+{
+  "name": "zulip-voice-v2",
+  "private": true,
+  "description": "Build-time assets only: Silero VAD and its ONNX runtime are copied into the static bundle by build.mjs.",
+  "dependencies": {"@ricky0123/vad-web": "0.0.31", "onnxruntime-web": "1.22.0"}
+}

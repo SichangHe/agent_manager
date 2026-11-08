@@ -145,3 +145,5 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pr
 #listen[data-state='on'] { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); }
 #listen[data-state='waiting'] { outline: 2px dashed var(--warn); }
 #listen[data-state='heard'], #listen[data-state='dictating'], #listen[data-state='sending'] { background: var(--danger); color: #fff; }
+#prev-agent-name { display: none; }
+#prev-agent .arrow { font-size: 20px; line-height: 1; }

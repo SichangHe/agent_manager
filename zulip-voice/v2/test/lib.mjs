@@ -40,7 +40,7 @@ export async function wipeTasks() {
 
 /** Static server for the client directory (or `dist`). */
 export async function serve(root = process.env.DIST || dir, files = {}) {
-  const types = {'.html': 'text/html', '.mjs': 'text/javascript', '.css': 'text/css'};
+  const types = {'.html': 'text/html', '.mjs': 'text/javascript', '.js': 'text/javascript', '.css': 'text/css', '.wasm': 'application/wasm'};
   const server = createServer(async (req, res) => {
     const path = req.url.split('?')[0].replace(/\/$/, '/index.html');
     if (files[path]) { res.writeHead(200, {'Content-Type': 'audio/wav'}).end(files[path]); return; }

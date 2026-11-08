@@ -664,8 +664,8 @@ scenarios.voiceControl = async () => {
   const files = {
     '/__pause.wav': await seq(gap(2500), 'Pause pause pause pause pause.', gap(12000)),
     '/__reply.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first. Over.', gap(20000)),
-    '/__phrase.wav': await seq(gap(2500), 'Pause.', gap(1500), 'Over.', gap(20000)),
-    '/__split.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first and tell me when it is done.', gap(1200), 'Over.', gap(20000)),
+    '/__phrase.wav': await seq(gap(2500), 'Pause.', gap(6000), 'Over.', gap(20000)),
+    '/__split.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Over.', gap(20000)),
     '/__next.wav': await seq(gap(2500), 'Pause. Next.', gap(8000)),
     '/__noise.wav': await seq(gap(2500), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
@@ -702,7 +702,7 @@ scenarios.voiceControl = async () => {
     await L.sleep(1500);
     assert.equal(await status(p), 'playing', 'unrelated speech must not pause');
     const mono = await p.evaluate(() => window.__mono);
-    assert.deepEqual([mono.bad, mono.paused], [0, 0], 'playback never paused or jumped back during noise: ' + JSON.stringify(mono));
+    assert.deepEqual([mono.bad, mono.paused], [0, 0], 'playback never paused or jumped back during noise (energy detector): ' + JSON.stringify(mono));
     assert.equal((await draft(p)).trim(), '', 'nothing added to the draft');
     assert.deepEqual(await mine(), [], 'nothing sent');
   });
@@ -880,7 +880,7 @@ scenarios.agentSearch = async () => {
   await L.agentSays('alpha', '[alpha] A\n\nAlpha agent is here. It has a long enough message to play for a few seconds while we talk to it.');
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
   const sp = await L.speechWav('Pause. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
-  const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(9000), yes.subarray(yes.indexOf('data') + 8), gap(20000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(16000), yes.subarray(yes.indexOf('data') + 8), gap(20000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sw.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sw.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
   const p = c.page;
@@ -1020,10 +1020,10 @@ scenarios.externalPause = async ({srv}) => {
 scenarios.voiceNavigation = async () => {
   // "pause" opens a session, then "back back" (a whole utterance) steps two chunks back and plays from there; nothing goes into the draft.
   await L.wipeTasks();
-  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 10}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
+  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 14}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
   const a = await L.speechWav('Pause.'), b = await L.speechWav('Back back.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
-  const data = Buffer.concat([gap(14000), pcm(a), gap(3000), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const data = Buffer.concat([gap(24000), pcm(a), gap(3000), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__nav.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__nav.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
   const p = c.page;
@@ -1174,6 +1174,45 @@ scenarios.voiceTrailingCancel = async () => {
     const sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId);
     assert.equal(sent.length, 0, 'nothing sent: ' + JSON.stringify(sent.map(m => m.content)));
     assert.equal((await p.locator('#draft').inputValue()).trim(), '');
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.switchBack = async ({srv}) => {
+  await L.wipeTasks();
+  for (const t of ['alpha', 'beta']) await L.agentSays(t, `[${t}] T\n\nThis is the ${t} agent.`);
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+    assert.equal(await p.locator('#prev-agent').isVisible(), false, 'no previous agent yet');
+    await p.locator('#find').tap(); await p.locator('#topics li', {hasText: 'beta'}).tap();
+    await L.waitFor(p, 'on beta', () => window.__voice.current() === 'beta', 10000);
+    assert.equal(await p.locator('#prev-agent').isVisible(), true);
+    await L.sleep(600);
+    await p.locator('#prev-agent').tap();
+    await L.waitFor(p, 'back on alpha', () => window.__voice.current() === 'alpha', 10000);
+    await L.sleep(600);
+    await p.locator('#prev-agent').tap();   // Alt-Tab: toggles
+    await L.waitFor(p, 'on beta again', () => window.__voice.current() === 'beta', 10000);
+    await p.reload();
+    await L.waitFor(p, 'previous persisted', () => document.querySelector('#prev-agent') && !document.querySelector('#prev-agent').hidden, 15000);
+  } finally { await c.close(); }
+};
+
+scenarios.voiceSwitchBack = async () => {
+  await L.wipeTasks();
+  await L.agentSays('beta', '[beta] T\n\nThis is the beta agent.');
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), sp = await L.speechWav('Pause. Switch back.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([gap(9000), sp.subarray(at + 8), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__sb.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__sb.wav', prefs: {'voice2-topic': 'alpha', 'voice2-prev': 'beta', 'voice2-autoplay': false, 'voice2-vc': true}});
+  try {
+    await L.waitFor(c.page, 'message', () => document.querySelector('.msg.agent'));
+    await L.waitFor(c.page, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+    await c.page.locator('.msg.agent .s').first().tap();
+    await L.waitFor(c.page, 'switched back', () => window.__voice.current() === 'beta', 50000);
+    assert.match(await c.page.evaluate(() => window.__voice.log.text()), /switch back to the previous agent/);
   } finally { await c.close(); await srv2.close(); }
 };
 

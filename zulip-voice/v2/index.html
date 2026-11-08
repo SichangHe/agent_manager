@@ -40,6 +40,7 @@
         <canvas id="level" width="120" height="24" hidden></canvas>
       </div>
       <button type="button" id="cancel-rec" class="icon" aria-label="Discard recording" hidden><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button type="button" id="prev-agent" class="icon round" hidden aria-label="Back to the previous agent"><span class="arrow">↩</span><span id="prev-agent-name"></span></button>
       <button type="button" id="listen" class="icon round" data-state="off" aria-label="Voice control: off"><svg viewBox="0 0 24 24" class="i"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4"/></svg><span id="listen-label"></span></button>
       <button type="button" id="mic" class="icon round" aria-label="Dictate"><svg viewBox="0 0 24 24" class="i mic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg><svg viewBox="0 0 24 24" class="i done"><path d="M5 13l4 4L19 7"/></svg></button>
       <button type="submit" id="send" class="icon round accent" aria-label="Send" disabled><svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
@@ -62,6 +63,7 @@
     <p class="muted" style="font-size:13px">Say the start word first ("pause"). Then: <b>back</b> / <b>previous</b> (say twice for two steps), <b>previous message</b>, <b>next</b>, <b>next message</b>, <b>again</b>, <b>switch agent to NAME</b> (then yes), <b>send</b>. Anything else is your reply; finish it with <b>over</b>.</p>
     <label class="row"><span>Start word (default: pause)</span><input id="set-start" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
     <label class="row"><span>Long silence finishes a reply (seconds, 0 = off)</span><input id="set-silence" type="number" min="0" max="30" step="1" style="width:70px;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
+    <label class="row"><span>Neural speech detector (beta; more memory)</span><input id="set-neural" type="checkbox"></label>
     <label class="row"><span>Hide attachments</span><input id="set-hide-att" type="checkbox"></label>
     <label class="row"><span>Speed <b id="set-rate-text"></b></span><input id="set-rate" type="range" min="0.5" max="3" step="0.1"></label>
   </section>

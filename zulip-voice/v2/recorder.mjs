@@ -60,7 +60,13 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
+const VAD_BASE = './vad/';   // build.mjs rewrites this to the hashed asset directory
+const VAD_MIN_SPEECH_MS = 250, VAD_REPLY_MIN_SPEECH_MS = 100;
+
+const loadScript = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });
+
+export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onMisfire, neural = false}) {
+  let vadInst = null, vadReady = null, ignoreUtterance = false;
   let beepCtx = null, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
@@ -83,6 +89,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     const speaking = level > Math.max(MIN_LEVEL, noise * NOISE_MARGIN);
     if (!speaking) noise = noise * 0.98 + level * 0.02;
     onLevel?.(Math.min(1, level * 8));
+    if (!capturing && vadInst) return;   // Silero handles voice control
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
       if (performance.now() < earconUntilMs) { sustainMs = 0; preroll = []; return; }   // our own chime must not count as speech
       if (!speaking && sustainMs >= 80 && sustainMs < BARGE_MS) log('mic', `near miss: speech ${Math.round(sustainMs)}ms < ${BARGE_MS}ms (level ${level.toFixed(3)}, floor ${noise.toFixed(3)})`);
@@ -118,7 +125,36 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     log('mic', `ready at ${ctx.sampleRate}Hz`);
   }
 
+  /**
+   * Silero VAD (neural, via vad-web) on the same echo-cancelled stream and audio context. It replaces the energy detector for voice control:
+   * `onSpeechStart` pauses/ducks, `onSpeechEnd` hands over one clean utterance (with 600 ms preroll), short noise becomes `onMisfire`.
+   * Falls back to the energy detector when the assets cannot load.
+   */
+  async function loadVad() {
+    const base = new URL(VAD_BASE, import.meta.url).href;
+    await loadScript(base + 'ort.wasm.min.js');
+    await loadScript(base + 'bundle.min.js');
+    const t0 = performance.now();
+    vadInst = await window.vad.MicVAD.new({
+      model: 'v5', baseAssetPath: base, onnxWASMBasePath: base, audioContext: ctx, startOnLoad: false,
+      getStream: async () => stream, pauseStream: async () => {}, resumeStream: async () => stream,
+      ortConfig: ort => { ort.env.wasm.numThreads = 1; },   // GitHub Pages cannot send the headers threads need
+      positiveSpeechThreshold: 0.5, negativeSpeechThreshold: 0.35, redemptionMs: 700, preSpeechPadMs: 600, minSpeechMs: VAD_MIN_SPEECH_MS,
+      onSpeechStart: () => { ignoreUtterance = capturing || performance.now() < earconUntilMs; if (!ignoreUtterance && listening) { log('mic', 'silero: speech start'); onBarge?.({neural: true}); } },
+      onSpeechEnd: audio => {
+        const skip = ignoreUtterance || capturing || !listening; ignoreUtterance = false;
+        if (skip) return;
+        const ms = audio.length / 16000 * 1000;
+        log('mic', `silero: utterance ${Math.round(ms)}ms`);
+        onCommandClip(resampleToWav([audio], 16000), {ms, speechMs: ms});
+      },
+      onVADMisfire: () => { if (!ignoreUtterance && listening && !capturing) { log('mic', 'silero: misfire (too short)'); onMisfire?.(); } ignoreUtterance = false; },
+    });
+    log('mic', `silero ready in ${Math.round(performance.now() - t0)}ms`);
+  }
+
   function teardown() {
+    vadInst?.destroy?.().catch?.(() => {}); vadInst = vadReady = null;
     node?.disconnect(); sourceNode?.disconnect();
     stream?.getTracks().forEach(track => track.stop());
     ctx?.close().catch(() => {});
@@ -132,14 +168,17 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     /** Voice control on/off: keeps the warm microphone open and watches for sustained speech. `{ok}` or `{ok: false, error}`. */
     async listen(on) {
       listening = on; sustainMs = 0; clearTimeout(idleTimer);
-      if (!on) { if (!capturing) idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS); return {ok: true}; }
+      if (!on) { vadInst?.pause();  if (!capturing) idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS); return {ok: true}; }
       try {
         warm ??= build().catch(error => { teardown(); throw error; });
         await warm;
         if (ctx?.state === 'suspended') await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 400))]);   // without a gesture iOS may keep it suspended
+        if (neural) vadReady ??= loadVad().catch(error => { log('mic', `silero unavailable, using the energy detector: ${error.message}`); vadReady = null; vadInst = null; });
+        await vadReady;
+        if (vadInst && listening) await vadInst.start();
         return {ok: true, running: ctx?.state === 'running'};
       }
-      catch (error) { listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied.' : `Microphone unavailable (${error.name}).`}; }
+      catch (error) { log('mic', `listen failed: ${error.name} ${error.message}`); listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied.' : `Microphone unavailable (${error.name}).`}; }
     },
     async start() {
       clearTimeout(idleTimer);
@@ -183,10 +222,16 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       });
       earconUntilMs = performance.now() + notes.length * EARCON_NOTE_S * 1000 + 250;
     },
+    /** Opt-in neural detector (Settings beta toggle): loads or unloads Silero; the energy detector is used while it is off. */
+    async useNeural(on) {
+      neural = on;
+      if (!on) { vadInst?.destroy?.().catch?.(() => {}); vadInst = vadReady = null; return; }
+      if (ctx && listening) { vadReady ??= loadVad().catch(error => { log('mic', `silero unavailable: ${error.message}`); vadReady = null; vadInst = null; }); await vadReady; if (vadInst) await vadInst.start(); }
+    },
     /** Ignore the microphone for `ms` (our own speech or chime is playing). */
     muteFor(ms) { earconUntilMs = performance.now() + ms + 250; },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
-    setReplyMode(on) { replyMode = on; },
+    setReplyMode(on) { replyMode = on; vadInst?.setOptions({minSpeechMs: on ? VAD_REPLY_MIN_SPEECH_MS : VAD_MIN_SPEECH_MS}); },
     active: () => capturing,
   };
 }
