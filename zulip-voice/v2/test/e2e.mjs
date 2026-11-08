@@ -837,6 +837,115 @@ scenarios.noReplayAtEnd = async () => {
   }
 };
 
+scenarios.noPlaybackWhileSpeaking = async () => {
+  // A new agent message arriving while the user speaks (manual dictation, or a voice-control reply) must wait until they finish.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const sp = await L.speechWav('Pause. Yes, deploy it to staging and then tell me how it went.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__vc.wav': Buffer.concat([head, data])});
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message to start with.');
+  for (const mode of ['manual', 'voice']) {
+    const c = await L.openClient({url: srv2.url, mic: '/__vc.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true, 'voice2-vc': mode === 'voice'}});
+    const p = c.page;
+    try {
+      await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+      await p.locator('#feed').tap();
+      await L.waitFor(p, 'idle and read', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 30000);
+      if (mode === 'manual') { await p.locator('#mic').tap(); await L.waitFor(p, 'recording', () => document.querySelector('#composer').classList.contains('rec'), 8000); }
+      else await L.waitFor(p, 'speech heard', () => /vc\s+speech detected/.test(window.__voice.log.text()), 30000);
+      const starts = () => p.evaluate(() => (window.__voice.log.text().match(/audio\s+start /g) || []).length);
+      const before = await starts();
+      const id = await L.agentSays('alpha', `[alpha] During ${mode}\n\nThis message arrives while you are speaking.`);
+      await L.waitFor(p, 'message shown', () => document.querySelector('#feed').innerText.includes('arrives while you are speaking'), 15000);
+      await L.sleep(4000);
+      assert.equal(await starts(), before, mode + ': audio started while the user was speaking');
+      assert.ok(await p.locator('.msg.unread').count() >= 1, mode + ': stays unread');
+      if (mode === 'manual') await p.locator('#cancel-rec').tap();
+      else await L.waitFor(p, 'reply closed', () => /vc\s+resume phrase \+ silence|ignored/.test(window.__voice.log.text()), 40000);
+      await L.waitFor(p, 'plays after', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 40000);
+      assert.ok(await L.serverRead(id));
+    } finally { await c.close(); }
+    await L.wipeTasks(); await L.agentSays('alpha', '[alpha] Seed\n\nSeed message to start with.');
+  }
+};
+
+scenarios.agentSearch = async () => {
+  await L.wipeTasks();
+  await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal visualisation agent is here.');
+  await L.agentSays('vl_meeting_work', '[vl] V\n\nMeeting agent is here.');
+  await L.agentSays('alpha', '[alpha] A\n\nAlpha agent is here. It has a long enough message to play for a few seconds while we talk to it.');
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const sp = await L.speechWav('Pause. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(9000), yes.subarray(yes.indexOf('data') + 8), gap(20000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__sw.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__sw.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'alpha', () => document.querySelector('#feed').innerText.includes('Alpha agent'));
+    await L.waitFor(p, 'topics loaded', () => window.__voice.model.topics().length >= 3, 15000);
+    // searchable picker: focused input, fuzzy ("terminal viz" finds terminal_viz), Enter switches
+    await p.locator('#find').tap();
+    assert.equal(await p.evaluate(() => document.activeElement?.id), 'search', 'search box focused on open');
+    await p.locator('#search').fill('terminal viz');
+    assert.equal(await p.locator('#topics li').first().locator('.name').innerText(), 'terminal_viz', 'fuzzy match ranks first');
+    await p.locator('#search').press('Enter');
+    await L.waitFor(p, 'switched by search', () => window.__voice.current() === 'terminal_viz', 10000);
+    assert.equal(await p.evaluate(() => document.querySelector('#picker').open), false, 'picker closed after Enter');
+    await L.sleep(600);
+    // voice: "pause, switch to terminal viz" from another agent
+    await p.locator('#agent').tap(); await p.locator('#topics li', {hasText: 'alpha'}).tap();
+    await L.waitFor(p, 'on alpha', () => window.__voice.current() === 'alpha', 10000);
+    await p.locator('#settings').tap(); await p.locator('#set-voice').check(); await p.keyboard.press('Escape');
+    await L.waitFor(p, 'voice switch', () => window.__voice.current() === 'terminal_viz', 45000);
+    assert.match(await p.evaluate(() => window.__voice.log.text()), /vc\s+switch to "terminal viz/i);
+    assert.match(await p.evaluate(() => window.__voice.log.text()), /vc\s+heard "Yes/i, 'confirmed by voice');
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.idlePrevNext = async ({srv}) => {
+  await L.wipeTasks();
+  const id1 = await L.agentSays('alpha', '[alpha] One\n\nFirst message first chunk.\n\nFirst message last chunk.');
+  await L.agentSays('alpha', '[alpha] Two\n\nSecond message only chunk.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'banner', () => document.querySelector('#banner').innerText.includes('Tap to listen'));
+    await p.locator('#banner').tap();
+    await L.waitFor(p, 'all read and idle', () => !document.querySelector('.msg.unread') && window.__voice.player.snapshot().status === 'idle', 40000);
+    // idle: previous replays the last heard chunk (the second message's only chunk)
+    await p.locator('#prev').tap();
+    await L.waitFor(p, 'previous plays', () => window.__voice.player.snapshot().status === 'playing', 10000);
+    const lastLine = await p.evaluate(() => document.querySelector('.s.now')?.innerText);
+    assert.match(lastLine, /Second message only chunk/, 'replayed the last heard chunk: ' + lastLine);
+    await L.waitFor(p, 'idle again', () => window.__voice.player.snapshot().status === 'idle', 20000);
+    // wake lock is requested while audio plays (logged either way; headless WebKit may not grant it)
+    assert.match(await p.evaluate(() => window.__voice.log.text()), /wake\s+(screen wake lock acquired|not granted)|^/m);
+    void id1;
+  } finally { await c.close(); }
+};
+
+scenarios.voiceFollowUp = async () => {
+  // Speech right after a reply was sent (no start word) continues as a follow-up instead of being dropped.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const a = await L.speechWav('Pause. Deploy it to staging now.'), b = await L.speechWav('And then run all of the tests afterwards.');
+  const pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const data = Buffer.concat([gap(2000), pcm(a), gap(5500), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__fu.wav': Buffer.concat([head, data])});
+  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const c = await L.openClient({url: srv2.url, mic: '/__fu.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-long-silence-s': 3}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'follow-up handled', () => /vc\s+follow-up right after a send/.test(window.__voice.log.text()), 60000);
+    const sent = await (async () => { for (let i = 0; i < 25; i++) { const m = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(x => x.sender_id === L.account.humanId).map(x => x.content); if (m.length >= 2) return m; await L.sleep(1000); } return []; })();
+    assert.equal(sent.length, 2, JSON.stringify(sent));
+    assert.match(sent[1], /run all of the tests/i);
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

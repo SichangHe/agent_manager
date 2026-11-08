@@ -22,6 +22,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   const slots = Array.from({length: N_SLOTS}, () => ({used: 0, el: Object.assign(new Audio(), {preload: 'auto', playsInline: true}), index: -1, ready: false, bundleId: null, chunk: null}));
   for (const slot of slots) { slot.el.setAttribute('playsinline', ''); slot.el.hidden = true; document.body.append(slot.el); }
   let items = [], index = -1, active = null, status = 'idle', gen = 0, unlocked = false, error = '';
+  const sayEl = Object.assign(new Audio(), {preload: 'auto', playsInline: true});
   let rate = 1, lastTimeMs = 0, lastProgressMs = 0;
   const clips = new Map();
   try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
@@ -208,12 +209,23 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     unlock() {
       if (!unlocked) {
         unlocked = true;
+        sayEl.src = SILENCE; sayEl.play().then(() => sayEl.pause(), () => {});
         for (const slot of slots) if (slot !== active && !slot.ready) { slot.el.src = SILENCE; slot.el.play().then(() => { if (slot.el.src === SILENCE) slot.el.pause(); }, err => { if (err.name === 'NotAllowedError') unlocked = false; }); }
         log('audio', 'unlocked by gesture');
       }
       if (status === 'blocked') start(active, gen);
     },
     isUnlocked: () => unlocked,
+    /** Speaks `text` (a short prompt) on its own element, without touching the queue. Resolves with the spoken duration in ms (0 on failure). */
+    async say(text) {
+      const r = await voice.ttsBatch([text.replace(/[_-]/g, ' ')]);
+      if (!r.ok) return 0;
+      const u = await voice.clipUrl(r.clip, URL_FRESH_MS);
+      if (!u.ok) return 0;
+      sayEl.src = u.url;
+      await sayEl.play().catch(() => {});
+      return r.clip.durationMs ?? 2000;
+    },
     /** Replaces the queue and plays `startIndex`. */
     play(newItems, startIndex = 0) { items = newItems; clips.clear(); if (status === 'paused') status = 'idle'; playIndex(startIndex); },
     /** Adds items; if the queue had drained, plays the first new one. */

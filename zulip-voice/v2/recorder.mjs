@@ -8,9 +8,10 @@ const MAX_CLIP_S = 10;
 const PAUSE_MS = 700;
 const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
-const MIN_LEVEL = 0.012;
-const GRACE_MS = 45000;
-const BARGE_MS = 300;
+const MIN_LEVEL = 0.008;     // lowered from 0.012 and the margin from 3x to 2.5x: a false trigger is harmless now (the start word gates everything)
+const NOISE_MARGIN = 2.5;
+const GRACE_MS = 10000;   // the open microphone keeps iOS in its quieter play-and-record mode, so release it soon after dictation
+const BARGE_MS = 180;
 const LISTEN_PREROLL_MS = 1200;
 const EARCON_NOTE_S = 0.14;
 const EARCON_GAIN = 0.5;
@@ -79,11 +80,12 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
     const level = Math.sqrt(sum / frame.length);
-    const speaking = level > Math.max(MIN_LEVEL, noise * 3);
+    const speaking = level > Math.max(MIN_LEVEL, noise * NOISE_MARGIN);
     if (!speaking) noise = noise * 0.98 + level * 0.02;
     onLevel?.(Math.min(1, level * 8));
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
       if (performance.now() < earconUntilMs) { sustainMs = 0; preroll = []; return; }   // our own chime must not count as speech
+      if (!speaking && sustainMs >= 80 && sustainMs < BARGE_MS) log('mic', `near miss: speech ${Math.round(sustainMs)}ms < ${BARGE_MS}ms (level ${level.toFixed(3)}, floor ${noise.toFixed(3)})`);
       sustainMs = speaking ? sustainMs + ms : 0;
       preroll.push(frame); while (preroll.length * ms > LISTEN_PREROLL_MS) preroll.shift();   // ring buffer: speech before the decision is kept
       if (sustainMs < (replyMode ? REPLY_BARGE_MS : BARGE_MS)) return;
@@ -161,7 +163,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       if (capturing && ctx && frames.length) cut(true);
       capturing = false;
       onLevel?.(0);
-      try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
+      if (!listening) { try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ } }   // voice control keeps one stable audio session: flipping it makes the output volume jump
       clearTimeout(idleTimer);
       sustainMs = 0; frames = []; preroll = [];
       idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS);
@@ -180,6 +182,8 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       });
       earconUntilMs = performance.now() + notes.length * EARCON_NOTE_S * 1000 + 250;
     },
+    /** Ignore the microphone for `ms` (our own speech or chime is playing). */
+    muteFor(ms) { earconUntilMs = performance.now() + ms + 250; },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
     setReplyMode(on) { replyMode = on; },
     active: () => capturing,

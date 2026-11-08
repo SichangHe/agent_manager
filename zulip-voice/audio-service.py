@@ -14,6 +14,7 @@ import io
 import json
 import os
 import subprocess
+import urllib.parse
 import time
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -76,7 +77,7 @@ class Speech:
         )
         return output.getvalue()
 
-    def transcribe(self, data: bytes) -> dict[str, str] | str:
+    def transcribe(self, data: bytes, prompt: str = "") -> dict[str, str] | str:
         """Decode browser MP4/WebM/WAV, rejecting recordings longer than two minutes."""
         try:
             decoded = subprocess.run(
@@ -111,7 +112,11 @@ class Speech:
         if not samples.size or samples.size > MAX_AUDIO_S * 16000:
             return "Record between a fraction of a second and two minutes."
         segments, _ = self.stt.transcribe(
-            samples, language="en", beam_size=1, vad_filter=True
+            samples,
+            language="en",
+            beam_size=1,
+            vad_filter=True,
+            initial_prompt=prompt or None,
         )
         return {"text": " ".join(segment.text.strip() for segment in segments).strip()}
 
@@ -187,7 +192,8 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
                         return
                     result = speech.speak(text.strip())
                 else:
-                    result = speech.transcribe(data)
+                    prompt = urllib.parse.unquote(self.headers.get("X-Prompt", ""))[:200]
+                    result = speech.transcribe(data, prompt)
                 self.reply(422, {"error": result}) if isinstance(
                     result, str
                 ) else self.reply(200, result)

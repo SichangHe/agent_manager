@@ -23,6 +23,7 @@ ops
 - `stt`: `{"op":"stt","id":..,"uri":"/user_uploads/...","attachment":"[audio](/user_uploads/...)"}`
   - first upload the audio with `POST /api/v1/user_uploads`, pass the returned `uri`
   - `attachment` (same uri as a markdown link) is required: Zulip only grants the service access to an upload that a message links
+  - optional `prompt` (at most 200 chars): Whisper `initial_prompt`, biases recognition toward words in it; voice-control clients send `Pause. Pause. Over.` so "pause" is not heard as "pulse" and "over" as "oh"
   - audio: WAV, MP4/AAC or WebM; at most 12 MiB and 120 s; English
   - result: `text` (empty = no speech)
 - `tts`: `{"op":"tts","id":..,"text":"One sentence."}`
@@ -31,6 +32,7 @@ ops
   - mint a fresh URL while the upload exists: `GET /api/v1/<uri without leading slash>` returns `{"url":..}`
 - `ack`: `{"op":"ack","id":..,"ids":[request ids]}` deletes those results and uploads now (`ids` optional, defaults to `id`)
 - `log`: `{"op":"log","id":..,"label":"..","text":"<=9500 chars"}` appends client debug text to `client.log` in the service state dir
+  - long logs: send several requests in order, labelled `part i/n` (the service appends each; a request holds at most 9500 chars)
   - rotates at 1 MiB to `client.log.1` (disk use under 2 MiB); result `{"of":"log","bytes":n}` is tiny and cleaned like other results
   - clients should delete their own request message after the result (the web client does)
 - `ping`: `{"op":"ping","id":..,"t":<client ms>}`

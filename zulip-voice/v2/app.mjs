@@ -107,7 +107,7 @@ if (cache) { model.restore(cache); current ??= cache.current; }
 
 const player = createPlayer({
   log, voice,
-  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(); },
+  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(); },
   onItemEnd(item) {
     if (!item.last) return;
     store.set('voice2-pos', null);
@@ -295,12 +295,17 @@ function onTaskMessage(m) {
 }
 
 /** A new agent message in the open topic: queue it for autoplay and honour its `[switch: TASK]` line. */
+/** One gate: manual dictation, an open voice-control reply, or an utterance being captured or transcribed. No playback starts while it is true. */
+let utterancePending = false, utteranceTimer = 0;   // set on speech detection, cleared when its clip is handled (or after 15 s if no clip comes)
+const userSpeaking = () => !!dict || !!vc || utterancePending;
+const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); };
+
 function onNewAgentMessage(m) {
   const items = itemsOf(m);
   const p = parsed(m);
   if (p.switchTo) pendingSwitch = {to: p.switchTo, msgId: items.length ? m.id : null};
   if (!items.length) markRead([m.id]);
-  else if (dict) { /* stays unread; read after dictation ends */ }
+  else if (userSpeaking()) { /* stays unread; read after the user finishes */ }
   else if (autoplay || player.position().status !== 'idle') {
     if (!player.isUnlocked()) showBanner('Tap to listen', 'tap', () => { player.unlock(); maybeAutoplay(); });
     else player.append(items);
@@ -319,7 +324,7 @@ function playFrom(m, idx = 0) {
 }
 
 function maybeAutoplay() {
-  if (!autoplay || !current || dict || player.position().status !== 'idle') return;   // never start speech while the user is dictating
+  if (!autoplay || !current || userSpeaking() || player.position().status !== 'idle') return;   // never start speech while the user speaks
   // Forward only: anything older than the newest read message counts as read and is never played again.
   const newestRead = model.agentMessages(current).filter(m => m.flags?.includes('read')).at(-1);
   if (newestRead) markRead(model.unreadAgentMessages(current).filter(m => m.id < newestRead.id).map(m => m.id));
@@ -358,7 +363,12 @@ function jump(direction, whole = false) {
     const mi = from ? agents.findIndex(m => m.id === from.msgId) : -1;
     const m = agents[from ? mi + direction + (direction < 0 && from.idx > 0 && !burst ? 1 : 0) : (direction > 0 ? 0 : agents.length - 1)];
     target = m && itemsOf(m)[0];
-  } else if (at < 0) target = direction > 0 ? flat[0] : flat.at(-1);
+  } else if (at < 0) {   // idle: previous replays the last heard chunk, next goes to the first unheard one
+    const heard = store.get('voice2-last', null);
+    const hi = heard?.topic === current ? flat.findIndex(it => it.msgId === heard.msgId && it.idx === heard.idx) : -1;
+    if (direction < 0) target = hi >= 0 ? flat[hi] : flat.at(-1);
+    else target = flat.find(it => !model.find(it.msgId)?.flags?.includes('read')) ?? (hi >= 0 ? flat[hi + 1] : flat[0]);
+  }
   else if (direction < 0 && !burst && player.currentTime() > RESTART_AFTER_S) target = flat[at];
   else target = flat[at + direction];
   if (!target) return toast(direction > 0 ? 'No later messages' : 'No earlier messages');
@@ -475,16 +485,28 @@ function runSwitch() {
   toast(`Switched to ${target}`, 'Back', () => switchTopic(from));
 }
 
+/** Topics ranked by how well they match `query` ("terminal viz" finds terminal_viz); most recent first when the query is empty. */
+function rankTopics(query) {
+  const q = normalize(query), qFlat = q.replace(/ /g, '');
+  const topics = model.topics();
+  if (!qFlat) return topics.map(t => ({t, score: 1}));
+  return topics.map(t => {
+    const name = normalize(t.name.replace(/[_-]/g, ' ')), flat = name.replace(/ /g, '');
+    const score = flat === qFlat ? 1 : flat.includes(qFlat) ? 0.9 : q.split(' ').every(w => name.includes(w)) ? 0.8 : 1 - editDistance(flat.slice(0, qFlat.length + 2), qFlat) / Math.max(qFlat.length, 1);
+    return {t, score};
+  }).filter(x => x.score >= 0.55).sort((a, b) => b.score - a.score || b.t.maxId - a.t.maxId);
+}
+
 function openPicker() {
-  const query = $('search').value.trim().toLowerCase();
+  const query = $('search').value;
   const list = $('topics');
   list.replaceChildren();
-  for (const t of model.topics().filter(x => x.name.toLowerCase().includes(query)).slice(0, 80)) {
+  for (const {t} of rankTopics(query).slice(0, 80)) {
     const last = model.lastMessage(t.name);
     const snip = last ? `${ago(last.timestamp)} · ${(model.isAgent(last) ? parsed(last).body || parsed(last).title : 'You: ' + last.content).replace(/\s+/g, ' ').slice(0, 90)}` : '';
     list.append(topicRow(t, snip, t.name === current, () => switchTopic(t.name)));
   }
-  if (!$('picker').open) $('picker').showModal();
+  if (!$('picker').open) { $('picker').showModal(); $('search').focus(); }
 }
 
 // ---- composer: typing, dictation, sending ----
@@ -610,7 +632,11 @@ function stripResumePhrase(text) {
   return null;
 }
 const START_DEFAULT = 'pause';
-const START_ALIASES = {pause: ['pause', 'paws', 'pose', 'pours', 'paused', 'pawz']};
+const LONG_SILENCE_DEFAULT_S = 20;   // "over" is the main end signal; a short silence cut replies off while the user was still thinking
+const FOLLOW_UP_GRACE_MS = 6000;
+let lastReplyEndMs = 0;
+const START_ALIASES = {pause: ['pause', 'paws', 'pose', 'pours', 'paused', 'pawz', 'pulse', 'pulls', 'polls']};
+const VC_PROMPT = 'Pause. Pause. Over.';   // biases Whisper toward the control words
 const EMPTY_SESSION_MS = 8000;
 let vc = null;   // an open voice-control session: `{base, text, timer, emptyTimer}`
 const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
@@ -633,24 +659,55 @@ function onBarge() {
   if (dict) return;
   const st = player.position().status;
   log('vc', `speech detected while ${st}${vc ? ' (session open)' : ''}`);
+  utterancePending = true; clearTimeout(utteranceTimer); utteranceTimer = setTimeout(utteranceDone, 15000);
   if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
   setVcState('heard', 'hearing you');
 }
 async function onCommandClip(blob) {
   if (dict) return;
-  const r = await voice.stt(blob);
+  try { await handleCommandClip(blob); } finally { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); }
+}
+async function handleCommandClip(blob) {
+  const r = await voice.stt(blob, VC_PROMPT);
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); vcIdle(); return; }
   const heard = r.text.trim();
   log('vc', `heard "${heard}"`);
   if (!normalize(heard)) { if (!vc) { recorder.setReplyMode(false); } vcIdle(); return; }
+  if (!vc && pendingChoice && Date.now() < pendingChoice.until) {
+    const w = normalize(heard).replace(/^pause /, '');
+    const NUMBERS = ['one first 1', 'two second 2', 'three third 3'];
+    let pick = null;
+    if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
+    else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w)); if (i >= 0) pick = pendingChoice.names[i]; }
+    if (pick) { pendingChoice = null; switchTopic(pick); recorder.beep('done'); vcIdle(); return; }
+    if (/^(no|nope|cancel|none|never mind|stop)$/.test(w)) { pendingChoice = null; recorder.beep('done'); vcIdle(); return; }
+  }
   if (!vc) {
     const rest = afterStartWord(heard);
-    if (rest === null) { log('vc', `ignored: "${heard}" (no start word)`); recorder.setReplyMode(false); vcIdle(); return; }
+    if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
+    if (rest === null) { log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     openSession(rest);
     return;
   }
   addToSession(heard);
 }
+let pendingChoice = null;
+/** "switch to <name>": one clear match switches (with a chime); otherwise show the top 3 and accept first/second/third. */
+function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.say(text).then(ms => recorder.muteFor(ms)); }
+function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); } }
+function voiceSwitch(spoken) {
+  const ranked = rankTopics(spoken);
+  log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
+  if (!ranked.length) { recorder.beep('error'); toast(`No agent matches “${spoken}”`); return; }
+  const clear = ranked.length === 1 || ranked[0].score - ranked[1].score >= 0.15;
+  pendingChoice = {names: clear ? [ranked[0].t.name] : ranked.slice(0, 3).map(x => x.t.name), until: Date.now() + 20000, confirm: clear};
+  setTimeout(() => { if (pendingChoice && Date.now() >= pendingChoice.until) cancelChoice(); }, 20500);
+  const readable = n => n.replace(/[_-]/g, ' ');
+  const prompt = clear ? `Switch to ${readable(ranked[0].t.name)}?` : pendingChoice.names.map((n, i) => `${i + 1}, ${readable(n)}.`).join(' ');
+  toast(prompt);
+  sayAndMute(prompt);
+}
+
 function openSession(rest) {
   if (['playing', 'loading'].includes(player.position().status)) player.pause();
  
@@ -658,6 +715,8 @@ function openSession(rest) {
   recorder.setReplyMode(true); recorder.beep('ready');
   log('vc', `session opened by start word; rest "${rest}"`);
   const words = normalize(rest);
+  const sw = words.match(/^(?:switch to|go to|open|switch)\s+(.+)$/);
+  if (sw) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }
   const action = /^(next|skip|forward)$/.test(words) ? 1 : /^(back|previous|again|repeat)$/.test(words) ? -1 : 0;
   if (action) { log('vc', action > 0 ? 'action next' : 'action previous'); vc = null; recorder.setReplyMode(false); jump(action); vcIdle(); return; }
   if (rest) addToSession(rest);
@@ -670,7 +729,7 @@ function addToSession(heard) {
   setVcState('dictating', 'dictating reply');
   clearTimeout(vc.timer);
   // "over" + short silence finishes at once; with no "over", a long silence (Settings, default 6 s) finishes too
-  const silenceMs = stripResumePhrase(vc.text) !== null ? RESUME_SILENCE_MS : Number(store.get('voice2-long-silence-s', 6)) * 1000;
+  const silenceMs = stripResumePhrase(vc.text) !== null ? RESUME_SILENCE_MS : Number(store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S)) * 1000;
   if (vc.text.trim() && silenceMs > 0) vc.timer = setTimeout(finishVcReply, silenceMs);
   else if (!vc.text.trim()) vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS);
 }
@@ -687,7 +746,7 @@ function closeEmptySession() {
 /** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
 function finishVcReply() {
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
-  vc = null; recorder.setReplyMode(false);
+  vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
   draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
   log('vc', `resume phrase + silence: reply "${stripped}"`);
   recorder.beep('done');
@@ -710,7 +769,7 @@ $('set-phrase').value = store.get('voice2-resume-phrase', RESUME_DEFAULT);
 $('set-phrase').onchange = e => store.set('voice2-resume-phrase', e.target.value.trim() || RESUME_DEFAULT);
 $('set-start').value = store.get('voice2-start-word', START_DEFAULT);
 $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.trim().toLowerCase() || START_DEFAULT);
-$('set-silence').value = store.get('voice2-long-silence-s', 6);
+$('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
 $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say pause, finish a reply with "over"' : 'Voice control off'); };
@@ -816,8 +875,12 @@ feed.addEventListener('click', event => {
 // iOS only treats touchend/click as audio-unlocking gestures (not pointerdown); autoplay starts after the tap's own handlers ran.
 for (const type of ['pointerup', 'touchend', 'click']) addEventListener(type, e => { if (e.target.closest?.('#listen')) return; if (!player.isUnlocked()) { player.unlock(); setTimeout(maybeAutoplay); } if (voiceControl && !recorder.active() && !voiceListening) setVoiceControl(true); }, {capture: true});
 
-$('agent').onclick = () => { $('search').value = ''; openPicker(); };
+let pickerClosedMs = 0;
+$('picker').addEventListener('close', () => { pickerClosedMs = Date.now(); });
+// Enter in the search box closes the dialog and focus returns to the button, whose key-up would reopen it: ignore that click.
+$('agent').onclick = $('find').onclick = () => { if (Date.now() - pickerClosedMs < 400) return; $('search').value = ''; openPicker(); };
 $('search').oninput = openPicker;
+$('search').onkeydown = e => { if (e.key === 'Enter') { e.preventDefault(); const first = rankTopics($('search').value)[0]; if (first) switchTopic(first.t.name); } };
 $('play').onclick = togglePlay;
 /** Tap steps one chunk; holding for 0.5 s steps a whole message. */
 for (const [id, direction] of [['prev', -1], ['next', 1]]) {
@@ -906,6 +969,19 @@ const reportProblem = why => { if (!cfg.relayStreamId || Date.now() - lastErrLog
 addEventListener('error', e => reportProblem(e.message));
 addEventListener('unhandledrejection', e => reportProblem(String(e.reason?.message ?? e.reason)));
 setInterval(() => { if (current && !feed.querySelector('.msg, #empty, .notice')) { reportProblem('blank feed'); renderFeed(); } }, 3000);
+
+// ---- screen wake lock: keep the screen on while voice control is on or audio plays ----
+let wakeLock = null;
+async function syncWakeLock() {
+  const want = voiceControl || ['playing', 'loading'].includes(player.position().status) || (autoplay && model.unreadAgentMessages(current).length > 0);
+  if (!navigator.wakeLock) return;
+  if (!want || document.visibilityState !== 'visible') { if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; log('wake', 'released'); } return; }
+  if (wakeLock) return;
+  try { wakeLock = await navigator.wakeLock.request('screen'); log('wake', 'screen wake lock acquired'); wakeLock.addEventListener('release', () => { wakeLock = null; }); }
+  catch (error) { log('wake', `not granted: ${error.name}`); }
+}
+setInterval(syncWakeLock, 2000);
+document.addEventListener('visibilitychange', syncWakeLock);
 
 // ---- start ----
 renderRate(); renderAuto();

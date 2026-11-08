@@ -1,5 +1,6 @@
 /** Client of the voice service (`service/protocol.md`): STT, TTS, ping through the relay channel. Results arrive via `onMessage`. */
 
+const LOG_PART_CHARS = 9000;
 const URL_TTL_MS = 50000;
 const PREPARED_TTL_MS = 6 * 3600000;
 const newId = prefix => prefix + '_' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(16).padStart(2, '0')).join('');
@@ -66,13 +67,13 @@ export function createVoice({zulip, cfg, log}) {
   }
 
   /** `{ok: true, text}` for a WAV blob. */
-  async function stt(blob) {
+  async function stt(blob, prompt) {
     const form = new FormData();
     form.append('file', blob, `dictation-${Date.now()}.wav`);
     const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
     if (!up.ok) return {ok: false, error: up.error};
     for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`}, 60000);
+      const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {})}, 60000);
       if (r.ok) return {ok: true, text: r.result.text.trim()};
       if (attempt === 2) return r;
     }
@@ -89,8 +90,13 @@ export function createVoice({zulip, cfg, log}) {
 
   /** Sends debug text (tail-truncated) to the service's bounded `client.log`, then removes the request message from Zulip. */
   async function sendLog(label, text) {
-    const r = await request('log', {label, text: text.slice(-9000)}, 15000);
-    return r.ok ? {ok: true} : r;
+    const parts = [];
+    for (let at = 0; at < text.length; at += LOG_PART_CHARS) parts.push(text.slice(at, at + LOG_PART_CHARS));
+    for (const [i, part] of parts.entries()) {   // numbered parts, appended by the service in order
+      const r = await request('log', {label: parts.length > 1 ? `${label} part ${i + 1}/${parts.length}` : label, text: part}, 15000);
+      if (!r.ok) return r;
+    }
+    return {ok: true};
   }
 
   async function ping() {
