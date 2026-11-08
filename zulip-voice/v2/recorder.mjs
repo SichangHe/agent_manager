@@ -12,8 +12,8 @@ const MIN_LEVEL = 0.012;
 const GRACE_MS = 45000;
 const BARGE_MS = 300;
 const LISTEN_PREROLL_MS = 1200;
-const EARCON_NOTE_S = 0.09;
-const EARCON_GAIN = 0.08;
+const EARCON_NOTE_S = 0.14;
+const EARCON_GAIN = 0.5;
 const REPLY_BARGE_MS = 100;        // while a spoken reply is open, a short word like "over" must still become a clip
 const REPLY_MIN_SPEECH_MS = 100;
 
