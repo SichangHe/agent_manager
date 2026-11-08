@@ -298,7 +298,7 @@ function onTaskMessage(m) {
 /** One gate: manual dictation, an open voice-control reply, or an utterance being captured or transcribed. No playback starts while it is true. */
 let pendingChoice = null;   // a switch waiting for yes/no/number: `{names, until, confirm}`
 let utterancePending = false, utteranceTimer = 0;   // set on speech detection, cleared when its clip is handled (or after 15 s if no clip comes)
-const userSpeaking = () => !!dict || !!vc || utterancePending || (!!pendingChoice && Date.now() < pendingChoice.until);   // also while a switch read-back waits for yes/no/number
+const userSpeaking = () => !!dict || !!vc || utterancePending || Date.now() < announcingUntil || (!!pendingChoice && Date.now() < pendingChoice.until);   // also while a switch read-back waits for yes/no/number
 const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); };
 
 function onNewAgentMessage(m) {
@@ -478,6 +478,16 @@ function switchTopic(topic) {
   loading = model.messages(topic).length ? null : topic;
   loadTopicUntilLoaded(topic);
   renderUnread();
+  announceSwitch(topic);
+}
+
+let announcingUntil = 0;
+/** Earcon plus "Now on <agent>", so a switch to an agent with nothing to play is still noticeable; unread messages play afterwards. */
+function announceSwitch(topic) {
+  recorder.beep('switch');
+  announcingUntil = Date.now() + 4000;
+  recorder.muteFor(3500);
+  player.say(`Now on ${topic}`).then(ms => { recorder.muteFor(ms); announcingUntil = Date.now() + ms + 300; setTimeout(() => { if (current === topic) maybeAutoplay(); }, ms + 350); });
 }
 
 let loading = null;
@@ -703,7 +713,7 @@ async function handleCommandClip(blob) {
     if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
     else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w)); if (i >= 0) pick = pendingChoice.names[i]; }
     if (pick) { pendingChoice = null; switchTopic(pick); recorder.beep('done'); vcIdle(); return; }
-    if (/^(no|nope|cancel|none|never mind|stop)$/.test(w)) { pendingChoice = null; recorder.beep('done'); vcIdle(); maybeAutoplay(); return; }
+    if (/^(no|nope|cancel|cancel that|none|never mind|scratch that|stop)$/.test(w)) { pendingChoice = null; recorder.beep('done'); vcIdle(); maybeAutoplay(); return; }
   }
   if (!vc) {
     const rest = afterStartWord(heard);
@@ -724,7 +734,15 @@ async function handleCommandClip(blob) {
     return;
   }
   const sw = normalize(heard).match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
-  if (sw) {
+  if (CANCEL_RE.test(normalize(heard))) {   // discards this reply and carries on
+    clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
+    log('vc', 'cancel: reply discarded');
+    draftEl.value = vc.base; autosize(); saveDraft();
+    vc = null; recorder.setReplyMode(false); recorder.beep('cancel');
+    resumeAfterPause(); vcIdle();
+    return;
+  }
+  if (sw && ranksConfident(sw[1])) {
     clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
     log('vc', 'switch command inside an open session');
     draftEl.value = vc.base; autosize();
@@ -760,14 +778,17 @@ function navigate({dir, whole, count}) {
   for (let i = 0; i < count; i++) jump(dir, whole, true);   // by voice, "back" always means the previous chunk
 }
 
-const SWITCH_RE = /^(?:switch agents? to|switch agents?|switch to|go to|open|switch)\s+(.+)$/;
+const SWITCH_RE = /^(?:switch agents? to|switch agents?|switch to|go to agents?)\s+(.+)$/;   // never bare "open" or "go to": those are ordinary words
+const CANCEL_RE = /^(?:cancel|cancel that|never mind|scratch that|forget it)$/;
+const SWITCH_MIN_SCORE = 0.8;
 /** "switch to <name>": one clear match switches (with a chime); otherwise show the top 3 and accept first/second/third. */
 function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.say(text).then(ms => recorder.muteFor(ms)); }
 function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); maybeAutoplay(); } }
+const ranksConfident = spoken => (rankTopics(spoken)[0]?.score ?? 0) >= SWITCH_MIN_SCORE;
 function voiceSwitch(spoken) {
   const ranked = rankTopics(spoken);
   log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
-  if (!ranked.length) { recorder.beep('error'); toast(`No agent matches “${spoken}”`); return; }
+  if (!ranked.length || ranked[0].score < SWITCH_MIN_SCORE) { log('vc', 'no confident agent match: treated as ordinary words'); return false; }
   const clear = ranked.length === 1 || ranked[0].score - ranked[1].score >= 0.15;
   pendingChoice = {names: clear ? [ranked[0].t.name] : ranked.slice(0, 3).map(x => x.t.name), until: Date.now() + 20000, confirm: clear};
   setTimeout(() => { if (pendingChoice && Date.now() >= pendingChoice.until) cancelChoice(); }, 20500);
@@ -775,6 +796,7 @@ function voiceSwitch(spoken) {
   const prompt = clear ? `Switch to ${readable(ranked[0].t.name)}?` : pendingChoice.names.map((n, i) => `${i + 1}, ${readable(n)}.`).join(' ');
   toast(prompt);
   sayAndMute(prompt);
+  return true;
 }
 
 function openSession(rest) {
@@ -785,7 +807,8 @@ function openSession(rest) {
   log('vc', `session opened by start word; rest "${rest}"`);
   const words = normalize(rest);
   const sw = words.match(SWITCH_RE);
-  if (sw) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }
+  if (sw && ranksConfident(sw[1])) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }
+  if (CANCEL_RE.test(words)) { log('vc', 'cancel right after the start word'); vc = null; recorder.setReplyMode(false); recorder.beep('cancel'); resumeAfterPause(); vcIdle(); return; }
   const nav = navCommand(words);
   if (nav) { vc = null; recorder.setReplyMode(false); navigate(nav); vcIdle(); return; }
   if (rest) addToSession(rest);

@@ -1089,6 +1089,51 @@ scenarios.noPlaybackWhileConfirming = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceSwitchRules = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('uiclient_steer', '[uiclient_steer] U\n\nUI client agent is here.');
+  const long = '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n');
+  await L.agentSays('alpha', long);
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const wavOf = async (...parts) => { const ws = await Promise.all(parts.filter(x => typeof x === 'string').map(t => L.speechWav(t))); let k = 0; const bufs = parts.map(x => typeof x === 'string' ? pcm(ws[k++]) : x), first = ws[0], at = first.indexOf('data'), head = Buffer.from(first.subarray(0, at + 8)), data = Buffer.concat(bufs); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
+  const files = {
+    '/__plain.wav': await wavOf(gap(9000), 'Pause. Switch to the store and buy some milk.', gap(30000)),
+    '/__cancel.wav': await wavOf(gap(9000), 'Pause. Deploy it to staging now.', gap(2500), 'Cancel.', gap(30000)),
+  };
+  const srv2 = await L.serve(undefined, files);
+  const run = async (file, prefs, check) => {
+    const c = await L.openClient({url: srv2.url, mic: file, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, ...prefs}});
+    try {
+      await L.waitFor(c.page, 'message', () => document.querySelector('.msg.agent'));
+      await L.waitFor(c.page, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+      await c.page.locator('.msg.agent .s').first().tap();
+      await check(c.page);
+    } finally { await c.close(); }
+  };
+  await run('/__plain.wav', {'voice2-long-silence-s': 60}, async p => {   // no confident match: ordinary reply text, no read-back
+    await L.waitFor(p, 'text in draft', () => /switch to the store/i.test(document.querySelector('#draft').value), 60000);
+    const log = await p.evaluate(() => window.__voice.log.text());
+    assert.doesNotMatch(log, /vc\s+switch to "/, "no read-back for a weak match");
+    assert.equal(await p.evaluate(() => window.__voice.current()), 'alpha');
+  });
+  await run('/__cancel.wav', {'voice2-long-silence-s': 60}, async p => {   // "cancel" discards the reply and resumes
+    await L.waitFor(p, 'text then cancel', () => /vc\s+cancel: reply discarded/.test(window.__voice.log.text()), 70000);
+    assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'draft restored');
+    await L.waitFor(p, 'playing again', () => window.__voice.player.snapshot().status === 'playing', 10000);
+  });
+  // any switch is announced (earcon + "Now on ...") even when the new agent has nothing to play
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  try {
+    const p = c.page;
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+    const ttsCalls = () => p.evaluate(() => (window.__voice.log.text().match(/relay\s+tts /g) || []).length);
+    const before = await ttsCalls();
+    await p.locator('#find').tap(); await p.locator('#topics li', {hasText: 'uiclient_steer'}).tap();
+    await L.waitFor(p, 'switched', () => window.__voice.current() === 'uiclient_steer', 10000);
+    await L.waitFor(p, 'announcement requested', n => (window.__voice.log.text().match(/relay\s+tts /g) || []).length > n, 10000, before);
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

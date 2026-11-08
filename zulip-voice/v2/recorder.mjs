@@ -61,7 +61,7 @@ function resampleToWav(frames, fromHz) {
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
-  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
+  let beepCtx = null, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -170,12 +170,13 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     },
     /** Short quiet chime on the warm audio context: `ready` (rising), `done` (falling), `error` (low). Voice detection ignores it while it plays. */
     beep(kind) {
-      if (!ctx || ctx.state !== 'running') return;
-      const notes = {ready: [880, 1320], done: [1320, 880], error: [220, 180]}[kind];
-      const t0 = ctx.currentTime;
+      let c = ctx;
+      if (!c || c.state !== 'running') { c = beepCtx ??= new (window.AudioContext || window.webkitAudioContext)(); c.resume?.(); }   // no microphone open (voice control off): a small standalone context
+      const notes = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [660, 440]}[kind];
+      const t0 = c.currentTime;
       notes.forEach((hz, i) => {
-        const osc = ctx.createOscillator(), gain = ctx.createGain();
-        osc.frequency.value = hz; osc.connect(gain); gain.connect(ctx.destination);
+        const osc = c.createOscillator(), gain = c.createGain();
+        osc.frequency.value = hz; osc.connect(gain); gain.connect(c.destination);
         const start = t0 + i * EARCON_NOTE_S;
         gain.gain.setValueAtTime(0, start); gain.gain.linearRampToValueAtTime(EARCON_GAIN, start + 0.01); gain.gain.linearRampToValueAtTime(0, start + EARCON_NOTE_S);
         osc.start(start); osc.stop(start + EARCON_NOTE_S + 0.02);
