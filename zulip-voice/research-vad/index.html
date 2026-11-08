@@ -1,0 +1,15 @@
+<!doctype html><meta charset=utf-8><title>vad probe</title>
+<script src="assets/ort.wasm.min.js"></script><script src="assets/bundle.min.js"></script>
+<button id=go>start</button><pre id=log></pre>
+<script>
+window.events=[];const t0=()=>performance.now();let T;
+document.getElementById('go').onclick=async()=>{
+ T=t0();
+ const v=await vad.MicVAD.new({model:'v5',onnxWASMBasePath:location.origin+'/assets/',baseAssetPath:location.origin+'/assets/',
+  positiveSpeechThreshold:0.5,negativeSpeechThreshold:0.35,redemptionMs:700,preSpeechPadMs:300,minSpeechMs:250,
+  onSpeechStart:()=>events.push({e:'start',t:Math.round(t0()-T)}),
+  onSpeechEnd:a=>events.push({e:'end',t:Math.round(t0()-T),dur:a.length/16000}),
+  onVADMisfire:()=>events.push({e:'misfire',t:Math.round(t0()-T)})});
+ window.loadMs=Math.round(t0()-T);T=t0();v.start();window.ready=true;
+};
+</script>

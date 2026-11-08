@@ -696,24 +696,32 @@ function onBarge() {
   if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
   setVcState('heard', 'hearing you');
 }
-async function onCommandClip(blob) {
+async function onCommandClip(blob, meta = {}) {
   if (dict) return;
-  try { await handleCommandClip(blob); } finally { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); }
+  try { await handleCommandClip(blob, meta); } finally { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); }
 }
-async function handleCommandClip(blob) {
-  const r = await voice.stt(blob, VC_PROMPT);
+const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
+async function handleCommandClip(blob, meta) {
+  const listening = !!vc || (!!pendingChoice && Date.now() < pendingChoice.until);
+  // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
+  const r = await voice.stt(blob, listening ? VC_PROMPT : undefined);
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); vcIdle(); return; }
   const heard = r.text.trim();
-  log('vc', `heard "${heard}"`);
+  log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
+  if (!listening && normalize(heard) && ((meta.speechMs ?? 1e9) < START_MIN_SPEECH_MS || r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB)) {
+    log('vc', 'rejected as noise: too short or low confidence'); recorder.setReplyMode(false); vcIdle(); return;
+  }
   if (!normalize(heard)) { if (!vc) recorder.setReplyMode(false); else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
-  if (!vc && pendingChoice && Date.now() < pendingChoice.until) {
-    const w = normalize(heard).replace(/^pause /, '');
+  if (pendingChoice && Date.now() < pendingChoice.until) {   // while a switch question is open, answers are matched first, even inside or after "pause"
+    const w = normalize(heard).replace(/^((pause|paws|pulse|pose) )+/, '');
     const NUMBERS = ['one first 1', 'two second 2', 'three third 3'];
     let pick = null;
     if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
     else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w)); if (i >= 0) pick = pendingChoice.names[i]; }
-    if (pick) { pendingChoice = null; switchTopic(pick); recorder.beep('done'); vcIdle(); return; }
-    if (/^(no|nope|cancel|cancel that|none|never mind|scratch that|stop)$/.test(w)) { pendingChoice = null; recorder.beep('done'); vcIdle(); maybeAutoplay(); return; }
+    const closeSession = () => { if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; } recorder.setReplyMode(false); };
+    if (pick) { pendingChoice = null; closeSession(); switchTopic(pick); vcIdle(); return; }   // the switch tone and "Now on X" follow; no voice state lingers
+    if (/^(no|nope|cancel|cancel that|none|never mind|scratch that|stop)$/.test(w)) { pendingChoice = null; closeSession(); recorder.beep('cancel'); vcIdle(); maybeAutoplay(); return; }
+    if (!vc) { log('vc', `ignored during the switch question: "${heard}"`); vcIdle(); return; }   // "pause" must not open a reply while we wait for the answer
   }
   if (!vc) {
     const rest = afterStartWord(heard);
@@ -734,14 +742,7 @@ async function handleCommandClip(blob) {
     return;
   }
   const sw = normalize(heard).match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
-  if (CANCEL_RE.test(normalize(heard))) {   // discards this reply and carries on
-    clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
-    log('vc', 'cancel: reply discarded');
-    draftEl.value = vc.base; autosize(); saveDraft();
-    vc = null; recorder.setReplyMode(false); recorder.beep('cancel');
-    resumeAfterPause(); vcIdle();
-    return;
-  }
+  if (CANCEL_RE.test(normalize(heard))) { cancelSession(); return; }   // discards this reply and carries on
   if (sw && ranksConfident(sw[1])) {
     clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
     log('vc', 'switch command inside an open session');
@@ -814,7 +815,21 @@ function openSession(rest) {
   if (rest) addToSession(rest);
   else { setVcState('dictating', 'say your reply'); vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS); }
 }
+/** True when the last sentence of `text` is only a cancel phrase ("Some reply. Cancel."). */
+function endsWithCancel(text) {
+  const last = text.split(/[.!?]+/).map(x => normalize(x)).filter(Boolean).at(-1) ?? '';
+  return CANCEL_RE.test(last);
+}
+/** Discards the open reply (restoring the draft), plays the cancel tone and carries on reading. */
+function cancelSession() {
+  clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
+  log('vc', 'cancel: reply discarded');
+  draftEl.value = vc.base; autosize(); saveDraft();
+  vc = null; recorder.setReplyMode(false); recorder.beep('cancel');
+  resumeAfterPause(); vcIdle();
+}
 function addToSession(heard) {
+  if (endsWithCancel(heard)) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
   clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
   vc.text = [vc.text, heard.replace(/^(?:\s*pause\b[\s,.!?]*)+/i, '').trim()].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();

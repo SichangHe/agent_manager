@@ -118,7 +118,13 @@ class Speech:
             vad_filter=True,
             initial_prompt=prompt or None,
         )
-        return {"text": " ".join(segment.text.strip() for segment in segments).strip()}
+        parts = list(segments)
+        # Quality signals let clients reject hallucinated text on noise: no_speech_prob (max) and avg_logprob (mean) over the segments.
+        return {
+            "text": " ".join(segment.text.strip() for segment in parts).strip(),
+            "no_speech_prob": max((segment.no_speech_prob for segment in parts), default=1.0),
+            "avg_logprob": sum(segment.avg_logprob for segment in parts) / len(parts) if parts else -9.0,
+        }
 
 
 def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:

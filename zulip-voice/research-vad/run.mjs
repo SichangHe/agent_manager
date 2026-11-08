@@ -1,0 +1,12 @@
+import {createServer} from 'node:http';import {readFile} from 'node:fs/promises';import {extname,resolve} from 'node:path';
+const pw=(await import('/ssd1/sichangheagent/pw157/node_modules/playwright/index.js')).default;
+const root=resolve('.');const types={'.html':'text/html','.js':'text/javascript','.mjs':'text/javascript','.wasm':'application/wasm'};
+const srv=createServer(async(q,r)=>{try{let u=q.url.split('?')[0];if(u.endsWith('/'))u+='index.html';const b=await readFile(resolve(root,'.'+u));r.writeHead(200,{'Content-Type':types[extname(u)]||'application/octet-stream'}).end(b)}catch{r.writeHead(404).end()}});
+await new Promise(r=>srv.listen(0,'127.0.0.1',r));const url=`http://127.0.0.1:${srv.address().port}/`;
+const b=await pw[process.env.BROWSER||'webkit'].launch({headless:true});
+const ctx=await b.newContext({...pw.devices['iPhone 14']});const p=await ctx.newPage();
+p.on('pageerror',e=>console.log('pageerror',e.message));p.on('console',m=>console.log('console',m.text()));
+await p.addInitScript(()=>{MediaDevices.prototype.getUserMedia=async()=>{const c=new AudioContext();const buf=await c.decodeAudioData(await (await fetch('/test.wav')).arrayBuffer());const d=c.createMediaStreamDestination();const s=c.createBufferSource();s.buffer=buf;s.connect(d);s.start();return d.stream}});
+await p.goto(url);await p.click('#go');await p.waitForFunction('window.ready',null,{timeout:60000});
+console.log('load ms',await p.evaluate('loadMs'));await p.waitForTimeout(31000);
+console.log(JSON.stringify(await p.evaluate('events')));await b.close();srv.close();

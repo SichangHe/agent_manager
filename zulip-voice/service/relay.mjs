@@ -86,11 +86,14 @@ export function bundleWavs(wavs) {
   return {bytes: Buffer.concat([header, data, pcm]), offsetsMs, durationMs: Math.round(pcm.length / parts[0].byteRate * 1000)};
 }
 
+/** Kokoro output is about -26 LUFS, too quiet on a phone (and iOS lowers it further while the microphone is open): compress, add makeup gain, limit. Result about -12 LUFS. (`loudnorm` misbehaves on one-sentence clips.) */
+const LOUDNESS_FILTER = 'acompressor=threshold=0.05:ratio=4:attack=5:release=60:makeup=8,alimiter=limit=0.8:level=disabled';
+
 /** AAC-LC mono m4a (moov first, so playback starts before the download ends) from WAV bytes; about 10x smaller than 16-bit WAV. */
 export async function encodeAac(wav, bitrate = '32k') {
   const path = resolve(tmpdir(), `voice-enc-${process.pid}-${Math.random().toString(36).slice(2)}.m4a`);
   await new Promise((done, fail) => {
-    const ff = spawn('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'wav', '-i', 'pipe:0', '-c:a', 'aac', '-b:a', bitrate, '-ac', '1', '-movflags', '+faststart', '-f', 'mp4', '-y', path], {stdio: ['pipe', 'ignore', 'pipe']});
+    const ff = spawn('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'wav', '-i', 'pipe:0', '-af', LOUDNESS_FILTER, '-c:a', 'aac', '-b:a', bitrate, '-ac', '1', '-movflags', '+faststart', '-f', 'mp4', '-y', path], {stdio: ['pipe', 'ignore', 'pipe']});
     let err = '';
     ff.stderr.on('data', d => { err += d; });
     ff.on('error', fail);
@@ -180,6 +183,8 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
     const data = await response.json();
     if (typeof data.text !== 'string') throw Error('Invalid transcript');
     result.text = data.text;
+    result.noSpeechProb = data.no_speech_prob;
+    result.avgLogprob = data.avg_logprob;
     return `bytes=${audio.length} stt=${now() - t}ms`;
   }
 

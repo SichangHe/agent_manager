@@ -69,7 +69,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       const blob = resampleToWav(frames, ctx.sampleRate);
       clipsOut++;
       log('mic', `clip ${clipsOut}: ${Math.round(clipMs)}ms audio, ${Math.round(speechMs)}ms speech, ${blob.size}B${final ? ' (final)' : ''}`);
-      (capturing ? onClip : onCommandClip)(blob, {ms: clipMs});
+      (capturing ? onClip : onCommandClip)(blob, {ms: clipMs, speechMs});
     }
     frames = []; speechMs = 0; silentMs = 0; clipMs = 0;
   }

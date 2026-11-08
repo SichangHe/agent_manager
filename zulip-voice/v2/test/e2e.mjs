@@ -1134,6 +1134,49 @@ scenarios.voiceSwitchRules = async ({srv}) => {
   } finally { await c.close(); }
 };
 
+scenarios.voiceYesAfterPause = async () => {
+  // The switch question is open; "Pause." then "Yes." must be taken as the answer, with no reply session left behind.
+  await L.wipeTasks();
+  await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Pause. Switch to terminal.', 'Pause.', 'Yes.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(10000), pcm(ws[0]), gap(7000), pcm(ws[1]), gap(2500), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__ya.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__ya.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'switched', () => window.__voice.current() === 'terminal_viz', 60000);
+    await L.sleep(12000);   // no delayed "out of voice mode" chime or leftover session
+    const log = await p.evaluate(() => window.__voice.log.text());
+    assert.doesNotMatch(log, /session opened by start word[^]*switched|empty session timed out/, 'no lingering session');
+    assert.equal(await p.evaluate(() => document.querySelector('#listen').dataset.state), 'on', 'back to idle state');
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.voiceTrailingCancel = async () => {
+  // "Pause. Some reply. Cancel." in one utterance discards everything; later silence or "over" sends nothing.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Pause. This is a test whether the cancel works. Cancel.', 'Over.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(9000), pcm(ws[0]), gap(6000), pcm(ws[1]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__tc.wav': Buffer.concat([head, data])});
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const c = await L.openClient({url: srv2.url, mic: '/__tc.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-long-silence-s': 4}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'cancelled', () => /vc\s+cancel: reply discarded/.test(window.__voice.log.text()), 60000);
+    await L.sleep(20000);   // a later "Over." and the long silence must not send anything
+    const sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId);
+    assert.equal(sent.length, 0, 'nothing sent: ' + JSON.stringify(sent.map(m => m.content)));
+    assert.equal((await p.locator('#draft').inputValue()).trim(), '');
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
