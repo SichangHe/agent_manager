@@ -31,7 +31,6 @@
       <button id="slower" class="icon sm" aria-label="Slower">−</button>
       <span id="rate">1.0×</span>
       <button id="faster" class="icon sm" aria-label="Faster">+</button>
-      <button id="listen" class="chip quiet" data-state="on" hidden aria-label="Voice control is listening">🎙</button>
       <button id="auto" class="chip" aria-pressed="true">Auto</button>
     </div>
     <form id="composer" autocomplete="off">
@@ -40,6 +39,7 @@
         <canvas id="level" width="120" height="24" hidden></canvas>
       </div>
       <button type="button" id="cancel-rec" class="icon" aria-label="Discard recording" hidden><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button type="button" id="listen" class="icon round" data-state="off" aria-label="Voice control: off"><svg viewBox="0 0 24 24" class="i"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4"/></svg><span id="listen-label"></span></button>
       <button type="button" id="mic" class="icon round" aria-label="Dictate"><svg viewBox="0 0 24 24" class="i mic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg><svg viewBox="0 0 24 24" class="i done"><path d="M5 13l4 4L19 7"/></svg></button>
       <button type="submit" id="send" class="icon round accent" aria-label="Send" disabled><svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
     </form>

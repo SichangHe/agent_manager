@@ -665,6 +665,7 @@ scenarios.voiceControl = async () => {
     '/__pause.wav': await seq(gap(2500), 'Pause pause pause pause pause.', gap(12000)),
     '/__reply.wav': await seq(gap(2500), 'Yes, deploy it to staging first. Over.', gap(20000)),
     '/__phrase.wav': await seq(gap(2500), 'Pause.', gap(1500), 'Over.', gap(20000)),
+    '/__split.wav': await seq(gap(2500), 'Yes, deploy it to staging first and tell me when it is done.', gap(1200), 'Over.', gap(20000)),
     '/__plain.wav': await seq(gap(2500), 'Resume.', gap(15000)),
     '/__next.wav': await seq(gap(2500), 'Next.', gap(8000)),
   };
@@ -711,6 +712,13 @@ scenarios.voiceControl = async () => {
     await L.sleep(1500);
     assert.deepEqual(await mine(), [], 'nothing sent');
   });
+  await L.wipeTasks(); await L.agentSays('alpha', '[alpha] Long\n\n' + long);
+  await run('/__split.wav', async p => {   // reply text, a pause, then "over" as its own short utterance
+    await L.waitFor(p, 'split reply finished', () => /vc\s+resume phrase \+ silence/.test(window.__voice.log.text()), 50000);
+    const sent = await (async () => { for (let i = 0; i < 10; i++) { const m = await mine(); if (m.length) return m; await L.sleep(1000); } return []; })();
+    assert.equal(sent.length, 1, 'reply sent: ' + JSON.stringify(sent));
+    assert.match(sent[0], /deploy it to staging/i);
+  });
   await run('/__plain.wav', async p => {   // a plain "resume" is not the phrase: stays paused, text lands in the draft
     await L.waitFor(p, 'heard resume', () => /vc\s+heard "[^"]*resume/i.test(window.__voice.log.text()), 30000);
     await L.sleep(4000);
@@ -721,6 +729,37 @@ scenarios.voiceControl = async () => {
     await L.waitFor(p, 'moved on a chunk', () => { const n = document.querySelector('.s.now'); return n && +n.dataset.from >= 1; }, 15000);
   });
   return times;
+};
+
+scenarios.voiceControlPersists = async () => {
+  await L.wipeTasks();
+  const long = Array.from({length: 8}, (_, i) => `Paragraph ${i} is long enough that the message keeps playing for a while.`).join('\n\n');
+  await L.agentSays('alpha', '[alpha] Long\n\n' + long);
+  const wav = Buffer.concat([Buffer.alloc(0)]);
+  void wav;
+  const srv2 = await L.serve(undefined, {'/__pause.wav': L.padWav(await L.speechWav('Pause now please.'), 3000)});
+  const c = await L.openClient({url: srv2.url, mic: '/__pause.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    assert.equal(await p.locator('#set-voice').isChecked(), true, 'setting persisted after reload');
+    assert.ok(await p.locator('#listen').isVisible(), 'toggle visible without re-enabling');
+    const label = await p.locator('#listen').getAttribute('data-state');
+    assert.match(label, /waiting|listening|on/, 'state shown: ' + label);
+    // the first tap anywhere (here: Play on a message) arms the microphone inside the gesture
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'armed', () => /vc\s+voice control on/.test(window.__voice.log.text()), 15000);
+    await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing');
+    await L.waitFor(p, 'barge-in pauses', () => window.__voice.player.snapshot().status === 'paused', 25000);
+    // the dock toggle stays visible when the transport row collapses, and turns the mode off and on
+    await p.evaluate(() => document.querySelector('#dock').classList.add('min'));
+    assert.ok(await p.locator('#listen').isVisible(), 'toggle visible with the dock collapsed');
+    await p.locator('#listen').tap();
+    assert.equal(await p.locator('#set-voice').isChecked(), false, 'toggle turns it off');
+    await p.locator('#listen').tap();
+    assert.equal(await p.locator('#set-voice').isChecked(), true, 'toggle turns it on');
+    return {stateAtLoad: label};
+  } finally { await c.close(); await srv2.close(); }
 };
 
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);

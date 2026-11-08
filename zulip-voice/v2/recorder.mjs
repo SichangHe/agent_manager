@@ -11,6 +11,8 @@ const PREROLL_MS = 300;
 const MIN_LEVEL = 0.012;
 const GRACE_MS = 45000;
 const BARGE_MS = 300;
+const REPLY_BARGE_MS = 100;        // while a spoken reply is open, a short word like "over" must still become a clip
+const REPLY_MIN_SPEECH_MS = 100;
 
 const WORKLET = `registerProcessor('cap', class extends AudioWorkletProcessor {
   constructor() { super(); this.buf = new Float32Array(2048); this.n = 0; }
@@ -55,11 +57,11 @@ function resampleToWav(frames, fromHz) {
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
-  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, sustainMs = 0, idleTimer = 0;
+  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
-    if (speechMs >= MIN_SPEECH_MS) {
+    if (speechMs >= (replyMode ? REPLY_MIN_SPEECH_MS : MIN_SPEECH_MS)) {
       const blob = resampleToWav(frames, ctx.sampleRate);
       clipsOut++;
       log('mic', `clip ${clipsOut}: ${Math.round(clipMs)}ms audio, ${Math.round(speechMs)}ms speech, ${blob.size}B${final ? ' (final)' : ''}`);
@@ -80,9 +82,9 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
       sustainMs = speaking ? sustainMs + ms : 0;
       preroll.push(frame); while (preroll.length * ms > PREROLL_MS + sustainMs) preroll.shift();
-      if (sustainMs < BARGE_MS) return;
-      sustainMs = 0; log('mic', `barge-in: speech sustained ${BARGE_MS}ms`); onBarge?.();
-      frames = preroll; preroll = []; clipMs = frames.length * ms; speechMs = BARGE_MS; silentMs = 0;
+      if (sustainMs < (replyMode ? REPLY_BARGE_MS : BARGE_MS)) return;
+      sustainMs = 0; log('mic', `barge-in: speech sustained ${replyMode ? REPLY_BARGE_MS : BARGE_MS}ms`); onBarge?.();
+      frames = preroll; preroll = []; clipMs = frames.length * ms; speechMs = replyMode ? REPLY_BARGE_MS : BARGE_MS; silentMs = 0;
       return;
     }
     if (!frames.length && !speaking) { preroll.push(frame); while (preroll.length * ms > PREROLL_MS) preroll.shift(); return; }
@@ -98,7 +100,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     ctx = new (window.AudioContext || window.webkitAudioContext)();
     const resumed = ctx.resume();
     stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
-    await resumed;
+    await Promise.race([resumed, new Promise(r => setTimeout(r, 400))]);   // stays suspended until a gesture on iOS; a later tap resumes it
     const url = URL.createObjectURL(new Blob([WORKLET], {type: 'text/javascript'}));
     await ctx.audioWorklet.addModule(url);
     URL.revokeObjectURL(url);
@@ -125,7 +127,12 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     async listen(on) {
       listening = on; sustainMs = 0; clearTimeout(idleTimer);
       if (!on) { if (!capturing) idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS); return {ok: true}; }
-      try { warm ??= build().catch(error => { teardown(); throw error; }); await warm; if (ctx?.state === 'suspended') await ctx.resume(); return {ok: true}; }
+      try {
+        warm ??= build().catch(error => { teardown(); throw error; });
+        await warm;
+        if (ctx?.state === 'suspended') await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 400))]);   // without a gesture iOS may keep it suspended
+        return {ok: true, running: ctx?.state === 'running'};
+      }
       catch (error) { listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied.' : `Microphone unavailable (${error.name}).`}; }
     },
     async start() {
@@ -155,6 +162,8 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       sustainMs = 0; frames = []; preroll = [];
       idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS);
     },
+    /** Reply mode lowers the speech thresholds so short words are never dropped. */
+    setReplyMode(on) { replyMode = on; },
     active: () => capturing,
   };
 }

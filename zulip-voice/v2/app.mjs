@@ -607,8 +607,8 @@ function stripResumePhrase(text) {
 }
 const PAUSE_WORDS = /^(?:\s*(?:pause|paws|stop|wait|hold)\b[\s,.!?]*)+/i;
 let vc = null;   // an open voice-control reply: `{base, text, timer}`
-const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen').textContent = '🎙 ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
-const vcIdle = () => setVcState('on', ['playing', 'loading'].includes(player.position().status) ? 'listening' : 'paused');
+const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
+const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
 
 /** Voice control: sustained speech while audio plays pauses it at once; what follows is dictated into the draft until the resume phrase and silence. */
 function onBarge() {
@@ -618,11 +618,13 @@ function onBarge() {
   if (st === 'playing' || st === 'loading') player.pause();
   if (vc?.timer) { clearTimeout(vc.timer); vc.timer = 0; log('vc', 'resume cancelled: more speech'); }
   setVcState('heard', 'hearing you');
+  recorder.setReplyMode(true);
 }
 async function onCommandClip(blob) {
   if (dict) return;
   const r = await voice.stt(blob);
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); vcIdle(); return; }
+  if (!vc && !normalize(r.text)) recorder.setReplyMode(false);
   let heard = r.text.trim();
   const words = normalize(heard);
   log('vc', `heard "${heard}"`);
@@ -640,7 +642,7 @@ async function onCommandClip(blob) {
 /** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
 function finishVcReply() {
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
-  vc = null;
+  vc = null; recorder.setReplyMode(false);
   draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
   log('vc', `resume phrase + silence: reply "${stripped}"`);
   if (stripped) { setVcState('sending', 'sending'); send(); }
@@ -650,16 +652,17 @@ function finishVcReply() {
 }
 async function setVoiceControl(on) {
   voiceControl = on; voiceListening = on; store.set('voice2-vc', on);
-  $('set-voice').checked = on; $('listen').hidden = !on; if (on) vcIdle();
+  $('set-voice').checked = on; if (on) vcIdle(); else setVcState('off', 'off');
   if (!on) { recorder.listen(false); return; }
   const r = await recorder.listen(true);
-  if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; $('listen').hidden = true; }
+  if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
+  if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
   log('vc', `voice control ${r.ok ? 'on' : 'failed'}`);
 }
 $('set-phrase').value = store.get('voice2-resume-phrase', RESUME_DEFAULT);
 $('set-phrase').onchange = e => store.set('voice2-resume-phrase', e.target.value.trim() || RESUME_DEFAULT);
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
-$('listen').onclick = () => sendLog('voicecmd');
+$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say pause, finish a reply with "over"' : 'Voice control off'); };
 function drawLevel(level) {
   const canvas = $('level'), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -760,7 +763,7 @@ feed.addEventListener('click', event => {
   playFrom(m, span ? +span.dataset.from : 0);
 });
 // iOS only treats touchend/click as audio-unlocking gestures (not pointerdown); autoplay starts after the tap's own handlers ran.
-for (const type of ['touchend', 'click']) addEventListener(type, () => { if (!player.isUnlocked()) { player.unlock(); setTimeout(maybeAutoplay); } if (voiceControl && !recorder.active() && !voiceListening) { voiceListening = true; setVoiceControl(true); } }, {capture: true});
+for (const type of ['pointerup', 'touchend', 'click']) addEventListener(type, e => { if (e.target.closest?.('#listen')) return; if (!player.isUnlocked()) { player.unlock(); setTimeout(maybeAutoplay); } if (voiceControl && !recorder.active() && !voiceListening) setVoiceControl(true); }, {capture: true});
 
 $('agent').onclick = () => { $('search').value = ''; openPicker(); };
 $('search').oninput = openPicker;
@@ -854,7 +857,9 @@ addEventListener('unhandledrejection', e => reportProblem(String(e.reason?.messa
 setInterval(() => { if (current && !feed.querySelector('.msg, #empty, .notice')) { reportProblem('blank feed'); renderFeed(); } }, 3000);
 
 // ---- start ----
-renderRate(); renderAuto(); $('set-voice').checked = false; $('listen').hidden = true;
+renderRate(); renderAuto();
+// A saved Voice control setting re-arms after reload: try at once, else on the first tap anywhere.
+if (voiceControl) { $('set-voice').checked = true; setVcState('waiting', 'tap'); setVoiceControl(true); }
 if (current) { draftEl.value = store.get('voice2-draft:' + current, ''); renderFeed(); renderUnread(); }
 autosize();
 renderConn(events.info());

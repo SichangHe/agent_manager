@@ -139,3 +139,9 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pr
 #howto { display: block; text-align: center; padding: 12px; border-radius: 12px; background: var(--accent); color: var(--accent-fg); font-weight: 700; text-decoration: none; }
 #listen[data-state='on'] { opacity: .6; }
 #listen[data-state='heard'] { opacity: 1; background: var(--accent); }
+#listen { position: relative; }
+#listen-label { display: none; }
+#listen[data-state='listening'] { background: var(--accent); color: var(--accent-fg); }
+#listen[data-state='on'] { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); }
+#listen[data-state='waiting'] { outline: 2px dashed var(--warn); }
+#listen[data-state='heard'], #listen[data-state='dictating'], #listen[data-state='sending'] { background: var(--danger); color: #fff; }
