@@ -114,7 +114,7 @@ const player = createPlayer({
     markRead([item.msgId]);
     if (pendingSwitch?.msgId === item.msgId) runSwitch();
   },
-  onIdle() { nowMsgId = null; highlight(); $('jump').hidden = true; if (pendingSwitch) runSwitch(); maybeAutoplay(); },
+  onIdle() { store.set('voice2-pos', null); nowMsgId = null; highlight(); $('jump').hidden = true; if (pendingSwitch) runSwitch(); maybeAutoplay(); },
   onStatus: renderTransport,
 });
 player.setRate(rate);
@@ -320,10 +320,14 @@ function playFrom(m, idx = 0) {
 
 function maybeAutoplay() {
   if (!autoplay || !current || dict || player.position().status !== 'idle') return;   // never start speech while the user is dictating
+  // Forward only: anything older than the newest read message counts as read and is never played again.
+  const newestRead = model.agentMessages(current).filter(m => m.flags?.includes('read')).at(-1);
+  if (newestRead) markRead(model.unreadAgentMessages(current).filter(m => m.id < newestRead.id).map(m => m.id));
   const unread = model.unreadAgentMessages(current);
   const speakable = unread.filter(m => itemsOf(m).length);
   markRead(unread.filter(m => !itemsOf(m).length).map(m => m.id));
-  const pos = store.get('voice2-pos', null);
+  let pos = store.get('voice2-pos', null);
+  if (pos && model.find(pos.msgId)?.flags?.includes('read')) { store.set('voice2-pos', null); pos = null; }   // a finished message is never resumed
   const resumable = pos?.topic === current && model.find(pos.msgId) && itemsOf(model.find(pos.msgId), pos.idx).length;
   if (!speakable.length && !resumable) { hideBanner(); return; }
   if (!player.isUnlocked()) { showBanner(`Tap to listen (${speakable.length} unread)`, 'tap', () => { player.unlock(); maybeAutoplay(); }); return; }

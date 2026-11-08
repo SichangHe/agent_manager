@@ -813,6 +813,30 @@ scenarios.voiceLongSilence = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.noReplayAtEnd = async () => {
+  // After the last chunk ends, neither noise, a lone "pause" timing out, nor idle voice control may play anything again.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const wavOf = async (text, tail) => { const sp = await L.speechWav(text), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8)), data = Buffer.concat([gap(9000), sp.subarray(at + 8), gap(tail)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
+  const srv2 = await L.serve(undefined, {'/__noise.wav': await wavOf('The weather is quite nice today and I think we should go outside.', 20000), '/__pause.wav': await wavOf('Pause.', 25000)});
+  await L.agentSays('alpha', '[alpha] Short\n\nFirst paragraph of the final message.\n\nSecond and last paragraph.');
+  for (const file of ['/__noise.wav', '/__pause.wav']) {
+    const c = await L.openClient({url: srv2.url, mic: file, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true, 'voice2-vc': true}});
+    const p = c.page;
+    try {
+      await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+      await p.locator('.msg.agent .s').first().tap();
+      await L.waitFor(p, 'reached the end', () => /audio\s+ended \d+:1/.test(window.__voice.log.text()) && window.__voice.player.snapshot().status === 'idle', 40000);
+      const count = () => p.evaluate(() => (window.__voice.log.text().match(/audio\s+start /g) || []).length);
+      const before = await count();
+      await L.sleep(25000);   // the fake mic now makes noise / says pause; the empty session times out after 8 s
+      assert.equal(await count(), before, file + ': something played again after the end');
+      assert.equal(await p.evaluate(() => window.__voice.player.snapshot().status), 'idle');
+    } finally { await c.close(); }
+    await L.human('POST', 'messages/flags/narrow', {anchor: 'oldest', num_before: 0, num_after: 100, narrow: [{operator: 'stream', operand: L.TASKS}], op: 'remove', flag: 'read'}).catch(() => {});
+  }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
