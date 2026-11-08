@@ -576,7 +576,90 @@ function maybeFinish() {
   if (finished.wasPlaying) player.resume(); else maybeAutoplay();
 }
 
-const recorder = createRecorder({log, onClip, onLevel: drawLevel});
+const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip});
+let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
+
+const RESUME_DEFAULT = 'over';
+const RESUME_SILENCE_MS = 1000;   // plus the recorder's 0.7 s end-of-utterance silence: about 1.7 s of quiet after the phrase
+const normalize = t => t.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+function editDistance(a, b) {
+  const d = Array.from({length: a.length + 1}, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++) d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+/** `text` without a trailing end phrase ("over", also "over over", "over and out"; any custom phrase matches fuzzily), or null when it does not end with one. */
+function stripResumePhrase(text) {
+  const words = text.trim().split(/\s+/).filter(Boolean), norm = words.map(w => normalize(w));
+  const phrase = normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT));
+  if (phrase === 'over') {
+    let n = norm.length;
+    if (n >= 3 && norm[n - 1] === 'out' && norm[n - 2] === 'and' && norm[n - 3] === 'over') n -= 2;
+    const end = n;
+    while (n > 0 && norm[n - 1] === 'over') n--;
+    return n < end ? words.slice(0, n).join(' ') : null;
+  }
+  for (const q of [phrase, 'over']) {
+    const k = q.split(' ').length;
+    if (q && words.length >= k && editDistance(normalize(words.slice(-k).join(' ')), q) <= Math.floor(q.length / 6)) return words.slice(0, -k).join(' ');
+  }
+  return null;
+}
+const PAUSE_WORDS = /^(?:\s*(?:pause|paws|stop|wait|hold)\b[\s,.!?]*)+/i;
+let vc = null;   // an open voice-control reply: `{base, text, timer}`
+const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen').textContent = '🎙 ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
+const vcIdle = () => setVcState('on', ['playing', 'loading'].includes(player.position().status) ? 'listening' : 'paused');
+
+/** Voice control: sustained speech while audio plays pauses it at once; what follows is dictated into the draft until the resume phrase and silence. */
+function onBarge() {
+  if (dict) return;
+  const st = player.position().status;
+  log('vc', `barge-in while ${st}`);
+  if (st === 'playing' || st === 'loading') player.pause();
+  if (vc?.timer) { clearTimeout(vc.timer); vc.timer = 0; log('vc', 'resume cancelled: more speech'); }
+  setVcState('heard', 'hearing you');
+}
+async function onCommandClip(blob) {
+  if (dict) return;
+  const r = await voice.stt(blob);
+  if (!r.ok) { log('vc', `stt failed: ${r.error}`); vcIdle(); return; }
+  let heard = r.text.trim();
+  const words = normalize(heard);
+  log('vc', `heard "${heard}"`);
+  if (!words) { vcIdle(); return; }
+  if (!vc && /^(next|skip|forward)( \1)*$/.test(words)) { log('vc', 'action next'); vcIdle(); jump(1); return; }
+  if (!vc && /^(back|previous|again|repeat)( \1)*$/.test(words)) { log('vc', 'action previous'); vcIdle(); jump(-1); return; }
+  if (!vc && words === 'send') { log('vc', 'action send'); if (draftEl.value.trim()) send(); vcIdle(); return; }
+  heard = heard.replace(PAUSE_WORDS, '').trim();   // "pause pause" is only a command, never part of the reply
+  vc ??= {base: draftEl.value, text: '', timer: 0};
+  vc.text = [vc.text, heard].filter(Boolean).join(' ');
+  draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
+  setVcState('dictating', 'dictating reply');
+  if (stripResumePhrase(vc.text) !== null) vc.timer = setTimeout(finishVcReply, RESUME_SILENCE_MS);
+}
+/** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
+function finishVcReply() {
+  const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
+  vc = null;
+  draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
+  log('vc', `resume phrase + silence: reply "${stripped}"`);
+  if (stripped) { setVcState('sending', 'sending'); send(); }
+  player.unlock();
+  if (player.position().status === 'paused') player.resume(); else if (player.position().status === 'idle') maybeAutoplay();
+  vcIdle();
+}
+async function setVoiceControl(on) {
+  voiceControl = on; voiceListening = on; store.set('voice2-vc', on);
+  $('set-voice').checked = on; $('listen').hidden = !on; if (on) vcIdle();
+  if (!on) { recorder.listen(false); return; }
+  const r = await recorder.listen(true);
+  if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; $('listen').hidden = true; }
+  log('vc', `voice control ${r.ok ? 'on' : 'failed'}`);
+}
+$('set-phrase').value = store.get('voice2-resume-phrase', RESUME_DEFAULT);
+$('set-phrase').onchange = e => store.set('voice2-resume-phrase', e.target.value.trim() || RESUME_DEFAULT);
+$('set-voice').onchange = e => setVoiceControl(e.target.checked);
+$('listen').onclick = () => sendLog('voicecmd');
 function drawLevel(level) {
   const canvas = $('level'), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -677,7 +760,7 @@ feed.addEventListener('click', event => {
   playFrom(m, span ? +span.dataset.from : 0);
 });
 // iOS only treats touchend/click as audio-unlocking gestures (not pointerdown); autoplay starts after the tap's own handlers ran.
-for (const type of ['touchend', 'click']) addEventListener(type, () => { if (!player.isUnlocked()) { player.unlock(); setTimeout(maybeAutoplay); } }, {capture: true});
+for (const type of ['touchend', 'click']) addEventListener(type, () => { if (!player.isUnlocked()) { player.unlock(); setTimeout(maybeAutoplay); } if (voiceControl && !recorder.active() && !voiceListening) { voiceListening = true; setVoiceControl(true); } }, {capture: true});
 
 $('agent').onclick = () => { $('search').value = ''; openPicker(); };
 $('search').oninput = openPicker;
@@ -771,7 +854,7 @@ addEventListener('unhandledrejection', e => reportProblem(String(e.reason?.messa
 setInterval(() => { if (current && !feed.querySelector('.msg, #empty, .notice')) { reportProblem('blank feed'); renderFeed(); } }, 3000);
 
 // ---- start ----
-renderRate(); renderAuto();
+renderRate(); renderAuto(); $('set-voice').checked = false; $('listen').hidden = true;
 if (current) { draftEl.value = store.get('voice2-draft:' + current, ''); renderFeed(); renderUnread(); }
 autosize();
 renderConn(events.info());

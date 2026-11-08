@@ -109,3 +109,12 @@ export async function uploadAs(who, name, type, bytes) {
   const r = await fetch(account.site + '/api/v1/user_uploads', {method: 'POST', headers: {Authorization: 'Basic ' + Buffer.from(email + ':' + key).toString('base64')}, body: f});
   return (await r.json()).uri;
 }
+
+/** `wav` padded with `ms` of silence on both sides (a spoken word in a quiet room). */
+export function padWav(wav, ms) {
+  const dataAt = wav.indexOf('data'), byteRate = wav.readUInt32LE(28), pcm = wav.subarray(dataAt + 8);
+  const zeros = Buffer.alloc(Math.round(byteRate * ms / 1000) & ~1);
+  const data = Buffer.concat([zeros, pcm, zeros]), head = Buffer.from(wav.subarray(0, dataAt + 8));
+  head.writeUInt32LE(data.length, dataAt + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  return Buffer.concat([head, data]);
+}

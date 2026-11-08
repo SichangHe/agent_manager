@@ -10,6 +10,7 @@ const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
 const MIN_LEVEL = 0.012;
 const GRACE_MS = 45000;
+const BARGE_MS = 300;
 
 const WORKLET = `registerProcessor('cap', class extends AudioWorkletProcessor {
   constructor() { super(); this.buf = new Float32Array(2048); this.n = 0; }
@@ -53,8 +54,8 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export function createRecorder({log, onClip, onLevel}) {
-  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, idleTimer = 0;
+export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
+  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -62,13 +63,13 @@ export function createRecorder({log, onClip, onLevel}) {
       const blob = resampleToWav(frames, ctx.sampleRate);
       clipsOut++;
       log('mic', `clip ${clipsOut}: ${Math.round(clipMs)}ms audio, ${Math.round(speechMs)}ms speech, ${blob.size}B${final ? ' (final)' : ''}`);
-      onClip(blob, {ms: clipMs});
+      (capturing ? onClip : onCommandClip)(blob, {ms: clipMs});
     }
     frames = []; speechMs = 0; silentMs = 0; clipMs = 0;
   }
 
   function onFrame(frame) {
-    if (!ctx || !capturing) return;   // frames after stop(), or while idle in the grace period
+    if (!ctx || (!capturing && !listening)) return;   // frames after stop(), or while idle in the grace period
     const ms = frame.length / ctx.sampleRate * 1000;
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
@@ -76,6 +77,14 @@ export function createRecorder({log, onClip, onLevel}) {
     const speaking = level > Math.max(MIN_LEVEL, noise * 3);
     if (!speaking) noise = noise * 0.98 + level * 0.02;
     onLevel?.(Math.min(1, level * 8));
+    if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
+      sustainMs = speaking ? sustainMs + ms : 0;
+      preroll.push(frame); while (preroll.length * ms > PREROLL_MS + sustainMs) preroll.shift();
+      if (sustainMs < BARGE_MS) return;
+      sustainMs = 0; log('mic', `barge-in: speech sustained ${BARGE_MS}ms`); onBarge?.();
+      frames = preroll; preroll = []; clipMs = frames.length * ms; speechMs = BARGE_MS; silentMs = 0;
+      return;
+    }
     if (!frames.length && !speaking) { preroll.push(frame); while (preroll.length * ms > PREROLL_MS) preroll.shift(); return; }
     if (!frames.length) { frames = preroll; preroll = []; clipMs = frames.length * ms; }
     frames.push(frame); clipMs += ms;
@@ -112,11 +121,18 @@ export function createRecorder({log, onClip, onLevel}) {
 
   return {
     /** Starts capturing at once; the first call also pays the one-time setup. Safe to call repeatedly or during startup. */
+    /** Voice control on/off: keeps the warm microphone open and watches for sustained speech. `{ok}` or `{ok: false, error}`. */
+    async listen(on) {
+      listening = on; sustainMs = 0; clearTimeout(idleTimer);
+      if (!on) { if (!capturing) idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS); return {ok: true}; }
+      try { warm ??= build().catch(error => { teardown(); throw error; }); await warm; if (ctx?.state === 'suspended') await ctx.resume(); return {ok: true}; }
+      catch (error) { listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied.' : `Microphone unavailable (${error.name}).`}; }
+    },
     async start() {
       clearTimeout(idleTimer);
       if (capturing) return {ok: true};
       capturing = true;
-      frames = []; preroll = []; speechMs = silentMs = clipMs = 0; clipsOut = 0;
+      frames = []; preroll = []; speechMs = silentMs = clipMs = 0; clipsOut = 0; sustainMs = 0;
       try {
         try { navigator.audioSession.type = 'play-and-record'; } catch { /* unsupported */ }
         warm ??= build().catch(error => { teardown(); throw error; });
@@ -136,7 +152,8 @@ export function createRecorder({log, onClip, onLevel}) {
       onLevel?.(0);
       try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
       clearTimeout(idleTimer);
-      idleTimer = setTimeout(() => { if (!capturing) teardown(); }, GRACE_MS);
+      sustainMs = 0; frames = []; preroll = [];
+      idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS);
     },
     active: () => capturing,
   };

@@ -226,7 +226,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       pausedDone = !!b && pausedMs >= b.startMs + HEARD_FRACTION * (b.endMs - b.startMs);
       active?.el.pause(); setStatus('paused');
     },
-    resume() { if (status === 'paused') { if (pausedDone) { pausedDone = false; pausedMs = null; if (active) active.chunk = null; itemEnded(); return; } if (active?.ready) { setStatus('loading'); const myGen = ++gen; start(active, myGen); } else playIndex(index); } else if (status === 'error') playIndex(index); },
+    resume() { if (status === 'paused') { if (pausedDone) { pausedDone = false; pausedMs = null; if (active) active.chunk = null; setStatus('loading'); itemEnded(); return; } if (active?.ready) { setStatus('loading'); const myGen = ++gen; start(active, myGen); } else playIndex(index); } else if (status === 'error') playIndex(index); },
     retry() { if (status === 'error' || status === 'blocked') playIndex(index); },
     stop() { gen++; for (const s of slots) { s.el.pause(); s.index = -1; s.ready = false; s.bundleId = null; s.chunk = null; } clips.clear(); items = []; index = -1; active = null; setStatus('idle'); },
     setRate(value) { rate = value; for (const s of slots) { s.el.playbackRate = value; s.el.defaultPlaybackRate = value; } },

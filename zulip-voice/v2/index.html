@@ -31,6 +31,7 @@
       <button id="slower" class="icon sm" aria-label="Slower">−</button>
       <span id="rate">1.0×</span>
       <button id="faster" class="icon sm" aria-label="Faster">+</button>
+      <button id="listen" class="chip quiet" data-state="on" hidden aria-label="Voice control is listening">🎙</button>
       <button id="auto" class="chip" aria-pressed="true">Auto</button>
     </div>
     <form id="composer" autocomplete="off">
@@ -55,6 +56,8 @@
   <div class="sheet-head"><h2>Settings</h2><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <section>
     <label class="row"><span>Autoplay new messages</span><input id="set-auto" type="checkbox"></label>
+    <label class="row"><span>Voice control (say pause, next, back, send; to finish and resume say the phrase below)</span><input id="set-voice" type="checkbox"></label>
+    <label class="row"><span>End phrase (default: over)</span><input id="set-phrase" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
     <label class="row"><span>Hide attachments</span><input id="set-hide-att" type="checkbox"></label>
     <label class="row"><span>Speed <b id="set-rate-text"></b></span><input id="set-rate" type="range" min="0.5" max="3" step="0.1"></label>
   </section>

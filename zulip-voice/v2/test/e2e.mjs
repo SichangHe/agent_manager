@@ -649,6 +649,80 @@ scenarios.micSpam = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceControl = async () => {
+  // Fake-mic sequences: barge-in pauses; "pause pause" is dropped; dictated reply + resume phrase + silence sends the reply and resumes.
+  await L.wipeTasks();
+  const say = async text => await L.speechWav(text);
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const seq = async (...parts) => {   // concatenate WAVs and silences (24 kHz 16-bit mono)
+    const wavs = await Promise.all(parts.map(x => typeof x === 'string' ? say(x) : x));
+    const pcm = wavs.map(w => Buffer.isBuffer(w) && w.toString('latin1', 0, 4) === 'RIFF' ? w.subarray(w.indexOf('data') + 8) : w);
+    const first = wavs.find(w => w.toString('latin1', 0, 4) === 'RIFF'), at = first.indexOf('data'), head = Buffer.from(first.subarray(0, at + 8));
+    const data = Buffer.concat(pcm); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+    return Buffer.concat([head, data]);
+  };
+  const files = {
+    '/__pause.wav': await seq(gap(2500), 'Pause pause pause pause pause.', gap(12000)),
+    '/__reply.wav': await seq(gap(2500), 'Yes, deploy it to staging first. Over.', gap(20000)),
+    '/__phrase.wav': await seq(gap(2500), 'Pause.', gap(1500), 'Over.', gap(20000)),
+    '/__plain.wav': await seq(gap(2500), 'Resume.', gap(15000)),
+    '/__next.wav': await seq(gap(2500), 'Next.', gap(8000)),
+  };
+  const srv2 = await L.serve(undefined, files);
+  const long = Array.from({length: 12}, (_, i) => `Paragraph ${i} is long enough that the message keeps playing for a while.`).join('\n\n');
+  await L.agentSays('alpha', '[alpha] Long\n\n' + long);
+  const run = async (wavUrl, check) => {
+    const c = await L.openClient({url: srv2.url, mic: wavUrl, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+    const p = c.page;
+    try {
+      await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+      await p.locator('.msg.agent .s').first().tap();
+      await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing');
+      await p.locator('#settings').tap(); await p.locator('#set-voice').check(); await p.keyboard.press('Escape');
+      return await check(p);
+    } finally { await c.close(); }
+  };
+  const status = p => p.evaluate(() => window.__voice.player.snapshot().status);
+  const draft = p => p.locator('#draft').inputValue();
+  const mine = async () => (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content);
+  const times = {};
+  await run('/__pause.wav', async p => {
+    const t = Date.now();
+    await L.waitFor(p, 'barge-in pauses playback', () => window.__voice.player.snapshot().status === 'paused', 25000);
+    times.pauseMs = Date.now() - t;
+    await L.waitFor(p, 'transcript heard', () => /vc\s+heard "[^"]*pause/i.test(window.__voice.log.text()), 25000);
+    await L.sleep(3000);
+    assert.equal(await status(p), 'paused', 'repeated pause stays paused');
+    assert.equal((await draft(p)).trim(), '', 'pause words are not added to the draft: ' + await draft(p));
+  });
+  await run('/__reply.wav', async p => {
+    await L.waitFor(p, 'reply sent and playing again', () => /vc\s+resume phrase \+ silence/.test(window.__voice.log.text()), 40000);
+    await L.waitFor(p, 'resumed', () => window.__voice.player.snapshot().status === 'playing', 10000);
+    const sent = await (async () => { for (let i = 0; i < 10; i++) { const m = await mine(); if (m.length) return m; await L.sleep(1000); } return []; })();
+    assert.equal(sent.length, 1, 'exactly one message sent: ' + JSON.stringify(sent));
+    assert.match(sent[0], /deploy it to staging/i);
+    assert.ok(!/\bover\b/i.test(sent[0]), 'resume phrase stripped: ' + sent[0]);
+    times.replySent = sent[0];
+  });
+  await L.wipeTasks(); await L.agentSays('alpha', '[alpha] Long\n\n' + long);
+  await run('/__phrase.wav', async p => {   // phrase alone = just resume, nothing sent
+    await L.waitFor(p, 'phrase resumes', () => /vc\s+resume phrase \+ silence/.test(window.__voice.log.text()), 40000);
+    await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing', 10000).catch(async e => { throw Error(e.message.split('\n')[0] + ' ' + JSON.stringify(await p.evaluate(() => window.__voice.player.snapshot())) + (await p.evaluate(() => window.__voice.log.text())).split('\n').slice(-12).join(' | ')); });
+    await L.sleep(1500);
+    assert.deepEqual(await mine(), [], 'nothing sent');
+  });
+  await run('/__plain.wav', async p => {   // a plain "resume" is not the phrase: stays paused, text lands in the draft
+    await L.waitFor(p, 'heard resume', () => /vc\s+heard "[^"]*resume/i.test(window.__voice.log.text()), 30000);
+    await L.sleep(4000);
+    assert.equal(await status(p), 'paused', 'plain resume must not resume');
+  });
+  await run('/__next.wav', async p => {
+    await L.waitFor(p, 'action next', () => /vc\s+action next/.test(window.__voice.log.text()), 30000);
+    await L.waitFor(p, 'moved on a chunk', () => { const n = document.querySelector('.s.now'); return n && +n.dataset.from >= 1; }, 15000);
+  });
+  return times;
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
