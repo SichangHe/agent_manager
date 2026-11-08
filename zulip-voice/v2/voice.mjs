@@ -67,14 +67,14 @@ export function createVoice({zulip, cfg, log}) {
   }
 
   /** `{ok: true, text}` for a WAV blob. */
-  async function stt(blob, prompt) {
+  async function stt(blob, prompt, kws) {
     const form = new FormData();
     form.append('file', blob, `dictation-${Date.now()}.wav`);
     const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
     if (!up.ok) return {ok: false, error: up.error};
     for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {})}, 60000);
-      if (r.ok) return {ok: true, text: r.result.text.trim(), noSpeechProb: r.result.noSpeechProb, avgLogprob: r.result.avgLogprob};
+      const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {}), ...(kws ? {kws: true} : {})}, 60000);
+      if (r.ok) return {ok: true, text: r.result.text.trim(), noSpeechProb: r.result.noSpeechProb, avgLogprob: r.result.avgLogprob, kws: r.result.kws};
       if (attempt === 2) return r;
     }
   }

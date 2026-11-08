@@ -24,6 +24,7 @@ ops
   - first upload the audio with `POST /api/v1/user_uploads`, pass the returned `uri`
   - `attachment` (same uri as a markdown link) is required: Zulip only grants the service access to an upload that a message links
   - optional `prompt` (at most 200 chars): Whisper `initial_prompt`, biases recognition toward words in it; voice-control clients send `Pause. Pause. Over.` so "pause" is not heard as "pulse" and "over" as "oh"
+  - optional `kws: true`: also run keyword spotting for "pause"/"over"/"switch to"; result `kws` is the list of keywords heard (`null` when the server has it disabled: `"kws": true` in the server's `settings.json`)
   - audio: WAV, MP4/AAC or WebM; at most 12 MiB and 120 s; English
   - result: `text` (empty = no speech), `noSpeechProb` (0..1, high = probably not speech), `avgLogprob` (negative; below about -1 = unsure); clients should distrust short transcripts of noisy clips with `noSpeechProb` above 0.6
 - `tts`: `{"op":"tts","id":..,"text":"One sentence."}`

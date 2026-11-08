@@ -662,12 +662,12 @@ scenarios.voiceControl = async () => {
     return Buffer.concat([head, data]);
   };
   const files = {
-    '/__pause.wav': await seq(gap(2500), 'Pause pause pause pause pause.', gap(12000)),
-    '/__reply.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first. Over.', gap(20000)),
-    '/__phrase.wav': await seq(gap(2500), 'Pause.', gap(6000), 'Over.', gap(20000)),
-    '/__split.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Over.', gap(20000)),
-    '/__next.wav': await seq(gap(2500), 'Pause. Next.', gap(8000)),
-    '/__noise.wav': await seq(gap(2500), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
+    '/__pause.wav': await seq(gap(9000), 'Pause pause pause pause pause.', gap(12000)),
+    '/__reply.wav': await seq(gap(9000), 'Pause. Yes, deploy it to staging first. Over.', gap(20000)),
+    '/__phrase.wav': await seq(gap(9000), 'Pause.', gap(6000), 'Over.', gap(20000)),
+    '/__split.wav': await seq(gap(9000), 'Pause. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Over.', gap(20000)),
+    '/__next.wav': await seq(gap(9000), 'Pause. Next.', gap(8000)),
+    '/__noise.wav': await seq(gap(9000), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
   const srv2 = await L.serve(undefined, files);
   const long = Array.from({length: 12}, (_, i) => `Paragraph ${i} is long enough that the message keeps playing for a while.`).join('\n\n');

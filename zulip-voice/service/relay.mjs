@@ -29,7 +29,7 @@ export function parseRequest(message, humanId, streamId) {
   if (request.op === 'tts' && request.texts !== undefined) {
     if (!Array.isArray(request.texts) || !request.texts.length || request.texts.length > MAX_BATCH || request.texts.some(t => typeof t !== 'string' || !t.trim()) || request.texts.join('').length > MAX_TEXT_CHARS) return null;
   } else if (request.op === 'tts' && (typeof request.text !== 'string' || !request.text.trim() || request.text.length > MAX_TEXT_CHARS)) return null;
-  if (request.op === 'stt' && (typeof request.uri !== 'string' || (request.prompt !== undefined && (typeof request.prompt !== 'string' || request.prompt.length > 200)))) return null;
+  if (request.op === 'stt' && (typeof request.uri !== 'string' || (request.prompt !== undefined && (typeof request.prompt !== 'string' || request.prompt.length > 200)) || (request.kws !== undefined && typeof request.kws !== 'boolean'))) return null;
   if (request.op === 'log' && (typeof request.text !== 'string' || request.text.length > MAX_LOG_REQUEST_CHARS)) return null;
   if (request.op === 'ack' && !(request.ids ?? [request.id]).every(id => typeof id === 'string')) return null;
   return request;
@@ -178,11 +178,12 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
   async function transcribe(request, result) {
     const audio = await api.download(request.uri);
     const t = now();
-    const response = await fetchImpl(workers.stt + '/stt', {method: 'POST', body: audio, headers: request.prompt ? {'X-Prompt': encodeURIComponent(request.prompt)} : {}, signal: AbortSignal.timeout(15000)});
+    const response = await fetchImpl(workers.stt + '/stt', {method: 'POST', body: audio, headers: {...(request.prompt ? {'X-Prompt': encodeURIComponent(request.prompt)} : {}), ...(request.kws ? {'X-Kws': '1'} : {})}, signal: AbortSignal.timeout(15000)});
     if (!response.ok) throw Error('Transcription failed: HTTP ' + response.status);
     const data = await response.json();
     if (typeof data.text !== 'string') throw Error('Invalid transcript');
     result.text = data.text;
+    result.kws = data.kws;
     result.noSpeechProb = data.no_speech_prob;
     result.avgLogprob = data.avg_logprob;
     return `bytes=${audio.length} stt=${now() - t}ms`;

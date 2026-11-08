@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128"]
+# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128", "sherpa-onnx"]
 # [[tool.uv.index]]
 # name = "pytorch-cuda"
 # url = "https://download.pytorch.org/whl/cu128"
@@ -19,12 +19,17 @@ import time
 from collections.abc import Mapping
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import json as _json
+from pathlib import Path
+
 import numpy as np
 import soundfile as sf
 import torch
 from faster_whisper import WhisperModel
 from kokoro import KPipeline
 
+KWS_THRESHOLD = 0.25   # measured in research-kws: 12/12 "pause" clips hit, 0/3 noise
+KWS_MODEL = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 MAX_AUDIO_BYTES = 12 * 1024 * 1024
 MAX_AUDIO_S = 120
 SAMPLE_RATE_HZ = 24000
@@ -56,6 +61,7 @@ class Speech:
                     np.zeros(16000, dtype=np.float32), language="en", beam_size=1
                 )[0]
             )
+        self.load_kws()
         torch.cuda.synchronize()
 
     def speak(self, text: str) -> bytes | str:
@@ -77,7 +83,47 @@ class Speech:
         )
         return output.getvalue()
 
-    def transcribe(self, data: bytes, prompt: str = "") -> dict[str, str] | str:
+    def load_kws(self) -> None:
+        """Keyword spotter for start-word clips; on only when `"kws": true` is in `~/.config/zulip-voice/settings.json` (reversible: set false and restart)."""
+        self.kws = None
+        try:
+            enabled = _json.loads((Path.home() / ".config/zulip-voice/settings.json").read_text()).get("kws") is True
+        except (OSError, ValueError):
+            enabled = False
+        if not enabled or self.kind != "stt":
+            return
+        import sherpa_onnx
+
+        base = Path(os.environ.get("VOICE_KWS_DIR", Path(__file__).parent / "research-kws"))
+        model = base / KWS_MODEL
+        chunk = "chunk-16-left-64.int8.onnx"
+        self.kws = sherpa_onnx.KeywordSpotter(
+            tokens=str(model / "tokens.txt"),
+            encoder=str(model / f"encoder-epoch-12-avg-2-{chunk}"),
+            decoder=str(model / f"decoder-epoch-12-avg-2-{chunk}"),
+            joiner=str(model / f"joiner-epoch-12-avg-2-{chunk}"),
+            keywords_file=str(base / "kw.txt"),
+            keywords_threshold=KWS_THRESHOLD,
+            keywords_score=1.0,
+            num_threads=1,
+            provider="cpu",
+        )
+
+    def spot(self, samples: np.ndarray) -> list[str]:
+        """Keywords heard in 16 kHz float `samples` (streamed in 100 ms chunks, then 0.5 s of silence to flush)."""
+        stream = self.kws.create_stream()
+        hits: list[str] = []
+        pad = np.zeros(8000, dtype=np.float32)
+        for chunk in [*np.array_split(samples, max(1, len(samples) // 1600)), pad]:
+            stream.accept_waveform(16000, chunk)
+            while self.kws.is_ready(stream):
+                self.kws.decode_stream(stream)
+                if hit := self.kws.get_result(stream):
+                    hits.append(hit)
+                    self.kws.reset_stream(stream)
+        return hits
+
+    def transcribe(self, data: bytes, prompt: str = "", kws: bool = False) -> dict[str, str] | str:
         """Decode browser MP4/WebM/WAV, rejecting recordings longer than two minutes."""
         try:
             decoded = subprocess.run(
@@ -119,11 +165,13 @@ class Speech:
             initial_prompt=prompt or None,
         )
         parts = list(segments)
+        heard = self.spot(samples) if kws and self.kws else None
         # Quality signals let clients reject hallucinated text on noise: no_speech_prob (max) and avg_logprob (mean) over the segments.
         return {
             "text": " ".join(segment.text.strip() for segment in parts).strip(),
             "no_speech_prob": max((segment.no_speech_prob for segment in parts), default=1.0),
             "avg_logprob": sum(segment.avg_logprob for segment in parts) / len(parts) if parts else -9.0,
+            "kws": None if heard is None else heard,
         }
 
 
@@ -199,7 +247,7 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
                     result = speech.speak(text.strip())
                 else:
                     prompt = urllib.parse.unquote(self.headers.get("X-Prompt", ""))[:200]
-                    result = speech.transcribe(data, prompt)
+                    result = speech.transcribe(data, prompt, self.headers.get("X-Kws") == "1")
                 self.reply(422, {"error": result}) if isinstance(
                     result, str
                 ) else self.reply(200, result)

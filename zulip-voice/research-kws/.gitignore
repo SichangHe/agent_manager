@@ -1,0 +1,5 @@
+kws.tar.bz2
+sherpa-onnx-kws-*/
+clips/
+.venv/
+*.wav

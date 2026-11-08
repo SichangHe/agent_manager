@@ -650,7 +650,7 @@ function maybeFinish() {
   if (finished.wasPlaying) resumeAfterPause(); else maybeAutoplay();
 }
 
-const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip, neural: store.get('voice2-neural', false), onMisfire: () => { utterancePending = false; resumeBarge(); }});
+const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip});
 let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
 
 const RESUME_DEFAULT = 'over';
@@ -704,18 +704,15 @@ function afterStartWord(text) {
 
 /** Speech while idle or playing only records; the transcript decides (it must start with the start word). Playback volume is left alone. */
 let bargePaused = false;
-/** Silero heard speech and paused playback; if it turns out not to be a command, carry on from the same spot (false-interruption resume). */
 function resumeBarge() {
   if (!bargePaused) return;
   bargePaused = false;
   if (player.position().status === 'paused') { log('vc', 'not a command: resuming in place'); player.resume(); }
   vcIdle();
 }
-function onBarge(info = {}) {
+function onBarge() {
   if (dict) return;
   const st = player.position().status;
-  // only the neural detector pauses on speech; the energy detector never does
-  if (info.neural && !vc && !pendingChoice && (st === 'playing' || st === 'loading')) { player.pause(); bargePaused = true; }
   log('vc', `speech detected while ${st}${vc ? ' (session open)' : ''}`);
   utterancePending = true; clearTimeout(utteranceTimer); utteranceTimer = setTimeout(utteranceDone, 15000);
   if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
@@ -729,7 +726,7 @@ const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = 
 async function handleCommandClip(blob, meta) {
   const listening = !!vc || (!!pendingChoice && Date.now() < pendingChoice.until);
   // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
-  const r = await voice.stt(blob, listening ? VC_PROMPT : undefined);
+  const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening);   // start-word clips also get keyword spotting on the server
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); resumeBarge(); vcIdle(); return; }
   const heard = r.text.trim();
   log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
@@ -749,7 +746,11 @@ async function handleCommandClip(blob, meta) {
     if (!vc) { log('vc', `ignored during the switch question: "${heard}"`); vcIdle(); return; }   // "pause" must not open a reply while we wait for the answer
   }
   if (!vc) {
-    const rest = afterStartWord(heard);
+    // With server keyword spotting on (r.kws is a list): it must have heard PAUSE, and Whisper must confirm the standalone word, so "paused"/"paws" never open a session.
+    const kwsOn = Array.isArray(r.kws) && Date.now() - lastReplyEndMs >= FOLLOW_UP_GRACE_MS;   // a follow-up right after a send needs no start word
+    if (kwsOn && !r.kws.includes('PAUSE')) { log('vc', `ignored: "${heard}" (keyword spotter did not hear pause)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
+    let rest = afterStartWord(heard);
+    if (kwsOn && rest !== null && !/^(pause|pulse|pulls|polls|pawz)\b/i.test(normalize(heard))) { log('vc', `ignored: "${heard}" (transcript is not the word pause)`); rest = null; resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
     if (rest === null) { resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     openSession(rest);
@@ -915,8 +916,6 @@ $('set-start').value = store.get('voice2-start-word', START_DEFAULT);
 $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.trim().toLowerCase() || START_DEFAULT);
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
-$('set-neural').checked = store.get('voice2-neural', false);
-$('set-neural').onchange = e => { store.set('voice2-neural', e.target.checked); recorder.useNeural(e.target.checked); };
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
 $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say pause, finish a reply with "over"' : 'Voice control off'); };
 function drawLevel(level) {

@@ -1,6 +1,6 @@
 /** Builds the static client into OUTPUT_DIRECTORY. Never uploads or publishes. Every module URL carries a content hash so a phone never mixes versions. */
 import {createHash} from 'node:crypto';
-import {mkdir, readFile, writeFile, copyFile} from 'node:fs/promises';
+import {mkdir, readFile, writeFile} from 'node:fs/promises';
 import {resolve} from 'node:path';
 
 const output = process.argv[2];
@@ -9,22 +9,12 @@ const files = ['index.html', 'test.html', 'selftest.mjs', 'app.css', 'app.mjs', 
 const here = name => new URL('./' + name, import.meta.url);
 const sources = Object.fromEntries(await Promise.all(files.map(async name => [name, await readFile(here(name), 'utf8')])));
 const version = createHash('sha1').update(files.map(n => sources[n]).join('\0')).digest('hex').slice(0, 10);
-// Silero VAD assets (pinned in package.json, `npm install` first) go into one content-hashed directory, so they are cacheable forever.
-const nm = name => new URL('./node_modules/' + name, import.meta.url);
-const vadAssets = [['onnxruntime-web/dist/ort.wasm.min.js', 'ort.wasm.min.js'], ['onnxruntime-web/dist/ort-wasm-simd-threaded.mjs', 'ort-wasm-simd-threaded.mjs'], ['onnxruntime-web/dist/ort-wasm-simd-threaded.wasm', 'ort-wasm-simd-threaded.wasm'],
-  ['@ricky0123/vad-web/dist/bundle.min.js', 'bundle.min.js'], ['@ricky0123/vad-web/dist/vad.worklet.bundle.min.js', 'vad.worklet.bundle.min.js'], ['@ricky0123/vad-web/dist/silero_vad_v5.onnx', 'silero_vad_v5.onnx']];
-const vadHash = createHash('sha1');
-for (const [from] of vadAssets) vadHash.update(await readFile(nm(from)));
-const vadDir = 'vad-' + vadHash.digest('hex').slice(0, 10);
-await mkdir(resolve(output, vadDir), {recursive: true});
-for (const [from, to] of vadAssets) await copyFile(nm(from), resolve(output, vadDir, to));
 await mkdir(output, {recursive: true});
 for (const name of files) {
   let text = sources[name];
   if (name.endsWith('.mjs')) text = text.replace(/(from '\.\/[\w-]+\.mjs)'/g, `$1?v=${version}'`).replace(/(import\('\.\/[\w-]+\.mjs)'\)/g, `$1?v=${version}')`);
   if (name === 'test.html') text = text.replace('src="selftest.mjs"', `src="selftest.mjs?v=${version}"`);
   if (name === 'index.html') text = text.replace('href="app.css"', `href="app.css?v=${version}"`).replace('src="app.mjs"', `src="app.mjs?v=${version}"`);
-  if (name === 'recorder.mjs') text = text.replace("const VAD_BASE = './vad/';", `const VAD_BASE = './${vadDir}/';`);
   if (name === 'app.mjs') text = text.replace("const BUILD = 'v2.0'", `const BUILD = 'v2.0-${version}'`);
   await writeFile(resolve(output, name), text);
 }
