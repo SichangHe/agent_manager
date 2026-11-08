@@ -605,44 +605,82 @@ function stripResumePhrase(text) {
   }
   return null;
 }
-const PAUSE_WORDS = /^(?:\s*(?:pause|paws|stop|wait|hold)\b[\s,.!?]*)+/i;
-let vc = null;   // an open voice-control reply: `{base, text, timer}`
+const START_DEFAULT = 'pause';
+const START_ALIASES = {pause: ['pause', 'paws', 'pose', 'pours', 'paused', 'pawz']};
+const EMPTY_SESSION_MS = 8000;
+let vc = null;   // an open voice-control session: `{base, text, timer, emptyTimer}`
 const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
 const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
 
-/** Voice control: sustained speech while audio plays pauses it at once; what follows is dictated into the draft until the resume phrase and silence. */
+/** `text` after a leading start word ("pause", fuzzy, repeated "pause pause" collapsed), or null when it does not start with one. */
+function afterStartWord(text) {
+  const word = normalize(store.get('voice2-start-word', START_DEFAULT));
+  const accepted = new Set([word, ...(START_ALIASES[word] ?? [])]);
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const isStart = w => { const n = normalize(w); return n && (accepted.has(n) || editDistance(n, word) <= (word.length >= 5 ? 1 : 0)); };
+  if (!words.length || !isStart(words[0])) return null;
+  let i = 0;
+  while (i < words.length && isStart(words[i])) i++;
+  return words.slice(i).join(' ');
+}
+
+/** Speech while idle or playing only ducks the audio and records; the transcript decides (it must start with the start word). */
 function onBarge() {
   if (dict) return;
   const st = player.position().status;
-  log('vc', `barge-in while ${st}`);
-  if (st === 'playing' || st === 'loading') player.pause();
-  if (vc?.timer) { clearTimeout(vc.timer); vc.timer = 0; log('vc', 'resume cancelled: more speech'); }
+  log('vc', `speech detected while ${st}${vc ? ' (session open)' : ''}`);
+  if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
+  else if (st === 'playing' || st === 'loading') player.duck(true);
   setVcState('heard', 'hearing you');
-  recorder.setReplyMode(true);
-  if (!vc) recorder.beep('ready');
 }
 async function onCommandClip(blob) {
   if (dict) return;
   const r = await voice.stt(blob);
-  if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); vcIdle(); return; }
-  if (!vc && !normalize(r.text)) recorder.setReplyMode(false);
-  let heard = r.text.trim();
-  const words = normalize(heard);
+  if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); player.duck(false); vcIdle(); return; }
+  const heard = r.text.trim();
   log('vc', `heard "${heard}"`);
-  if (!words) { vcIdle(); return; }
-  if (!vc && /^(next|skip|forward)( \1)*$/.test(words)) { log('vc', 'action next'); vcIdle(); jump(1); return; }
-  if (!vc && /^(back|previous|again|repeat)( \1)*$/.test(words)) { log('vc', 'action previous'); vcIdle(); jump(-1); return; }
-  if (!vc && words === 'send') { log('vc', 'action send'); if (draftEl.value.trim()) send(); vcIdle(); return; }
-  heard = heard.replace(PAUSE_WORDS, '').trim();   // "pause pause" is only a command, never part of the reply
-  vc ??= {base: draftEl.value, text: '', timer: 0};
-  vc.text = [vc.text, heard].filter(Boolean).join(' ');
+  if (!normalize(heard)) { if (!vc) { player.duck(false); recorder.setReplyMode(false); } vcIdle(); return; }
+  if (!vc) {
+    const rest = afterStartWord(heard);
+    if (rest === null) { log('vc', `ignored: "${heard}" (no start word)`); player.duck(false); recorder.setReplyMode(false); vcIdle(); return; }
+    openSession(rest);
+    return;
+  }
+  addToSession(heard);
+}
+function openSession(rest) {
+  if (['playing', 'loading'].includes(player.position().status)) player.pause();
+  player.duck(false);
+  vc = {base: draftEl.value, text: '', timer: 0, emptyTimer: 0};
+  recorder.setReplyMode(true); recorder.beep('ready');
+  log('vc', `session opened by start word; rest "${rest}"`);
+  const words = normalize(rest);
+  const action = /^(next|skip|forward)$/.test(words) ? 1 : /^(back|previous|again|repeat)$/.test(words) ? -1 : 0;
+  if (action) { log('vc', action > 0 ? 'action next' : 'action previous'); vc = null; recorder.setReplyMode(false); jump(action); vcIdle(); return; }
+  if (rest) addToSession(rest);
+  else { setVcState('dictating', 'say your reply'); vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS); }
+}
+function addToSession(heard) {
+  clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
+  vc.text = [vc.text, heard.replace(/^(?:\s*pause\b[\s,.!?]*)+/i, '').trim()].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
   setVcState('dictating', 'dictating reply');
   clearTimeout(vc.timer);
   // "over" + short silence finishes at once; with no "over", a long silence (Settings, default 6 s) finishes too
   const silenceMs = stripResumePhrase(vc.text) !== null ? RESUME_SILENCE_MS : Number(store.get('voice2-long-silence-s', 6)) * 1000;
   if (vc.text.trim() && silenceMs > 0) vc.timer = setTimeout(finishVcReply, silenceMs);
+  else if (!vc.text.trim()) vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS);
 }
+/** A pause with nothing said after it never hangs: close it and carry on. */
+function closeEmptySession() {
+  if (!vc || vc.text.trim()) return;
+  log('vc', 'empty session timed out: resuming');
+  vc = null; recorder.setReplyMode(false); recorder.beep('done');
+  player.unlock();
+  if (player.position().status === 'paused') player.resume(); else maybeAutoplay();
+  vcIdle();
+}
+
 /** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
 function finishVcReply() {
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
@@ -667,6 +705,8 @@ async function setVoiceControl(on) {
 }
 $('set-phrase').value = store.get('voice2-resume-phrase', RESUME_DEFAULT);
 $('set-phrase').onchange = e => store.set('voice2-resume-phrase', e.target.value.trim() || RESUME_DEFAULT);
+$('set-start').value = store.get('voice2-start-word', START_DEFAULT);
+$('set-start').onchange = e => store.set('voice2-start-word', e.target.value.trim().toLowerCase() || START_DEFAULT);
 $('set-silence').value = store.get('voice2-long-silence-s', 6);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);

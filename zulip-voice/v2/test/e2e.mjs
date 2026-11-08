@@ -663,11 +663,11 @@ scenarios.voiceControl = async () => {
   };
   const files = {
     '/__pause.wav': await seq(gap(2500), 'Pause pause pause pause pause.', gap(12000)),
-    '/__reply.wav': await seq(gap(2500), 'Yes, deploy it to staging first. Over.', gap(20000)),
+    '/__reply.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first. Over.', gap(20000)),
     '/__phrase.wav': await seq(gap(2500), 'Pause.', gap(1500), 'Over.', gap(20000)),
-    '/__split.wav': await seq(gap(2500), 'Yes, deploy it to staging first and tell me when it is done.', gap(1200), 'Over.', gap(20000)),
-    '/__plain.wav': await seq(gap(2500), 'Resume.', gap(15000)),
-    '/__next.wav': await seq(gap(2500), 'Next.', gap(8000)),
+    '/__split.wav': await seq(gap(2500), 'Pause. Yes, deploy it to staging first and tell me when it is done.', gap(1200), 'Over.', gap(20000)),
+    '/__next.wav': await seq(gap(2500), 'Pause. Next.', gap(8000)),
+    '/__noise.wav': await seq(gap(2500), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
   const srv2 = await L.serve(undefined, files);
   const long = Array.from({length: 12}, (_, i) => `Paragraph ${i} is long enough that the message keeps playing for a while.`).join('\n\n');
@@ -689,12 +689,19 @@ scenarios.voiceControl = async () => {
   const times = {};
   await run('/__pause.wav', async p => {
     const t = Date.now();
-    await L.waitFor(p, 'barge-in pauses playback', () => window.__voice.player.snapshot().status === 'paused', 25000);
+    await L.waitFor(p, 'start word pauses playback', () => window.__voice.player.snapshot().status === 'paused', 25000);
     times.pauseMs = Date.now() - t;
-    await L.waitFor(p, 'transcript heard', () => /vc\s+heard "[^"]*pause/i.test(window.__voice.log.text()), 25000);
-    await L.sleep(3000);
-    assert.equal(await status(p), 'paused', 'repeated pause stays paused');
-    assert.equal((await draft(p)).trim(), '', 'pause words are not added to the draft: ' + await draft(p));
+    assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'pause words are not added to the draft');
+    // "pause" and then nothing: the session closes by itself and playback resumes (never left hanging)
+    await L.waitFor(p, 'empty session resumes', () => /vc\s+empty session timed out/.test(window.__voice.log.text()), 25000);
+    await L.waitFor(p, 'playing again', () => window.__voice.player.snapshot().status === 'playing', 10000);
+  });
+  await run('/__noise.wav', async p => {   // other speech during playback never pauses it
+    await L.waitFor(p, 'ignored', () => /vc\s+ignored: /.test(window.__voice.log.text()), 30000);
+    await L.sleep(1500);
+    assert.equal(await status(p), 'playing', 'unrelated speech must not pause');
+    assert.equal((await draft(p)).trim(), '', 'nothing added to the draft');
+    assert.deepEqual(await mine(), [], 'nothing sent');
   });
   await run('/__reply.wav', async p => {
     await L.waitFor(p, 'reply sent and playing again', () => /vc\s+resume phrase \+ silence/.test(window.__voice.log.text()), 40000);
@@ -718,11 +725,6 @@ scenarios.voiceControl = async () => {
     const sent = await (async () => { for (let i = 0; i < 10; i++) { const m = await mine(); if (m.length) return m; await L.sleep(1000); } return []; })();
     assert.equal(sent.length, 1, 'reply sent: ' + JSON.stringify(sent));
     assert.match(sent[0], /deploy it to staging/i);
-  });
-  await run('/__plain.wav', async p => {   // a plain "resume" is not the phrase: stays paused, text lands in the draft
-    await L.waitFor(p, 'heard resume', () => /vc\s+heard "[^"]*resume/i.test(window.__voice.log.text()), 30000);
-    await L.sleep(4000);
-    assert.equal(await status(p), 'paused', 'plain resume must not resume');
   });
   await run('/__next.wav', async p => {
     await L.waitFor(p, 'action next', () => /vc\s+action next/.test(window.__voice.log.text()), 30000);
@@ -766,7 +768,7 @@ scenarios.voiceFirstWord = async () => {
   // Speech that starts right at barge-in: the ring-buffer preroll keeps the first word; our own chimes never count as speech.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const speech = await L.speechWav('Deploy the build to staging now. Over.');
+  const speech = await L.speechWav('Pause. Deploy the build to staging now. Over.');
   const at = speech.indexOf('data'), head = Buffer.from(speech.subarray(0, at + 8)), data = Buffer.concat([gap(2500), speech.subarray(at + 8), gap(20000)]);
   head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__first.wav': Buffer.concat([head, data])});
@@ -792,7 +794,7 @@ scenarios.voiceLongSilence = async () => {
   // A reply without "over" is finished by a long silence (3 s here): sent, then playback resumes.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const speech = await L.speechWav('Yes, deploy it to staging now please.');
+  const speech = await L.speechWav('Pause. Yes, deploy it to staging now please.');
   const at = speech.indexOf('data'), head = Buffer.from(speech.subarray(0, at + 8)), data = Buffer.concat([gap(2500), speech.subarray(at + 8), gap(30000)]);
   head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__long.wav': Buffer.concat([head, data])});

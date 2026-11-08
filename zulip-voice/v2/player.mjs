@@ -16,6 +16,7 @@ const RETRY_CAP_MS = 8000;
 const N_SLOTS = 6;      // audio elements, each holding one downloaded bundle: the client's audio cache (bytes themselves cannot be read cross-origin)
 const WARM_AHEAD = 3;
 const HEARD_FRACTION = 0.8;
+const DUCK_VOLUME = 0.25;
 const RESUME_BACKUP_MS = 2000;
 
 export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStatus}) {
@@ -229,6 +230,8 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     resume() { if (status === 'paused') { if (pausedDone) { pausedDone = false; pausedMs = null; if (active) active.chunk = null; setStatus('loading'); itemEnded(); return; } if (active?.ready) { setStatus('loading'); const myGen = ++gen; start(active, myGen); } else playIndex(index); } else if (status === 'error') playIndex(index); },
     retry() { if (status === 'error' || status === 'blocked') playIndex(index); },
     stop() { gen++; for (const s of slots) { s.el.pause(); s.index = -1; s.ready = false; s.bundleId = null; s.chunk = null; } clips.clear(); items = []; index = -1; active = null; setStatus('idle'); },
+    /** Quiets playback while the user may be speaking (no effect where the platform ignores element volume, e.g. iOS). */
+    duck(on) { for (const sl of slots) { try { sl.el.volume = on ? DUCK_VOLUME : 1; } catch { /* read-only volume */ } } },
     setRate(value) { rate = value; for (const s of slots) { s.el.playbackRate = value; s.el.defaultPlaybackRate = value; } },
     currentTime: () => (status === 'playing' || status === 'paused') && active ? active.el.currentTime : 0,
     position: () => ({index, status, queued: items.length}),
