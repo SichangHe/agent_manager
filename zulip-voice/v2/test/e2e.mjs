@@ -1236,6 +1236,28 @@ scenarios.footerFold = async () => {
   }
 };
 
+scenarios.voiceSwitchAbbrev = async () => {
+  // "Switch to Human Manager" must find human_mgr and ask for confirmation; "Switch to xyzzy" must never become a sent reply.
+  await L.wipeTasks();
+  for (const t of ['human_mgr', 'terminal_viz', 'uiclient_steer', 'main_manager_agy']) await L.agentSays(t, `[${t}] T\n\nThis is ${t}.`);
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Pause. Switch to Human Manager.', 'Yes.', 'Pause. Switch to xyzzy.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(9000), pcm(ws[0]), gap(14000), pcm(ws[1]), gap(12000), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__ab.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__ab.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 5, 20000);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'switched to human_mgr', () => window.__voice.current() === 'human_mgr', 60000);
+    await L.waitFor(p, 'xyzzy handled', () => /vc\s+no agent matches/.test(window.__voice.log.text()), 60000);
+    await L.sleep(3000);
+    const sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}], anchor: 'newest', num_before: 20, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId);
+    assert.equal(sent.length, 0, 'nothing sent as a reply: ' + JSON.stringify(sent.map(m => m.content)));
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

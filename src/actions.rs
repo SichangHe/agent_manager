@@ -665,7 +665,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let mut task = store.own(text("task_file"))?;
             let tool = task.field("tool").unwrap_or_default();
             // 🧑 (via the main manager) "Allow Codex Astra agents to message the human": an entry `TOOL:MODEL_PART` admits that tool on matching models only.
-            let model_allowed = || {
+            let model_allowed = || -> Result<bool, String> {
                 let listed = settings::get(&settings, "human.writers");
                 let wanted: Vec<&str> = listed
                     .split(',')
@@ -680,20 +680,23 @@ pub fn run(values: &Value) -> Result<u8, String> {
                             .unwrap_or_default()
                     ),
                 );
-                (!wanted.is_empty() || !exception.is_empty())
-                    && task
-                        .address()
-                        .strip_prefix(omnigent::PREFIX)
-                        .ok_or_else(String::new)
-                        .and_then(|id| omnigent::api(&settings, "GET", &format!("/v1/sessions/{id}?include_items=false"), None))
-                        .is_ok_and(|session| {
-                            let model = session["model_override"].as_str().unwrap_or_default();
-                            wanted.iter().any(|part| model.contains(part))
-                                // 🧑 "Try 6 Sol" for this direct-human writing role.
-                                || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag()))
-                        })
+                if wanted.is_empty() && exception.is_empty() {
+                    return Ok(false);
+                }
+                let Some(id) = task.address().strip_prefix(omnigent::PREFIX) else {
+                    return Ok(false);
+                };
+                // 🤖 human_mgr.md: a slow or failed session lookup used to read as "wrong model" and refuse the human-facing reporter; retry, then say what failed.
+                let path = format!("/v1/sessions/{id}?include_items=false");
+                let session = omnigent::api(&settings, "GET", &path, None)
+                    .or_else(|_| omnigent::api(&settings, "GET", &path, None))
+                    .map_err(|error| format!("amh: nothing sent: cannot check which model you run on ({error}); send it again"))?;
+                let model = session["model_override"].as_str().unwrap_or_default();
+                Ok(wanted.iter().any(|part| model.contains(part))
+                    // 🧑 "Try 6 Sol" for this direct-human writing role.
+                    || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag())))
             };
-            if !settings::allows(&settings, "human.writers", tool) && !model_allowed() {
+            if !settings::allows(&settings, "human.writers", tool) && !model_allowed()? {
                 return Err(format!(
                     "amh: nothing sent: the human reads only agents running on {}, and you run on {tool}. Send what the human should hear to your manager with `amh tell manager` (details in a file); your manager writes to the human. Change your items with `amh todo`.",
                     settings::get(&settings, "human.writers")

@@ -534,15 +534,25 @@ function runSwitch() {
 }
 
 /** Topics ranked by how well they match `query` ("terminal viz" finds terminal_viz); most recent first when the query is empty. */
+const ABBREVIATIONS = {mgr: 'manager', manager: 'mgr', viz: 'visualization', impl: 'implementation', cfg: 'config', config: 'cfg', dev: 'developer', ops: 'operations', eval: 'evaluation', exp: 'experiment', doc: 'documentation', docs: 'documentation', repo: 'repository', infra: 'infrastructure', ui: 'uiclient', pr: 'pullrequest', ci: 'continuous', ml: 'machinelearning', db: 'database'};
+/** 0..1: how well every spoken word matches some word of the topic name ("human manager" ~ human_mgr), allowing abbreviations, prefixes and initials. */
+function tokenScore(query, name) {
+  const qs = normalize(query).split(' ').filter(Boolean), ns = normalize(name.replace(/[_-]/g, ' ')).split(' ').filter(Boolean);
+  if (!qs.length || !ns.length) return 0;
+  const same = (a, b) => a === b || ABBREVIATIONS[a] === b || ABBREVIATIONS[b] === a || (a.length >= 3 && b.startsWith(a)) || (b.length >= 3 && a.startsWith(b)) || (ABBREVIATIONS[b] && ABBREVIATIONS[b].startsWith(a) && a.length >= 3) || (ABBREVIATIONS[a] && ABBREVIATIONS[a].startsWith(b) && b.length >= 3) || (a.length >= 4 && editDistance(a, b) <= 1);
+  const matched = qs.filter(q => ns.some(n => same(q, n))).length / qs.length;
+  const cover = ns.filter(n => qs.some(q => same(q, n))).length / ns.length;
+  return matched === 1 ? 0.7 + 0.3 * cover : matched * 0.7;
+}
 function rankTopics(query) {
   const q = normalize(query), qFlat = q.replace(/ /g, '');
   const topics = model.topics();
   if (!qFlat) return topics.map(t => ({t, score: 1}));
   return topics.map(t => {
     const name = normalize(t.name.replace(/[_-]/g, ' ')), flat = name.replace(/ /g, '');
-    const score = flat === qFlat ? 1 : flat.includes(qFlat) ? 0.9 : q.split(' ').every(w => name.includes(w)) ? 0.8 : 1 - editDistance(flat.slice(0, qFlat.length + 2), qFlat) / Math.max(qFlat.length, 1);
+    const score = Math.max(tokenScore(query, t.name), 0) > 0 && tokenScore(query, t.name) >= 0.85 ? tokenScore(query, t.name) : flat === qFlat ? 1 : flat.includes(qFlat) ? 0.9 : q.split(' ').every(w => name.includes(w)) ? 0.8 : 1 - editDistance(flat.slice(0, qFlat.length + 2), qFlat) / Math.max(qFlat.length, 1);
     return {t, score};
-  }).filter(x => x.score >= 0.55).sort((a, b) => b.score - a.score || b.t.maxId - a.t.maxId);
+  }).filter(x => x.score >= 0.4).sort((a, b) => b.score - a.score || b.t.maxId - a.t.maxId);
 }
 
 function openPicker() {
@@ -770,7 +780,7 @@ async function handleCommandClip(blob, meta) {
   if (SWITCH_BACK_RE.test(normalize(heard))) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; recorder.setReplyMode(false); bargePaused = false; switchBack(); vcIdle(); return; }
   const sw = normalize(heard).match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
   if (CANCEL_RE.test(normalize(heard))) { cancelSession(); return; }   // discards this reply and carries on
-  if (sw && ranksConfident(sw[1])) {
+  if (sw) {
     clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
     log('vc', 'switch command inside an open session');
     draftEl.value = vc.base; autosize();
@@ -817,8 +827,8 @@ const ranksConfident = spoken => (rankTopics(spoken)[0]?.score ?? 0) >= SWITCH_M
 function voiceSwitch(spoken) {
   const ranked = rankTopics(spoken);
   log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
-  if (!ranked.length || ranked[0].score < SWITCH_MIN_SCORE) { log('vc', 'no confident agent match: treated as ordinary words'); return false; }
-  const clear = ranked.length === 1 || ranked[0].score - ranked[1].score >= 0.15;
+  if (!ranked.length) { log('vc', 'no agent matches'); recorder.beep('error'); toast(`No agent called “${spoken}”`); sayAndMute(`No agent called ${spoken}`); return false; }
+  const clear = ranked[0].score >= SWITCH_MIN_SCORE && (ranked.length === 1 || ranked[0].score - ranked[1].score >= 0.15);
   pendingChoice = {names: clear ? [ranked[0].t.name] : ranked.slice(0, 3).map(x => x.t.name), until: Date.now() + 20000, confirm: clear};
   setTimeout(() => { if (pendingChoice && Date.now() >= pendingChoice.until) cancelChoice(); }, 20500);
   const readable = n => n.replace(/[_-]/g, ' ');
@@ -838,7 +848,7 @@ function openSession(rest) {
   const words = normalize(rest);
   if (SWITCH_BACK_RE.test(words)) { log('vc', 'switch back to the previous agent'); vc = null; recorder.setReplyMode(false); bargePaused = false; switchBack(); vcIdle(); return; }
   const sw = words.match(SWITCH_RE);
-  if (sw && ranksConfident(sw[1])) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }
+  if (sw) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }   // a switch phrase is never sent as a reply
   if (CANCEL_RE.test(words)) { log('vc', 'cancel right after the start word'); vc = null; recorder.setReplyMode(false); recorder.beep('cancel'); resumeAfterPause(); vcIdle(); return; }
   const nav = navCommand(words);
   if (nav) { vc = null; recorder.setReplyMode(false); navigate(nav); vcIdle(); return; }
