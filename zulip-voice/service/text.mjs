@@ -9,17 +9,21 @@ export function splitSentences(text) {
   return text.match(/[^.!?]+[.!?]*(?:\s+|$)|[.!?]+/g) || [text];
 }
 
-/** Removes `pending item created:` / `deleted:` / `resolved:` headings and the `- ...` bullets that follow them. */
-function dropPendingFooters(lines) {
-  const out = [];
-  let skipping = false;
-  for (const line of lines) {
-    if (/^pending items?\s+\w+.*:\s*$/i.test(line.trim())) { skipping = true; continue; }
-    if (skipping && /^\s*[-*]\s+/.test(line)) continue;
-    skipping = false;
-    out.push(line);
+/**
+ * amh footer blocks ("pending item created:", "pending item deleted:", "pending item resolved", "removed open item", "open items:") with their bullet lines.
+ * Returns the message lines without them and the footer lines separately; they are never spoken, and the web client folds them on small screens.
+ */
+export function splitFooters(lines) {
+  const body = [], footers = [];
+  const heading = /^(pending items?|removed open items?|open items?)\b[^\n]*$/i;
+  for (let i = 0; i < lines.length; i++) {
+    const t = lines[i].trim();
+    if (heading.test(t) && (t.endsWith(':') || /^\s*[-*]\s+/.test(lines[i + 1] ?? ''))) {
+      footers.push(lines[i]);
+      while (/^\s*[-*]\s+/.test(lines[i + 1] ?? '')) footers.push(lines[++i]);
+    } else body.push(lines[i]);
   }
-  return out;
+  return {body, footers};
 }
 
 /** Zulip uploads linked in `content` as `[name](/user_uploads/...)`; returns the text without them and the list. */
@@ -39,9 +43,10 @@ export function parseAgentMessage(content) {
     if (match) switchTo = match[1].trim().replace(/\.md$/, '');
     return !match;
   });
-  const text = dropPendingFooters(lines).join('\n');
+  const split = splitFooters(lines);
+  const text = split.body.join('\n');
   const first = text.match(/^\[[^\]\n]+\][^\n]*(?:\n|$)/);
-  return {title: first ? first[0].trim() : '', body: (first ? text.slice(first[0].length) : text).trim(), switchTo, attachments: extracted.attachments};
+  return {title: first ? first[0].trim() : '', body: (first ? text.slice(first[0].length) : text).trim(), switchTo, attachments: extracted.attachments, footers: split.footers};
 }
 
 /** Markdown-ish blocks: `{kind: 'p'|'li'|'h'|'code', text}`. */

@@ -7,8 +7,8 @@ const parsedCache = new WeakMap();
 export function parsed(message) {
   let p = parsedCache.get(message);
   if (!p) {
-    const {title, body, switchTo, attachments} = parseAgentMessage(message.content);
-    p = {title, body, switchTo, attachments, ...messageChunks(body)};
+    const {title, body, switchTo, attachments, footers} = parseAgentMessage(message.content);
+    p = {title, body, switchTo, attachments, footers, ...messageChunks(body)};
     parsedCache.set(message, p);
   }
   return p;

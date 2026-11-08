@@ -1216,6 +1216,26 @@ scenarios.voiceSwitchBack = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.footerFold = async () => {
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Done\n\nHere is the real message text.\n\npending item created:\n- "first request"\n- "second request"\npending item deleted:\n- "old request"');
+  for (const [name, width] of [['narrow', 390], ['wide', 1100]]) {
+    const c = await L.openClient({url: (await L.serve()).url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+    const p = c.page; await p.setViewportSize({width, height: 800});
+    try {
+      await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+      const vis = () => p.evaluate(() => { const t = document.querySelector('.footer-text'); return !!t && t.getBoundingClientRect().height > 0; });
+      if (name === 'narrow') {
+        assert.equal(await vis(), false, 'folded on a narrow screen');
+        assert.match(await p.locator('.footer-chip').innerText(), /3 items/);
+        await p.locator('.footer-chip').tap();
+        assert.equal(await vis(), true, 'chip expands it');
+      } else assert.equal(await vis(), true, 'fully shown on a wide screen');
+      assert.ok(!(await p.evaluate(() => [...document.querySelectorAll('.msg.agent .s')].map(x => x.innerText).join(' '))).match(/request|pending/), 'not in the readable text');
+    } finally { await c.close(); }
+  }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

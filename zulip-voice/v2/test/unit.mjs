@@ -10,12 +10,17 @@ const p = parseAgentMessage(real);
 assert.equal(p.title, '[terminal_viz] Zulip voice: Claude agent now steering');
 assert.equal(p.switchTo, 'other_task');
 assert.ok(!p.body.includes('switch:') && !p.body.includes('Zulip voice: Claude'));
-assert.deepEqual(parseAgentMessage('no title here'), {title: '', body: 'no title here', switchTo: null, attachments: []});
+assert.deepEqual(parseAgentMessage('no title here'), {title: '', body: 'no title here', switchTo: null, attachments: [], footers: []});
 assert.equal(parseAgentMessage('[switch: a]').body, '');
 
 const att = parseAgentMessage('[t] x\n\nLook [shot.png](/user_uploads/1/ab/shot.png) here.');
 assert.deepEqual(att.attachments, [{name: 'shot.png', uri: '/user_uploads/1/ab/shot.png'}]);
 assert.ok(!att.body.includes('user_uploads') && !speechPieces('[t] x\n\nLook [shot.png](/user_uploads/1/ab/shot.png) here.').join(' ').includes('shot'));
+const real2 = '[terminal_viz] terminal_viz: fixes\n\nDone with the relay change.\n\npending item created:\n- "Do you get the debug log I sent"\n- "second item"\npending item deleted:\n- "old one"\n\nRemoved open item\n- "gone"\n\nStill speaking here.';
+const f = parseAgentMessage(real2);
+assert.equal(f.footers.filter(l => /^\s*-/.test(l)).length, 4, 'four bullets folded: ' + JSON.stringify(f.footers));
+assert.ok(!/pending item|Removed open|debug log|gone/.test(f.body) && /Done with the relay/.test(f.body) && /Still speaking here/.test(f.body), 'body keeps the real text only: ' + f.body);
+assert.ok(!speechPieces(real2).join(' ').match(/pending|debug log|gone|second item/), 'footers are never spoken');
 const {chunks} = messageChunks(p.body);
 const spoken = chunks.filter(c => c.speech);
 assert.deepEqual(spoken.map(c => c.idx), spoken.map((_, i) => i), 'chunk idx must be 0..n-1 in order');

@@ -147,3 +147,9 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pr
 #listen[data-state='heard'], #listen[data-state='dictating'], #listen[data-state='sending'] { background: var(--danger); color: #fff; }
 #prev-agent-name { display: none; }
 #prev-agent .arrow { font-size: 20px; line-height: 1; }
+
+.footer { margin: 2px 0 8px; font-size: 13px; color: var(--muted); }
+.footer-chip { background: var(--panel); border-radius: 12px; padding: 3px 10px; font-size: 12px; }
+.footer-text { white-space: pre-wrap; margin-top: 4px; }
+@media (max-width: 899px) { .footer:not(.open) .footer-text { display: none; } }
+@media (min-width: 900px) { .footer-chip { display: none; } }

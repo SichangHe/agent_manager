@@ -27,6 +27,14 @@ export function agentEl(message, getUrl) {
   });
   if (!p.blocks.length) body.append(textEl('p', 'muted', p.switchTo ? `Switching to ${p.switchTo}` : '(empty)'));
   root.append(body);
+  if (p.footers.length) {   // amh item footers: shown on wide screens, folded into a chip on narrow ones
+    const items = p.footers.filter(l => /^\s*[-*]\s+/.test(l)).length;
+    const box = el('div', 'footer');
+    const chip = textEl('button', 'footer-chip', `· ${items || p.footers.length} item${(items || p.footers.length) === 1 ? '' : 's'}`);
+    chip.type = 'button'; chip.onclick = () => box.classList.toggle('open');
+    const text = textEl('div', 'footer-text', p.footers.join('\n'));
+    box.append(chip, text); root.append(box);
+  }
   if (p.attachments.length) root.append(attachmentsEl(p.attachments, getUrl));
   setUnread(root, !message.flags?.includes('read'));
   return root;
