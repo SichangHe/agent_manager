@@ -153,7 +153,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   function start(slot, myGen, seekMs, bundle) {
     if (pausedMs !== null && seekMs !== undefined) { seekMs = Math.max(seekMs, pausedMs - RESUME_BACKUP_MS); }
     pausedMs = null;
-    for (const s of slots) if (s !== slot) s.el.pause();
+    for (const s of slots) if (s !== slot) { s.appPause = true; s.el.pause(); }
     active = slot;
     slot.chunk = bundle ? {endMs: bundle.endMs} : null;
     if (seekMs !== undefined && Math.abs(slot.el.currentTime * 1000 - seekMs) > 120) slot.el.currentTime = seekMs / 1000;
@@ -189,6 +189,12 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       slot.chunk = null; slot.ready = false; slot.bundleId = null;
       itemEnded();
     });
+    slot.el.addEventListener('pause', () => {
+      const app = slot.appPause; slot.appPause = false;
+      if (app || slot !== active || status !== 'playing' || slot.el.ended) return;
+      log('audio', `external pause at t=${slot.el.currentTime.toFixed(2)}: resuming in place`);   // e.g. iOS interrupting for the microphone or a notification
+      slot.el.play().catch(err => log('audio', `external pause resume failed: ${err.name}`));
+    });
     for (const name of ['waiting', 'stalled', 'error', 'suspend', 'emptied']) slot.el.addEventListener(name, () => { if (slot === active) log('audio', `el ${name} t=${slot.el.currentTime.toFixed(2)} rs=${slot.el.readyState}`); });
   }
 
@@ -201,7 +207,8 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     if (status !== 'playing' || !active) return;
     const t = active.el.currentTime;
     if (t !== lastTimeMs) { lastTimeMs = t; lastProgressMs = performance.now(); }
-    else if (performance.now() - lastProgressMs > STALL_MS) { log('audio', `stalled ${STALL_MS}ms at item ${index}; reloading`); clips.delete(index); active.index = -1; active.ready = false; active.bundleId = null; playIndex(index); }
+    else if (performance.now() - lastProgressMs > STALL_MS) { log('audio', `stalled ${STALL_MS}ms at item ${index}; reloading`); pausedMs = t * 1000;   // reload continues near where it stopped, not from the chunk start
+ clips.delete(index); active.index = -1; active.ready = false; active.bundleId = null; playIndex(index); }
   }, 1000);
 
   return {
@@ -236,11 +243,12 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       const b = status === 'playing' && items[index] ? bundleOf(items[index]) : null;
       pausedMs = b && active ? active.el.currentTime * 1000 : null;
       pausedDone = !!b && pausedMs >= b.startMs + HEARD_FRACTION * (b.endMs - b.startMs);
-      active?.el.pause(); setStatus('paused');
+      if (active) { active.appPause = true; active.el.pause(); }
+      setStatus('paused');
     },
     resume() { if (status === 'paused') { if (pausedDone) { pausedDone = false; pausedMs = null; if (active) active.chunk = null; setStatus('loading'); itemEnded(); return; } if (active?.ready) { setStatus('loading'); const myGen = ++gen; start(active, myGen); } else playIndex(index); } else if (status === 'error') playIndex(index); },
     retry() { if (status === 'error' || status === 'blocked') playIndex(index); },
-    stop() { gen++; for (const s of slots) { s.el.pause(); s.index = -1; s.ready = false; s.bundleId = null; s.chunk = null; } clips.clear(); items = []; index = -1; active = null; setStatus('idle'); },
+    stop() { gen++; for (const s of slots) { s.appPause = true; s.el.pause(); s.index = -1; s.ready = false; s.bundleId = null; s.chunk = null; } clips.clear(); items = []; index = -1; active = null; setStatus('idle'); },
     /** Quiets playback while the user may be speaking (no effect where the platform ignores element volume, e.g. iOS). */
     setRate(value) { rate = value; for (const s of slots) { s.el.playbackRate = value; s.el.defaultPlaybackRate = value; } },
     currentTime: () => (status === 'playing' || status === 'paused') && active ? active.el.currentTime : 0,

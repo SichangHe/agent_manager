@@ -296,8 +296,9 @@ function onTaskMessage(m) {
 
 /** A new agent message in the open topic: queue it for autoplay and honour its `[switch: TASK]` line. */
 /** One gate: manual dictation, an open voice-control reply, or an utterance being captured or transcribed. No playback starts while it is true. */
+let pendingChoice = null;   // a switch waiting for yes/no/number: `{names, until, confirm}`
 let utterancePending = false, utteranceTimer = 0;   // set on speech detection, cleared when its clip is handled (or after 15 s if no clip comes)
-const userSpeaking = () => !!dict || !!vc || utterancePending;
+const userSpeaking = () => !!dict || !!vc || utterancePending || (!!pendingChoice && Date.now() < pendingChoice.until);   // also while a switch read-back waits for yes/no/number
 const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); };
 
 function onNewAgentMessage(m) {
@@ -330,6 +331,7 @@ const watermark = () => store.get(wmKey(current), null);
 const pastWatermark = it => after(it, watermark());
 /** What was paused (by a voice session or otherwise) and is not finished: resumes it mid-chunk, else falls back to autoplay. */
 let pausedItem = null;
+let lastVoiceReply = {key: '', ms: 0};
 function resumeAfterPause() {
   player.unlock();
   const st = player.position().status;
@@ -373,7 +375,7 @@ let burst = null;   // taps within SKIP_DEBOUNCE_MS of each other: `{msgId, idx,
  * Steps one spoken chunk (one whole message when `whole`). The first tap plays at once; further taps in quick succession move the
  * highlighted target instantly and only the final target is loaded after the debounce. Previous restarts the chunk if it played >2 s.
  */
-function jump(direction, whole = false) {
+function jump(direction, whole = false, noRestart = false) {
   const agents = model.agentMessages(current);
   const flat = agents.flatMap(m => itemsOf(m));
   if (!flat.length) return toast('No agent messages here');
@@ -390,7 +392,7 @@ function jump(direction, whole = false) {
     if (direction < 0) target = hi >= 0 ? flat[hi] : flat.at(-1);
     else target = flat.find(it => !model.find(it.msgId)?.flags?.includes('read')) ?? (hi >= 0 ? flat[hi + 1] : flat[0]);
   }
-  else if (direction < 0 && !burst && player.currentTime() > RESTART_AFTER_S) target = flat[at];
+  else if (direction < 0 && !burst && !noRestart && player.currentTime() > RESTART_AFTER_S) target = flat[at];
   else target = flat[at + direction];
   if (!target) return toast(direction > 0 ? 'No later messages' : 'No earlier messages');
   const play = () => playFrom(agents.find(m => m.id === target.msgId), target.idx);
@@ -693,7 +695,7 @@ async function handleCommandClip(blob) {
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); vcIdle(); return; }
   const heard = r.text.trim();
   log('vc', `heard "${heard}"`);
-  if (!normalize(heard)) { if (!vc) { recorder.setReplyMode(false); } vcIdle(); return; }
+  if (!normalize(heard)) { if (!vc) recorder.setReplyMode(false); else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
   if (!vc && pendingChoice && Date.now() < pendingChoice.until) {
     const w = normalize(heard).replace(/^pause /, '');
     const NUMBERS = ['one first 1', 'two second 2', 'three third 3'];
@@ -701,13 +703,24 @@ async function handleCommandClip(blob) {
     if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
     else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w)); if (i >= 0) pick = pendingChoice.names[i]; }
     if (pick) { pendingChoice = null; switchTopic(pick); recorder.beep('done'); vcIdle(); return; }
-    if (/^(no|nope|cancel|none|never mind|stop)$/.test(w)) { pendingChoice = null; recorder.beep('done'); vcIdle(); return; }
+    if (/^(no|nope|cancel|none|never mind|stop)$/.test(w)) { pendingChoice = null; recorder.beep('done'); vcIdle(); maybeAutoplay(); return; }
   }
   if (!vc) {
     const rest = afterStartWord(heard);
     if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
     if (rest === null) { log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     openSession(rest);
+    return;
+  }
+  const nav = navCommand(normalize(heard));   // inside an open reply, navigation words alone are a command, not reply text
+  if (nav) {
+    clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
+    const keep = vc.text.trim();
+    if (!keep) draftEl.value = vc.base; else log('vc', 'reply kept as a draft, not sent');
+    autosize(); saveDraft();
+    vc = null; recorder.setReplyMode(false);
+    if (keep) recorder.beep('done');
+    navigate(nav); vcIdle();
     return;
   }
   const sw = normalize(heard).match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
@@ -721,11 +734,36 @@ async function handleCommandClip(blob) {
   }
   addToSession(heard);
 }
-let pendingChoice = null;
+/**
+ * A whole utterance that is only navigation: "back", "previous", "back back", "previous message", "next", "again".
+ * `{dir: -1|0|1, whole, count}` (dir 0 = replay the current chunk), or null.
+ */
+function navCommand(words) {
+  const tokens = words.split(' ').filter(Boolean);
+  const whole = tokens.includes('message') || tokens.includes('messages');
+  const rest = tokens.filter(t => t !== 'message' && t !== 'messages');
+  if (!rest.length || rest.length > 5) return null;
+  const kind = t => ['back', 'previous', 'last'].includes(t) ? -1 : ['next', 'skip', 'forward'].includes(t) ? 1 : ['again', 'repeat'].includes(t) ? 0 : null;
+  const dirs = rest.map(kind);
+  if (dirs.some(d => d === null) || new Set(dirs).size > 1) return null;
+  return {dir: dirs[0], whole, count: dirs[0] === 0 ? 1 : rest.length};
+}
+function navigate({dir, whole, count}) {
+  log('vc', `navigate ${dir > 0 ? 'next' : dir < 0 ? 'previous' : 'again'}${whole ? ' message' : ''} x${count}`);
+  player.unlock();
+  if (dir === 0) {
+    const m = nowMsgId !== null ? model.find(nowMsgId) : null, last = store.get('voice2-last', null);
+    const target = m ? {m, idx: nowIdx} : last && model.find(last.msgId) ? {m: model.find(last.msgId), idx: last.idx} : null;
+    if (target) playFrom(target.m, target.idx); else jump(-1);
+    return;
+  }
+  for (let i = 0; i < count; i++) jump(dir, whole, true);   // by voice, "back" always means the previous chunk
+}
+
 const SWITCH_RE = /^(?:switch agents? to|switch agents?|switch to|go to|open|switch)\s+(.+)$/;
 /** "switch to <name>": one clear match switches (with a chime); otherwise show the top 3 and accept first/second/third. */
 function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.say(text).then(ms => recorder.muteFor(ms)); }
-function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); } }
+function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); maybeAutoplay(); } }
 function voiceSwitch(spoken) {
   const ranked = rankTopics(spoken);
   log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
@@ -748,8 +786,8 @@ function openSession(rest) {
   const words = normalize(rest);
   const sw = words.match(SWITCH_RE);
   if (sw) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }
-  const action = /^(next|skip|forward)$/.test(words) ? 1 : /^(back|previous|again|repeat)$/.test(words) ? -1 : 0;
-  if (action) { log('vc', action > 0 ? 'action next' : 'action previous'); vc = null; recorder.setReplyMode(false); jump(action); vcIdle(); return; }
+  const nav = navCommand(words);
+  if (nav) { vc = null; recorder.setReplyMode(false); navigate(nav); vcIdle(); return; }
   if (rest) addToSession(rest);
   else { setVcState('dictating', 'say your reply'); vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS); }
 }
@@ -758,8 +796,12 @@ function addToSession(heard) {
   vc.text = [vc.text, heard.replace(/^(?:\s*pause\b[\s,.!?]*)+/i, '').trim()].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
   setVcState('dictating', 'dictating reply');
-  clearTimeout(vc.timer);
-  // "over" + short silence finishes at once; with no "over", a long silence (Settings, default 6 s) finishes too
+  armSessionTimer();
+}
+/** (Re)starts the end-of-reply timer: "over" + short silence, else the long silence; an empty session gets the empty timeout. */
+function armSessionTimer() {
+  if (!vc) return;
+  clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
   const silenceMs = stripResumePhrase(vc.text) !== null ? RESUME_SILENCE_MS : Number(store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S)) * 1000;
   if (vc.text.trim() && silenceMs > 0) vc.timer = setTimeout(finishVcReply, silenceMs);
   else if (!vc.text.trim()) vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS);
@@ -781,7 +823,11 @@ function finishVcReply() {
   draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
   log('vc', `resume phrase + silence: reply "${stripped}"`);
   recorder.beep('done');
-  if (stripped) { setVcState('sending', 'sending'); send(); }
+  const key = normalize(stripped);
+  const duplicate = key && lastVoiceReply.key === key && Date.now() - lastVoiceReply.ms < 120000;   // never send the same reply twice
+  if (duplicate) log('vc', 'duplicate reply suppressed');
+  if (stripped && !duplicate) {
+    lastVoiceReply = {key, ms: Date.now()}; setVcState('sending', 'sending'); send(); }
   player.unlock();
   resumeAfterPause();
   vcIdle();
@@ -823,6 +869,7 @@ $('composer').onsubmit = event => {
 function send() {
   const text = draftEl.value.trim();
   if (!text || !current) return;
+  if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc = null; recorder.setReplyMode(false); log('vc', 'draft sent by hand: voice session closed'); }   // a later timer must not send it again
   draftEl.value = '';
   saveDraft(); autosize();
   const local = {localId: `l${Date.now()}_${localCounter++}`, topic: current, text, state: 'sending', sentAtMs: Date.now()};
