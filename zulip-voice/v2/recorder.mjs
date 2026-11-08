@@ -11,6 +11,9 @@ const PREROLL_MS = 300;
 const MIN_LEVEL = 0.012;
 const GRACE_MS = 45000;
 const BARGE_MS = 300;
+const LISTEN_PREROLL_MS = 1200;
+const EARCON_NOTE_S = 0.09;
+const EARCON_GAIN = 0.08;
 const REPLY_BARGE_MS = 100;        // while a spoken reply is open, a short word like "over" must still become a clip
 const REPLY_MIN_SPEECH_MS = 100;
 
@@ -57,7 +60,7 @@ function resampleToWav(frames, fromHz) {
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
-  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, sustainMs = 0, idleTimer = 0;
+  let ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -80,8 +83,9 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     if (!speaking) noise = noise * 0.98 + level * 0.02;
     onLevel?.(Math.min(1, level * 8));
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
+      if (performance.now() < earconUntilMs) { sustainMs = 0; preroll = []; return; }   // our own chime must not count as speech
       sustainMs = speaking ? sustainMs + ms : 0;
-      preroll.push(frame); while (preroll.length * ms > PREROLL_MS + sustainMs) preroll.shift();
+      preroll.push(frame); while (preroll.length * ms > LISTEN_PREROLL_MS) preroll.shift();   // ring buffer: speech before the decision is kept
       if (sustainMs < (replyMode ? REPLY_BARGE_MS : BARGE_MS)) return;
       sustainMs = 0; log('mic', `barge-in: speech sustained ${replyMode ? REPLY_BARGE_MS : BARGE_MS}ms`); onBarge?.();
       frames = preroll; preroll = []; clipMs = frames.length * ms; speechMs = replyMode ? REPLY_BARGE_MS : BARGE_MS; silentMs = 0;
@@ -161,6 +165,20 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       clearTimeout(idleTimer);
       sustainMs = 0; frames = []; preroll = [];
       idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS);
+    },
+    /** Short quiet chime on the warm audio context: `ready` (rising), `done` (falling), `error` (low). Voice detection ignores it while it plays. */
+    beep(kind) {
+      if (!ctx || ctx.state !== 'running') return;
+      const notes = {ready: [880, 1320], done: [1320, 880], error: [220, 180]}[kind];
+      const t0 = ctx.currentTime;
+      notes.forEach((hz, i) => {
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.frequency.value = hz; osc.connect(gain); gain.connect(ctx.destination);
+        const start = t0 + i * EARCON_NOTE_S;
+        gain.gain.setValueAtTime(0, start); gain.gain.linearRampToValueAtTime(EARCON_GAIN, start + 0.01); gain.gain.linearRampToValueAtTime(0, start + EARCON_NOTE_S);
+        osc.start(start); osc.stop(start + EARCON_NOTE_S + 0.02);
+      });
+      earconUntilMs = performance.now() + notes.length * EARCON_NOTE_S * 1000 + 250;
     },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
     setReplyMode(on) { replyMode = on; },

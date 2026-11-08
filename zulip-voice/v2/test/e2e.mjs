@@ -762,6 +762,55 @@ scenarios.voiceControlPersists = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceFirstWord = async () => {
+  // Speech that starts right at barge-in: the ring-buffer preroll keeps the first word; our own chimes never count as speech.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const speech = await L.speechWav('Deploy the build to staging now. Over.');
+  const at = speech.indexOf('data'), head = Buffer.from(speech.subarray(0, at + 8)), data = Buffer.concat([gap(2500), speech.subarray(at + 8), gap(20000)]);
+  head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__first.wav': Buffer.concat([head, data])});
+  const long = Array.from({length: 10}, (_, i) => `Paragraph ${i} is long enough that the message keeps playing for a while.`).join('\n\n');
+  await L.agentSays('alpha', '[alpha] Long\n\n' + long);
+  const c = await L.openClient({url: srv2.url, mic: '/__first.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'reply sent', () => /vc\s+resume phrase \+ silence/.test(window.__voice.log.text()), 60000);
+    const log = await p.evaluate(() => window.__voice.log.text());
+    const heard = [...log.matchAll(/vc\s+heard "([^"]*)"/g)].map(m => m[1]).join(' ');
+    assert.match(heard, /deploy/i, 'first word kept: ' + heard);
+    await L.sleep(5000);
+    const barges = [...(await p.evaluate(() => window.__voice.log.text())).matchAll(/barge-in: speech/g)].length;
+    assert.ok(barges <= 2, 'chimes caused extra barge-ins: ' + barges);
+    return {heard, barges};
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.voiceLongSilence = async () => {
+  // A reply without "over" is finished by a long silence (3 s here): sent, then playback resumes.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const speech = await L.speechWav('Yes, deploy it to staging now please.');
+  const at = speech.indexOf('data'), head = Buffer.from(speech.subarray(0, at + 8)), data = Buffer.concat([gap(2500), speech.subarray(at + 8), gap(30000)]);
+  head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__long.wav': Buffer.concat([head, data])});
+  const long = Array.from({length: 10}, (_, i) => `Paragraph ${i} is long enough that the message keeps playing for a while.`).join('\n\n');
+  await L.agentSays('alpha', '[alpha] Long\n\n' + long);
+  const c = await L.openClient({url: srv2.url, mic: '/__long.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-long-silence-s': 3}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'finished by silence', () => /vc\s+resume phrase \+ silence/.test(window.__voice.log.text()), 60000);
+    await L.waitFor(p, 'playing again', () => window.__voice.player.snapshot().status === 'playing', 10000);
+    const sent = await (async () => { for (let i = 0; i < 10; i++) { const m = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(x => x.sender_id === L.account.humanId); if (m.length) return m.map(x => x.content); await L.sleep(1000); } return []; })();
+    assert.equal(sent.length, 1, JSON.stringify(sent));
+    assert.match(sent[0], /deploy it to staging/i);
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

@@ -619,11 +619,12 @@ function onBarge() {
   if (vc?.timer) { clearTimeout(vc.timer); vc.timer = 0; log('vc', 'resume cancelled: more speech'); }
   setVcState('heard', 'hearing you');
   recorder.setReplyMode(true);
+  if (!vc) recorder.beep('ready');
 }
 async function onCommandClip(blob) {
   if (dict) return;
   const r = await voice.stt(blob);
-  if (!r.ok) { log('vc', `stt failed: ${r.error}`); vcIdle(); return; }
+  if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); vcIdle(); return; }
   if (!vc && !normalize(r.text)) recorder.setReplyMode(false);
   let heard = r.text.trim();
   const words = normalize(heard);
@@ -637,7 +638,10 @@ async function onCommandClip(blob) {
   vc.text = [vc.text, heard].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
   setVcState('dictating', 'dictating reply');
-  if (stripResumePhrase(vc.text) !== null) vc.timer = setTimeout(finishVcReply, RESUME_SILENCE_MS);
+  clearTimeout(vc.timer);
+  // "over" + short silence finishes at once; with no "over", a long silence (Settings, default 6 s) finishes too
+  const silenceMs = stripResumePhrase(vc.text) !== null ? RESUME_SILENCE_MS : Number(store.get('voice2-long-silence-s', 6)) * 1000;
+  if (vc.text.trim() && silenceMs > 0) vc.timer = setTimeout(finishVcReply, silenceMs);
 }
 /** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
 function finishVcReply() {
@@ -645,6 +649,7 @@ function finishVcReply() {
   vc = null; recorder.setReplyMode(false);
   draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
   log('vc', `resume phrase + silence: reply "${stripped}"`);
+  recorder.beep('done');
   if (stripped) { setVcState('sending', 'sending'); send(); }
   player.unlock();
   if (player.position().status === 'paused') player.resume(); else if (player.position().status === 'idle') maybeAutoplay();
@@ -658,9 +663,12 @@ async function setVoiceControl(on) {
   if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
   if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
   log('vc', `voice control ${r.ok ? 'on' : 'failed'}`);
+  if (r.ok && r.running) recorder.beep('ready');
 }
 $('set-phrase').value = store.get('voice2-resume-phrase', RESUME_DEFAULT);
 $('set-phrase').onchange = e => store.set('voice2-resume-phrase', e.target.value.trim() || RESUME_DEFAULT);
+$('set-silence').value = store.get('voice2-long-silence-s', 6);
+$('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
 $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say pause, finish a reply with "over"' : 'Voice control off'); };
 function drawLevel(level) {
