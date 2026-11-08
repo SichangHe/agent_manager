@@ -107,10 +107,10 @@ if (cache) { model.restore(cache); current ??= cache.current; }
 
 const player = createPlayer({
   log, voice,
-  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(); },
+  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(); },
   onItemEnd(item) {
     if (!item.last) return;
-    store.set('voice2-pos', null);
+    store.set('voice2-pos', null); if (pausedItem?.msgId === item.msgId) pausedItem = null;
     markRead([item.msgId]);
     if (pendingSwitch?.msgId === item.msgId) runSwitch();
   },
@@ -323,16 +323,37 @@ function playFrom(m, idx = 0) {
   player.play([...itemsOf(m, idx), ...later.flatMap(x => itemsOf(x))], 0);
 }
 
+/** Forward-only watermark per topic: the newest (message, chunk) ever started. Autoplay never queues anything at or before it. */
+const wmKey = topic => 'voice2-wm:' + topic;
+const after = (a, b) => !b || a.msgId > b.msgId || (a.msgId === b.msgId && a.idx > b.idx);   // is `a` strictly after `b`?
+const watermark = () => store.get(wmKey(current), null);
+const pastWatermark = it => after(it, watermark());
+/** What was paused (by a voice session or otherwise) and is not finished: resumes it mid-chunk, else falls back to autoplay. */
+let pausedItem = null;
+function resumeAfterPause() {
+  player.unlock();
+  const st = player.position().status;
+  if (st === 'paused') { player.resume(); return; }
+  const m = pausedItem && model.find(pausedItem.msgId);
+  if (st === 'idle' && m && !m.flags?.includes('read') && pausedItem.topic === current) {
+    log('app', `resume paused item ${pausedItem.msgId}:${pausedItem.idx}`);
+    const later = model.agentMessages(current).filter(x => x.id > m.id && !x.flags?.includes('read')).flatMap(x => itemsOf(x));
+    player.play([...itemsOf(m, pausedItem.idx), ...later], 0);
+    return;
+  }
+  maybeAutoplay();
+}
+
 function maybeAutoplay() {
   if (!autoplay || !current || userSpeaking() || player.position().status !== 'idle') return;   // never start speech while the user speaks
   // Forward only: anything older than the newest read message counts as read and is never played again.
   const newestRead = model.agentMessages(current).filter(m => m.flags?.includes('read')).at(-1);
   if (newestRead) markRead(model.unreadAgentMessages(current).filter(m => m.id < newestRead.id).map(m => m.id));
   const unread = model.unreadAgentMessages(current);
-  const speakable = unread.filter(m => itemsOf(m).length);
+  const speakable = unread.filter(m => itemsOf(m).some(pastWatermark));
   markRead(unread.filter(m => !itemsOf(m).length).map(m => m.id));
   let pos = store.get('voice2-pos', null);
-  if (pos && model.find(pos.msgId)?.flags?.includes('read')) { store.set('voice2-pos', null); pos = null; }   // a finished message is never resumed
+  if (pos && (model.find(pos.msgId)?.flags?.includes('read') || (pos.topic === current && !pastWatermark({msgId: pos.msgId, idx: pos.idx - 1})))) { store.set('voice2-pos', null); pos = null; }   // finished, or older than the watermark   // a finished message is never resumed
   const resumable = pos?.topic === current && model.find(pos.msgId) && itemsOf(model.find(pos.msgId), pos.idx).length;
   if (!speakable.length && !resumable) { hideBanner(); return; }
   if (!player.isUnlocked()) { showBanner(`Tap to listen (${speakable.length} unread)`, 'tap', () => { player.unlock(); maybeAutoplay(); }); return; }
@@ -342,7 +363,7 @@ function maybeAutoplay() {
     player.play([...itemsOf(at, pos.idx), ...model.agentMessages(current).filter(m => m.id > at.id && !m.flags?.includes('read')).flatMap(m => itemsOf(m))], 0);
     return;
   }
-  player.play(speakable.flatMap(m => itemsOf(m)), 0);
+  player.play(speakable.flatMap(m => itemsOf(m).filter(pastWatermark)), 0);
 }
 
 const RESTART_AFTER_S = 2;
@@ -599,7 +620,7 @@ function maybeFinish() {
   if (finished.parts.some(p => p.state === 'failed')) { dict = null; showFailedClips(finished); finished.parts = finished.parts.filter(p => p.state === 'failed'); }
   // Never send with a clip missing: a failed clip keeps the draft and offers a retry.
   if (finished.sendAfter && draftEl.value.trim() && !finished.parts.some(p => p.state === 'failed')) send();
-  if (finished.wasPlaying) player.resume(); else maybeAutoplay();
+  if (finished.wasPlaying) resumeAfterPause(); else maybeAutoplay();
 }
 
 const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip});
@@ -749,7 +770,7 @@ function closeEmptySession() {
   log('vc', 'empty session timed out: resuming');
   vc = null; recorder.setReplyMode(false); recorder.beep('done');
   player.unlock();
-  if (player.position().status === 'paused') player.resume(); else maybeAutoplay();
+  resumeAfterPause();
   vcIdle();
 }
 
@@ -762,7 +783,7 @@ function finishVcReply() {
   recorder.beep('done');
   if (stripped) { setVcState('sending', 'sending'); send(); }
   player.unlock();
-  if (player.position().status === 'paused') player.resume(); else if (player.position().status === 'idle') maybeAutoplay();
+  resumeAfterPause();
   vcIdle();
 }
 async function setVoiceControl(on) {

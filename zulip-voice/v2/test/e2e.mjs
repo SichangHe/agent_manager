@@ -971,6 +971,31 @@ scenarios.voiceSwitchInSession = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.forwardOnlyWatermark = async () => {
+  // An older unread message with a stale saved position must never replay after a newer one is paused and resumed.
+  await L.wipeTasks();
+  const para = (n, w) => Array.from({length: n}, (_, i) => `${w} paragraph ${i} of the message, long enough to take a few seconds to speak.`).join('\n\n');
+  const oldId = await L.agentSays('alpha', '[alpha] Old\n\n' + para(5, 'Old'));
+  const newId = await L.agentSays('alpha', '[alpha] New\n\n' + para(6, 'New'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const sp = await L.speechWav('Pause.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([gap(9000), sp.subarray(at + 8), gap(40000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__wm.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__wm.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true, 'voice2-vc': true, 'voice2-pos': {topic: 'alpha', msgId: oldId, idx: 3}}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'messages', () => document.querySelectorAll('.msg.agent').length === 2);
+    // listen to the NEW message from its first chunk (explicit tap), then the voice session pauses it
+    await p.locator(`.msg[data-id="${newId}"] .s`).first().tap();
+    await L.waitFor(p, 'paused by voice session', () => window.__voice.player.snapshot().status === 'paused', 40000);
+    await L.waitFor(p, 'session timed out and resumed', () => /vc\s+empty session timed out/.test(window.__voice.log.text()) && window.__voice.player.snapshot().status === 'playing', 25000);
+    await L.waitFor(p, 'new message finished', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 90000);
+    const starts = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio\s+start /.test(l)).map(l => l.split('start ')[1]);
+    assert.ok(!starts.some(k => k.startsWith(oldId + ':')), 'older message replayed: ' + starts.join(','));
+    assert.ok(await L.serverRead(oldId), 'older message marked read');
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
