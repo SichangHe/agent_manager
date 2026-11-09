@@ -48,6 +48,8 @@ pub struct NewTask<'a> {
     pub long_running: bool,
     pub email: Option<&'a str>,
     pub lines: Option<&'a str>,
+    /// Quota priority, higher wins; unset keeps the task's own.
+    pub priority: Option<i64>,
 }
 
 /// The active tasks whose agent is gone, failed, stuck, or idle with open items, each with its evidence.
@@ -478,6 +480,9 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     }
     let pinned = given(new.model).is_some() || given(new.effort).is_some();
     fields.push(("model_pinned".to_owned(), pinned.to_string()));
+    if let Some(priority) = new.priority {
+        fields.push(("priority".to_owned(), priority.to_string()));
+    }
     if store.contains(new.name)? {
         let old = store.load(new.name)?;
         let migrating = given(new.tool).is_some_and(|tool| old.field("tool") != Some(tool))
@@ -511,6 +516,18 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
             settings::get(settings, "manager.tools")
         ));
     }
+    let own_priority = store
+        .contains(new.name)?
+        .then(|| store.load(new.name))
+        .transpose()?
+        .and_then(|old| old.field("priority").and_then(|p| p.parse().ok()));
+    let tool = &crate::quota_gate::admit(
+        settings,
+        store,
+        tool,
+        given(new.tool).is_some(),
+        new.priority.or(own_priority).unwrap_or_default(),
+    )?;
     let (model, effort) = omnigent::launch_default(settings, tool, new.as_manager)
         .map_err(|error| format!("amh: {error}"))?;
     let quoted = match given(new.email) {

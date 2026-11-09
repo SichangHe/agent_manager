@@ -14,6 +14,7 @@
 - `omnigent::status` returns `paused` while blocked and `ready` when the reset retry is available
   - no failure notices or idle reminders while paused
   - send checks the pause before posting; Claude alone receives the paste submission followup
+- `quota::clear` forgets all of it when the observer reports `quota_appeared` for Claude (`docs/quota-manager.md`); a new limit error also asks the observer to poll now
 - pending blocks and unanswered human mail retain their records during pauses
 - agent start refuses same-tool replacement of a quota paused session, preserving its requests
   - explicit different-tool migration remains available

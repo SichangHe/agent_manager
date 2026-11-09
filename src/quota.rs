@@ -93,6 +93,10 @@ pub fn paused(
             failed_s.is_some_and(|at| records[id]["failed_s"].as_i64().is_none_or(|old| at > old));
         if !matches!(attempt, Attempt::Release) && (records[id]["error"] != error || renewed) {
             records[id] = json!({"error": error, "failed_s": failed_s, "reset_s": reset(error, failed_at.unwrap_or(now)).map(|at| at.timestamp()), "attempted": false});
+            // A session's quota error says the pool may have run out: ask the observer to read the proxy now.
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::write(parent.join("quota-poll-now"), "");
+            }
         }
         if matches!(attempt, Attempt::Release)
             && records[id]["error"] == error
@@ -120,6 +124,17 @@ pub fn paused(
             .map_err(|e| format!("cannot write quota state: {e}"))?;
     }
     Ok(blocked)
+}
+
+/// Forget every session's limit evidence: all of it is Claude's, and the pool just got quota back.
+pub fn clear(path: &Path) -> Result<(), String> {
+    match std::fs::read_to_string(path) {
+        Ok(_) => {
+            crate::taskfile::write(path, "{}").map_err(|e| format!("cannot write quota state: {e}"))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("cannot read quota state: {e}")),
+    }
 }
 
 #[cfg(test)]
@@ -251,6 +266,35 @@ mod tests {
         std::fs::remove_file(
             std::env::temp_dir().join(format!("amh-quota-test-{}.lock", std::process::id())),
         )?;
+        Ok(())
+    }
+
+    /// lost_work_mgr.md: "the stale pause lived in amh's state" ... "PB news skipped ticks for about 5.5 hours".
+    #[test]
+    fn quota_appeared_clears_stale_pauses_so_nothing_stays_stalled()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path =
+            std::env::temp_dir().join(format!("amh-quota-clear-{}.json", std::process::id()));
+        let at = DateTime::parse_from_rfc3339("2026-10-07T07:30:00Z")?.with_timezone(&Utc);
+        let error = "You've hit your session limit · resets 11:00pm (America/Los_Angeles)";
+        assert!(paused(&path, "pb", error, at, Some(at), Attempt::Observe)?);
+        clear(&path)?;
+        clear(&path.with_extension("missing"))?;
+        let again = paused(
+            &path,
+            "pb",
+            error,
+            at + Duration::hours(24),
+            Some(at),
+            Attempt::Observe,
+        )?;
+        assert!(
+            !again,
+            "a cleared pause comes back only from fresh evidence, and its reset has passed"
+        );
+        std::fs::remove_file(&path)?;
+        std::fs::remove_file(path.with_extension("lock"))?;
+        let _ = std::fs::remove_file(path.with_file_name("quota-poll-now"));
         Ok(())
     }
 

@@ -161,6 +161,9 @@ impl Scanner {
             self.stalls_loaded = true;
         }
         let found = agents::problems(settings, store)?;
+        for line in crate::quota_gate::pass(settings, store) {
+            log(&line);
+        }
         let wall_s = chrono::Utc::now().timestamp();
         for line in crate::fallback::watch(settings, store, &found, wall_s) {
             log(&line);
@@ -642,6 +645,7 @@ fn ensure_guest_agent(settings: &Settings, store: &Store, address: &str) -> Resu
         long_running: false,
         email: None,
         lines: None,
+        priority: None,
     };
     agents::start_task(settings, store, &new).map(|_| ())
 }

@@ -454,6 +454,7 @@ fn short(values: &Value) -> Result<u8, String> {
                 long_running: false,
                 email: None,
                 lines: None,
+                priority: None,
             };
             say(&format!(
                 "{} started at {}\n",
@@ -606,6 +607,11 @@ fn tell_guest(
 }
 
 /// Run one action from the parsed command line: a JSON object of `group`, `action`, and the action's values. Returns the exit status, or the refusal to print.
+fn integer(text: &str) -> Result<i64, String> {
+    text.parse()
+        .map_err(|_| format!("amh: `{text}` is not an integer"))
+}
+
 pub fn run(values: &Value) -> Result<u8, String> {
     let text = |key: &str| values[key].as_str().filter(|value| !value.is_empty());
     let need = |key: &str| values[key].as_str().unwrap_or_default();
@@ -621,6 +627,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
     match action {
         ("agent", "view") => return Err(view::open(need("who"), flag("read_only"))),
         ("manager", "watch") => return Ok(watch::run()),
+        ("quota", "serve") => return Ok(crate::quota_observer::serve(flag("live"))),
         _ => {}
     }
     let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
@@ -976,8 +983,21 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 long_running: false,
                 email: text("email"),
                 lines: text("lines"),
+                priority: text("priority").map(integer).transpose()?,
             };
             agents::start_task(&settings, &store, &new)? + "\n"
+        }
+        ("task", "priority") => {
+            let _lock = store.lock()?;
+            let mut task = store.load(need("task"))?;
+            task.fields.retain(|(key, _)| key != "priority");
+            task.fields
+                .push(("priority".to_owned(), integer(need("value"))?.to_string()));
+            store.save(&task)?;
+            String::new()
+        }
+        ("quota", "status") => {
+            crate::quota_observer::status(&store.state_dir, chrono::Utc::now().timestamp())?
         }
         ("task", "show") => {
             let shown: Result<Vec<String>, String> = many("task")

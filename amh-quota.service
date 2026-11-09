@@ -1,0 +1,18 @@
+[Unit]
+Description=amh quota observer: reads the proxy, keeps its routing in line with the quota, redeems Codex reset credits
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+UMask=0077
+Environment=PATH=%h/.nix-profile/bin:%h/.config/bin:/usr/bin:/bin
+# Shadow mode: it only logs the actions it would take. Add `--live` to act.
+ExecStart=%h/.cargo/bin/amh quota serve
+StandardOutput=append:%h/.local/state/amh/amh-quota.log
+StandardError=append:%h/.local/state/amh/amh-quota.log
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=default.target

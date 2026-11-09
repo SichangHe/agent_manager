@@ -16,6 +16,9 @@ mod mail_routes;
 mod omnigent;
 mod org;
 mod quota;
+mod quota_core;
+mod quota_gate;
+mod quota_observer;
 mod requests;
 mod settings;
 mod store;
@@ -94,7 +97,9 @@ fn main() -> ExitCode {
     // These two do not end by themselves, so their start is logged too.
     if matches!(
         (values["group"].as_str(), values["action"].as_str()),
-        (Some("agent"), Some("view")) | (Some("manager"), Some("watch"))
+        (Some("agent"), Some("view"))
+            | (Some("manager"), Some("watch"))
+            | (Some("quota"), Some("serve"))
     ) {
         log::record(&line, "started");
     }

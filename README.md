@@ -16,6 +16,7 @@ one program for agents and managers; usage lives in `amh --help`, not here
         - input/output: `actions`, `agents`, `store`, `settings`, `omnigent`, `mail`, `watch`, `view`, `log`
 - build: `cargo build --release`; install: `cargo install --path .`, then `amh manager watchers` so the watcher runs the new binary
 - watcher: `amh manager watch` in the foreground; `amh-watch.service` is the user systemd unit for it
+- quota: `amh quota status` and the observer `amh quota serve` (user unit `amh-quota.service`); design in `docs/quota-manager.md`
 - `use-amh`: stub that old command names link to
 - test: `cargo test`
     - the pure decisions on small made-up inputs: what each action changes in a task record or prints, the refusals, the texts, the tree, closing, replacing a manager, mail threads and building and parsing, the watcher, the guest mailbox, starting agents
