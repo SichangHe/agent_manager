@@ -18,6 +18,8 @@ type Settings = BTreeMap<String, String>;
 
 /// The observer reads the proxy this often, and sooner after a reset hint or a session's quota error.
 const INTERVAL_S: u64 = 300;
+/// Reset credits are listed this often to watch their expiry.
+const CREDIT_POLL_S: i64 = 1800;
 const POLL_NOW: &str = "quota-poll-now";
 const PROXY_TIMEOUT_S: u64 = 30;
 /// A failing proxy or actuator is told to the human after this many tries in a row.
@@ -340,34 +342,84 @@ pub struct Memory {
     intended: BTreeSet<String>,
     shadow_redeem: BTreeSet<String>,
     recovered: bool,
+    /// Per principal: when the reset credits were last listed, and `(id, expiry)` of each.
+    credits: BTreeMap<String, (i64, Vec<(String, i64)>)>,
 }
 
-/// Compare the journal's credit with the provider's list: redeemed means it is no longer available.
-fn reconcile(proxy: &Proxy, files: &Files, now: i64, episode: &str, reading: &Reading) -> bool {
-    let Ok(journal) = files.journal() else {
-        return false;
-    };
-    let Some(credit) = journal
+/// `(cred name, usage before)` of an episode's last intent.
+fn files_intent_cred(journal: &[Value], episode: &str) -> Option<(String, Option<core::Usage>)> {
+    let e = journal
         .iter()
         .rev()
-        .find(|e| e["episode"] == episode && e["step"] == "intent")
-        .and_then(|e| e["detail"]["credit_id"].as_str().map(str::to_owned))
-    else {
+        .find(|e| e["episode"] == episode && e["step"] == "intent")?;
+    Some((
+        e["detail"]["cred"].as_str()?.to_owned(),
+        e["detail"]["used"]
+            .as_f64()
+            .map(|u| (u, e["detail"]["window_end"].as_i64())),
+    ))
+}
+
+/// The credit and the usage before the call, from the episode's last intent.
+fn intent_of(files: &Files, episode: &str) -> Option<(String, Option<core::Usage>)> {
+    let journal = files.journal().ok()?;
+    let e = journal
+        .iter()
+        .rev()
+        .find(|e| e["episode"] == episode && e["step"] == "intent")?;
+    Some((
+        e["detail"]["credit_id"].as_str()?.to_owned(),
+        e["detail"]["used"]
+            .as_f64()
+            .map(|u| (u, e["detail"]["window_end"].as_i64())),
+    ))
+}
+
+/// Redeemed means the credit left the provider's list and the quota fell: a vanished credit alone may have expired.
+/// Records `confirmed` only with both; otherwise the episode stays `uncertain`.
+fn reconcile(
+    proxy: &Proxy,
+    files: &Files,
+    now: i64,
+    episode: &str,
+    reading: &Reading,
+    used_now: Option<core::Usage>,
+    record: bool,
+) -> bool {
+    let Some((credit, before)) = intent_of(files, episode) else {
         return false;
     };
-    let confirmed = proxy
+    let gone = proxy
         .credits(reading)
         .is_ok_and(|left| !left.iter().any(|(id, _)| *id == credit));
-    files.step(
-        now,
-        episode,
-        if confirmed { "confirmed" } else { "uncertain" },
-        json!({}),
-    );
+    let reset = matches!((before, used_now), (Some(b), Some(n)) if core::quota_reset(b, n));
+    let confirmed = gone && reset;
+    if confirmed {
+        files.step(now, episode, "confirmed", json!({}));
+    } else if record {
+        files.step(
+            now,
+            episode,
+            "uncertain",
+            json!({"credit_gone": gone, "quota_reset": reset}),
+        );
+    }
     confirmed
 }
 
-/// Redeem one reset credit for an exhausted Codex bucket, journaled step by step; any doubt ends as `uncertain`, which is never retried.
+/// The reading's highest usage as the proxy reports it now.
+fn fresh_used(proxy: &Proxy, reading: &Reading, now: i64) -> Option<core::Usage> {
+    let answer = proxy.auth_files().ok()?;
+    core::parse_auth_files(&answer, now)
+        .iter()
+        .find(|r| r.name == reading.name)
+        .map(|r| core::usage(&r.windows))
+}
+
+/// Redeem one reset credit of a Codex bucket, journaled step by step. `want` names the credit (a deadline or a retry); without it the earliest-expiring one is used.
+/// A rejected or uncertain call is retried by later cycles, with backoff, while the credit is still listed and unexpired.
+/// Returns whether a call was attempted.
+#[allow(clippy::too_many_arguments)]
 fn redeem(
     settings: &Settings,
     store: &Store,
@@ -376,10 +428,9 @@ fn redeem(
     now: i64,
     bucket: &Bucket,
     reading: &Reading,
-) {
-    let Some(episode) = core::episode(bucket) else {
-        return;
-    };
+    episode: &str,
+    want: Option<&str>,
+) -> bool {
     let credits = match proxy.credits(reading) {
         Ok(c) => c,
         Err(e) => {
@@ -388,18 +439,56 @@ fn redeem(
                 "cannot list reset credits of {}: {e:?}",
                 reading.name
             ));
-            return;
+            return false;
         }
     };
-    let Some((credit_id, expires)) = credits.first().cloned() else {
-        files.step(now, &episode, "no_credit", json!({}));
-        return;
+    let chosen = match want {
+        Some(id) => credits.iter().find(|(c, _)| c == id).cloned(),
+        None => credits.first().cloned(),
+    };
+    let Some((credit_id, expires)) = chosen else {
+        if want.is_none() {
+            files.step(now, episode, "no_credit", json!({}));
+        }
+        return false;
     };
     let request_id = match uuid4() {
         Ok(id) => id,
-        Err(e) => return log(&e),
+        Err(e) => {
+            log(&e);
+            return false;
+        }
     };
-    files.step(now, &episode, "intent", json!({"cred": reading.name, "credit_id": credit_id, "expires": expires, "before": credits.len(), "request_id": request_id}));
+    files.step(now, episode, "intent", json!({"cred": reading.name, "credit_id": credit_id, "expires": expires, "before": credits.len(), "request_id": request_id, "used": core::max_used(&bucket.windows), "window_end": core::usage(&bucket.windows).1}));
+    // 🧑 "Try to use as much quota of team1@trymidas.ai as possible before the reset expiry in 3 days and use that reset before it expires"
+    let left = core::parse_expiry(&expires).map(|at| at - now);
+    let near = left.is_some_and(|l| l < 6 * 3600);
+    let retry_note = "It will be retried with backoff until the credit expires.";
+    let failed = |why: &str, what: &str| {
+        let hours = left.map_or("an unknown time".to_owned(), |l| {
+            format!("{:.1}h", l as f64 / 3600.0)
+        });
+        notice(
+            settings,
+            store,
+            &format!("{what}:{episode}"),
+            &format!(
+                "Codex reset credit redemption for {} {what} ({why}); credit {credit_id} expires in {hours}. {retry_note}",
+                reading.name
+            ),
+        );
+        if near {
+            notice(
+                settings,
+                store,
+                &format!("deadline_failing:{credit_id}"),
+                &format!(
+                    "URGENT: reset credit {credit_id} of {} expires in {hours} and redemption keeps failing ({why}). Redeem it by hand if this goes on.",
+                    reading.name
+                ),
+            );
+        }
+    };
     match proxy.api_call(
         reading,
         "POST",
@@ -407,46 +496,25 @@ fn redeem(
         Some(json!({"credit_id": credit_id, "redeem_request_id": request_id})),
     ) {
         Err(CallError::Rejected(why)) => {
-            files.step(now, &episode, "rejected", json!({"why": why}));
-            notice(
-                settings,
-                store,
-                &format!("rejected:{episode}"),
-                &format!(
-                    "Codex reset credit redemption for {} was rejected by the provider ({why}); nothing was redeemed. It will not be retried for this exhaustion.",
-                    reading.name
-                ),
-            );
+            files.step(now, episode, "rejected", json!({"why": why}));
+            failed(&why, "was rejected");
         }
         Err(CallError::Uncertain(why)) => {
-            files.step(now, &episode, "uncertain", json!({"why": why}));
-            if !reconcile(proxy, files, now, &episode, reading) {
-                notice(
-                    settings,
-                    store,
-                    &format!("uncertain:{episode}"),
-                    &format!(
-                        "Codex reset credit redemption for {} is uncertain ({why}); it will not be retried automatically. Check the provider's history.",
-                        reading.name
-                    ),
-                );
+            files.step(now, episode, "uncertain", json!({"why": why}));
+            let used = fresh_used(proxy, reading, now);
+            if !reconcile(proxy, files, now, episode, reading, used, false) {
+                failed(&why, "is uncertain");
             }
         }
         Ok(_) => {
-            files.step(now, &episode, "called", json!({}));
-            if !reconcile(proxy, files, now, &episode, reading) {
-                notice(
-                    settings,
-                    store,
-                    &format!("uncertain:{episode}"),
-                    &format!(
-                        "Codex reset credit redemption for {} was sent but is not confirmed; it will not be retried automatically. Check the provider's history.",
-                        reading.name
-                    ),
-                );
+            files.step(now, episode, "called", json!({}));
+            let used = fresh_used(proxy, reading, now);
+            if !reconcile(proxy, files, now, episode, reading, used, true) {
+                failed("sent, but the quota did not visibly reset", "is uncertain");
             }
         }
     }
+    true
 }
 
 /// One observation: read the proxy, fold the readings, act on the proxy (live) or only log (shadow), publish the snapshot.
@@ -574,44 +642,186 @@ pub fn cycle(
             let reading = readings
                 .iter()
                 .find(|r| Some(&r.name) == credit_cred.as_ref());
-            if !reading.is_some_and(|r| reconcile(proxy, files, now, &episode, r)) {
+            if !reading.is_some_and(|r| {
+                reconcile(
+                    proxy,
+                    files,
+                    now,
+                    &episode,
+                    r,
+                    fresh_used(proxy, r, now),
+                    true,
+                )
+            }) {
                 notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),
                     &format!(
-                        "A Codex reset credit redemption ({episode}) was interrupted and is uncertain; it will not be retried automatically. Check the provider's history."
+                        "A Codex reset credit redemption ({episode}) was interrupted and is uncertain; it is retried while the credit is still listed. Check the provider's history."
                     ),
                 );
             }
         }
         memory.recovered = true;
     }
+    let credit_poll_due = |memory: &Memory, principal: &str| {
+        memory
+            .credits
+            .get(principal)
+            .is_none_or(|(at, _)| now - at >= CREDIT_POLL_S)
+    };
     for bucket in &buckets {
-        if !core::should_redeem(&files.journal()?, bucket, authorized, now) {
-            if bucket.pool == "codex"
-                && bucket.status == Status::Exhausted
-                && !live
-                && memory.shadow_redeem.insert(bucket.principal.clone())
-            {
-                files.event(
-                    now,
-                    "shadow_action",
-                    &format!("would_redeem {}", bucket.principal),
-                    json!({}),
-                );
-            }
-            continue;
+        let journal = files.journal()?;
+        let first = core::should_redeem(&journal, bucket, authorized, now);
+        let retry = core::should_retry(&journal, bucket, authorized, now);
+        if !first
+            && !retry
+            && bucket.pool == "codex"
+            && bucket.status == Status::Exhausted
+            && !live
+            && memory.shadow_redeem.insert(bucket.principal.clone())
+        {
+            files.event(
+                now,
+                "shadow_action",
+                &format!("would_redeem {}", bucket.principal),
+                json!({}),
+            );
         }
         let pick = |enabled: bool| {
             readings
                 .iter()
                 .find(|r| r.principal == bucket.principal && r.disabled != enabled)
         };
-        if let Some(reading) = pick(true).or_else(|| pick(false)) {
-            redeem(settings, store, proxy, files, now, bucket, reading);
+        let reading = pick(true).or_else(|| pick(false));
+        // Settle earlier uncertain redemptions of this principal: confirmed once the credit is gone and the quota fell.
+        if live && let Some(reading) = reading {
+            for episode in core::uncertain_episodes(&journal) {
+                let Some((cred, Some(before))) = files_intent_cred(&journal, &episode) else {
+                    continue;
+                };
+                if cred == reading.name
+                    && bucket.status != Status::Unknown
+                    && core::quota_reset(before, core::usage(&bucket.windows))
+                    && reconcile(
+                        proxy,
+                        files,
+                        now,
+                        &episode,
+                        reading,
+                        Some(core::usage(&bucket.windows)),
+                        false,
+                    )
+                    && proxy.apply(&Act::Enable(reading.name.clone())).is_ok()
+                {
+                    ours.remove(&reading.name);
+                }
+            }
+        }
+        let Some(reading) = reading.filter(|_| live && bucket.pool == "codex") else {
+            continue;
+        };
+        if first || retry {
+            let (episode, want) = if retry {
+                let ep = core::episode(bucket).unwrap_or_default();
+                let id = intent_of(files, &ep).map(|(id, _)| id);
+                (ep, id)
+            } else {
+                (core::episode(bucket).unwrap_or_default(), None)
+            };
+            if retry && want.is_none() {
+                continue;
+            }
+            redeem(
+                settings,
+                store,
+                proxy,
+                files,
+                now,
+                bucket,
+                reading,
+                &episode,
+                want.as_deref(),
+            );
+            memory.credits.remove(&bucket.principal);
             // The reset makes the credential usable now, and a disabled one gets no traffic to show it.
-            let episode = core::episode(bucket).unwrap_or_default();
+            if core::journal_steps(&files.journal()?, &episode).last() == Some(&"confirmed")
+                && proxy.apply(&Act::Enable(reading.name.clone())).is_ok()
+            {
+                ours.remove(&reading.name);
+            }
+            continue;
+        }
+        // The deadline fallback: whatever the usage, a credit is redeemed before it expires.
+        // 🧑 "Of course you should use the reset regardless of the usage. The 99% usage is a target to achieve not a restricting factor for whether to use the reset."
+        if credit_poll_due(memory, &bucket.principal) {
+            match proxy.credits(reading) {
+                Ok(list) => {
+                    let new: Vec<(String, i64)> = list
+                        .iter()
+                        .filter_map(|(id, at)| Some((id.clone(), core::parse_expiry(at)?)))
+                        .collect();
+                    let old = memory
+                        .credits
+                        .get(&bucket.principal)
+                        .map(|(_, c)| c.clone())
+                        .unwrap_or_default();
+                    for id in core::unaccounted(&old, &new, &journal) {
+                        notice(
+                            settings,
+                            store,
+                            &format!("credit_lost:{id}"),
+                            &format!(
+                                "Codex reset credit {id} of {} left the provider's list and no redemption of ours is on record: it expired unused or was used elsewhere.",
+                                bucket.principal
+                            ),
+                        );
+                    }
+                    memory.credits.insert(bucket.principal.clone(), (now, new));
+                }
+                Err(e) => log(&format!(
+                    "cannot list reset credits of {}: {e:?}",
+                    reading.name
+                )),
+            }
+        }
+        let known = memory
+            .credits
+            .get(&bucket.principal)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default();
+        if !authorized {
+            for (id, at) in &known {
+                if now < *at && now >= at - core::DEADLINE_MARGIN_S {
+                    notice(
+                        settings,
+                        store,
+                        &format!("at_risk:{id}"),
+                        &format!(
+                            "Codex reset credit {id} of {} expires in {:.1}h and automatic redemption is off (`quota.redeem` is not true): redeem it by hand.",
+                            bucket.principal,
+                            (*at - now) as f64 / 3600.0
+                        ),
+                    );
+                }
+            }
+        } else if let Some((episode, credit)) =
+            core::deadline_pick(&journal, &bucket.principal, &known, now)
+        {
+            files.event(now, "deadline_redeem", &episode, json!({}));
+            redeem(
+                settings,
+                store,
+                proxy,
+                files,
+                now,
+                bucket,
+                reading,
+                &episode,
+                Some(&credit),
+            );
+            memory.credits.remove(&bucket.principal);
             if core::journal_steps(&files.journal()?, &episode).last() == Some(&"confirmed")
                 && proxy.apply(&Act::Enable(reading.name.clone())).is_ok()
             {
@@ -823,10 +1033,26 @@ mod tests {
                     .is_some_and(|u| u.ends_with("/consume"))
                 {
                     l.lock().expect("log").push("consume".to_owned());
-                    if consume_status == 200 {
+                    // 201: the credit vanishes and the call times out, but the quota does not reset.
+                    if consume_status == 201 {
                         credits.lock().expect("credits").clear();
                     }
-                    json!({"status_code": consume_status, "body": "{}"})
+                    if consume_status == 200 {
+                        credits.lock().expect("credits").clear();
+                        let mut fs = f.lock().expect("files");
+                        if let Some(list) = fs["files"].as_array_mut() {
+                            for x in list {
+                                x["quota"]["signals"]["X-Codex-Primary-Used-Percent"] = json!("0");
+                                let end = x["quota"]["signals"]["X-Codex-Primary-Reset-At"]
+                                    .as_str()
+                                    .and_then(|t| t.parse::<i64>().ok())
+                                    .unwrap_or_default();
+                                x["quota"]["signals"]["X-Codex-Primary-Reset-At"] =
+                                    json!((end + 7 * 86400).to_string());
+                            }
+                        }
+                    }
+                    json!({"status_code": if consume_status == 201 { 504 } else { consume_status }, "body": "{}"})
                 } else {
                     let list = json!({"credits": credits.lock().expect("credits").clone()});
                     json!({"status_code": 200, "body": list.to_string()})
@@ -947,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn timeout_after_a_successful_redemption_is_uncertain_and_not_retried() {
+    fn timeout_is_uncertain_and_retried_with_backoff_while_the_credit_stays_listed() {
         let dir = temp("uncertain");
         let now = 1_794_000_000;
         let credit =
@@ -984,8 +1210,15 @@ mod tests {
             .collect();
         assert_eq!(
             steps,
-            ["intent", "uncertain", "uncertain"],
-            "the unconfirmed credit is still available, so it stays uncertain"
+            [
+                "intent",
+                "uncertain",
+                "intent",
+                "uncertain",
+                "intent",
+                "uncertain"
+            ],
+            "the credit is still listed, so each backoff expiry retries"
         );
         assert_eq!(
             proxy
@@ -995,8 +1228,122 @@ mod tests {
                 .iter()
                 .filter(|c| *c == "consume")
                 .count(),
-            1
+            3
         );
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    fn expiring(now: i64, in_s: i64) -> Value {
+        let at = chrono::DateTime::from_timestamp(now + in_s, 0)
+            .map(|t| t.to_rfc3339())
+            .unwrap_or_default();
+        json!({"id": "c1", "status": "available", "is_supported_by_plan": true, "expires_at": at})
+    }
+
+    fn consumes(proxy: &FakeProxy) -> usize {
+        proxy
+            .log
+            .lock()
+            .expect("log")
+            .iter()
+            .filter(|c| *c == "consume")
+            .count()
+    }
+
+    fn steps_of(files: &Files) -> Vec<String> {
+        files
+            .journal()
+            .expect("journal")
+            .iter()
+            .filter_map(|e| e["step"].as_str().map(str::to_owned))
+            .collect()
+    }
+
+    #[test]
+    fn credit_near_expiry_is_redeemed_at_low_usage_and_not_before() {
+        let dir = temp("deadline");
+        let now = 1_794_000_000;
+        let proxy = fake_proxy(
+            json!({"files": [codex("a", "10", now, false)]}),
+            vec![expiring(now, 3 * 86400)],
+            200,
+        );
+        let settings = settings_for(&proxy, &dir, &[("quota.redeem", "true")]);
+        let (store, files, mut memory) = (
+            store_for(&dir),
+            Files { dir: dir.clone() },
+            Memory::default(),
+        );
+        let p = Proxy::new(&settings).expect("proxy");
+        cycle(&settings, &store, &p, &files, &mut memory, true, now).expect("cycle");
+        assert_eq!(consumes(&proxy), 0, "three days left: not yet");
+        // Two days later the credit has 10h left; the usage is still 10%.
+        let later = now + 3 * 86400 - 10 * 3600;
+        *proxy.files.lock().expect("files") = json!({"files": [codex("a", "10", later, false)]});
+        cycle(&settings, &store, &p, &files, &mut memory, true, later).expect("cycle");
+        assert_eq!(consumes(&proxy), 1);
+        assert_eq!(steps_of(&files), ["intent", "called", "confirmed"]);
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn deadline_redemption_is_retried_after_a_rejection_until_it_works() {
+        let dir = temp("deadline-retry");
+        let now = 1_794_000_000;
+        let proxy = fake_proxy(
+            json!({"files": [codex("a", "10", now, false)]}),
+            vec![expiring(now, 3600)],
+            403,
+        );
+        let settings = settings_for(&proxy, &dir, &[("quota.redeem", "true")]);
+        let (store, files, mut memory) = (
+            store_for(&dir),
+            Files { dir: dir.clone() },
+            Memory::default(),
+        );
+        let p = Proxy::new(&settings).expect("proxy");
+        for t in 0..3 {
+            cycle(
+                &settings,
+                &store,
+                &p,
+                &files,
+                &mut memory,
+                true,
+                now + t * 300,
+            )
+            .expect("cycle");
+        }
+        assert_eq!(consumes(&proxy), 3, "rejections are retried");
+        assert!(
+            steps_of(&files)
+                .iter()
+                .all(|s| s == "intent" || s == "rejected")
+        );
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    #[test]
+    fn vanished_credit_without_a_quota_reset_is_not_confirmed() {
+        let dir = temp("vanished");
+        let now = 1_794_000_000;
+        let proxy = fake_proxy(
+            json!({"files": [codex("a", "10", now, false)]}),
+            vec![expiring(now, 3600)],
+            201,
+        );
+        let settings = settings_for(&proxy, &dir, &[("quota.redeem", "true")]);
+        let (store, files, mut memory) = (
+            store_for(&dir),
+            Files { dir: dir.clone() },
+            Memory::default(),
+        );
+        let p = Proxy::new(&settings).expect("proxy");
+        cycle(&settings, &store, &p, &files, &mut memory, true, now).expect("cycle");
+        let steps = steps_of(&files);
+        assert!(steps.contains(&"uncertain".to_owned()), "{steps:?}");
+        assert!(!steps.contains(&"confirmed".to_owned()), "{steps:?}");
+        assert_eq!(consumes(&proxy), 1, "the vanished credit is not retried");
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 
@@ -1149,10 +1496,7 @@ mod tests {
         );
         let snap = cycle(&settings, &store, &p, &files, &mut memory, true, now + 900)
             .expect("cycle after the proxy came back");
-        assert!(
-            snap.seen.contains("new"),
-            "state survives a proxy outage"
-        );
+        assert!(snap.seen.contains("new"), "state survives a proxy outage");
         fs::remove_dir_all(&dir).expect("cleanup");
     }
 

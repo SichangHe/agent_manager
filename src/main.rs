@@ -4,12 +4,12 @@
 mod actions;
 mod agents;
 mod archive;
-mod history;
 mod cli;
 mod database;
 mod decide;
 mod fallback;
 mod guest;
+mod history;
 mod jobs;
 mod log;
 mod mail;

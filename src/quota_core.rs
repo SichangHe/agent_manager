@@ -541,6 +541,121 @@ pub fn should_redeem(journal: &[Value], b: &Bucket, authorized: bool, now: i64) 
         && episode(b).is_some_and(|ep| journal_steps(journal, &ep).is_empty())
 }
 
+/// A credit is redeemed this long before it expires at the latest, whatever the usage.
+// 🧑 "Of course you should use the reset regardless of the usage. The 99% usage is a target to achieve not a restricting factor for whether to use the reset."
+// 🧑 "Using resets earlier in the reset cycle is better because it utilizes the natural reset timing"
+// The exhaustion trigger still fires earlier when it comes first; this margin leaves a day of retries before expiry.
+pub const DEADLINE_MARGIN_S: i64 = 24 * 3600;
+/// A rejected or uncertain redemption is retried at most this many times per episode.
+pub const MAX_ATTEMPTS: usize = 48;
+/// A quota counts as reset when its highest active window fell by this many points.
+const RESET_DROP_PCT: f64 = 20.0;
+
+/// Seconds to wait after the `attempts`-th try: 1, 2, 4, 8, 16, then 30 minutes.
+pub fn retry_backoff_s(attempts: usize) -> i64 {
+    (60i64 << attempts.saturating_sub(1).min(5)).min(1800)
+}
+
+/// A provider timestamp (RFC 3339) as Unix seconds.
+pub fn parse_expiry(text: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|t| t.timestamp())
+}
+
+/// The episode of a deadline redemption: one per credit, so exhaustion episodes never block it.
+pub fn deadline_episode(principal: &str, credit_id: &str) -> String {
+    format!("{principal}!{credit_id}")
+}
+
+/// The highest usage among active windows, which is what exhausts a bucket.
+pub fn max_used(windows: &[Window]) -> f64 {
+    windows
+        .iter()
+        .filter(|w| w.state == WinState::Active)
+        .map(|w| w.used_pct)
+        .fold(0.0, f64::max)
+}
+
+/// Usage of a bucket: the highest active window's percent, and the latest window end.
+pub type Usage = (f64, Option<i64>);
+
+pub fn usage(windows: &[Window]) -> Usage {
+    let active = windows.iter().filter(|w| w.state == WinState::Active);
+    (max_used(windows), active.filter_map(|w| w.resets_at).max())
+}
+
+/// Whether the quota reset since `before`: usage fell by a lot, or fell at all while the window end moved later. A credit leaving the provider's list is not evidence of that.
+pub fn quota_reset(before: Usage, now: Usage) -> bool {
+    let moved = matches!((before.1, now.1), (Some(b), Some(n)) if n > b + 3600);
+    before.0 - now.0 >= RESET_DROP_PCT || (now.0 < before.0 && moved)
+}
+
+/// Whether a failed episode may try again: its last step is `rejected` or `uncertain`, attempts remain, and the backoff has passed.
+pub fn retry_due(journal: &[Value], episode: &str, now: i64) -> bool {
+    let mine: Vec<&Value> = journal.iter().filter(|e| e["episode"] == episode).collect();
+    let attempts = mine.iter().filter(|e| e["step"] == "intent").count();
+    let Some(last) = mine.last() else {
+        return false;
+    };
+    matches!(last["step"].as_str(), Some("rejected" | "uncertain"))
+        && attempts < MAX_ATTEMPTS
+        && last["t"]
+            .as_i64()
+            .is_none_or(|t| now >= t + retry_backoff_s(attempts))
+}
+
+/// The credit to redeem now for its deadline: the earliest-expiring one inside its margin (and not yet expired) whose episode is fresh or due for a retry.
+pub fn deadline_pick(
+    journal: &[Value],
+    principal: &str,
+    credits: &[(String, i64)],
+    now: i64,
+) -> Option<(String, String)> {
+    let mut open: Vec<&(String, i64)> = credits
+        .iter()
+        .filter(|(_, at)| now < *at && now >= at - DEADLINE_MARGIN_S)
+        .collect();
+    open.sort_by_key(|(_, at)| *at);
+    open.into_iter().find_map(|(id, _)| {
+        let ep = deadline_episode(principal, id);
+        (journal_steps(journal, &ep).is_empty() || retry_due(journal, &ep, now))
+            .then(|| (ep, id.clone()))
+    })
+}
+
+/// Credits that left the provider's list with no redemption attempt of ours on record: expired unused, or used elsewhere.
+pub fn unaccounted(old: &[(String, i64)], new: &[(String, i64)], journal: &[Value]) -> Vec<String> {
+    old.iter()
+        .map(|(id, _)| id)
+        .filter(|id| !new.iter().any(|(n, _)| n == *id))
+        .filter(|id| {
+            !journal
+                .iter()
+                .any(|e| e["step"] == "intent" && e["detail"]["credit_id"] == id.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
+/// Episodes whose last step is `uncertain`, still open to settling or retrying.
+pub fn uncertain_episodes(journal: &[Value]) -> Vec<String> {
+    let episodes: BTreeSet<&str> = journal
+        .iter()
+        .filter_map(|e| e["episode"].as_str())
+        .collect();
+    episodes
+        .into_iter()
+        .filter(|ep| journal_steps(journal, ep).last() == Some(&"uncertain"))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Whether an exhaustion episode's failed redemption may be retried.
+pub fn should_retry(journal: &[Value], b: &Bucket, authorized: bool, now: i64) -> bool {
+    authorized && b.pool == "codex" && episode(b).is_some_and(|ep| retry_due(journal, &ep, now))
+}
+
 /// Steps with no outcome: the observer crashed between them, so the redemption is uncertain and never retried.
 pub fn unfinished(journal: &[Value]) -> Vec<String> {
     let episodes: BTreeSet<&str> = journal
@@ -988,11 +1103,20 @@ mod tests {
     #[test]
     fn every_credential_we_disabled_comes_back_even_while_exhausted() {
         // The Nov 9 incident: disabling all exhausted Codex credentials left Codex with no provider.
-        let b = [bucket("out", "codex", Status::Exhausted, 100.0, Some(NOW + 9))];
+        let b = [bucket(
+            "out",
+            "codex",
+            Status::Exhausted,
+            100.0,
+            Some(NOW + 9),
+        )];
         let mut r = [reading("out", "codex:out", true, Some(5))];
         let ours = BTreeSet::from(["out".to_owned()]);
         let acts = proxy_actions(&b, &r, &BTreeSet::new(), &ours);
-        assert_eq!(acts, vec![Act::Enable("out".into()), Act::Priority("out".into(), 0)]);
+        assert_eq!(
+            acts,
+            vec![Act::Enable("out".into()), Act::Priority("out".into(), 0)]
+        );
         r[0].disabled = false;
         r[0].priority = Some(0);
         assert!(proxy_actions(&b, &r, &BTreeSet::new(), &BTreeSet::new()).is_empty());
@@ -1019,7 +1143,9 @@ mod tests {
         let ours = BTreeSet::from(["back".to_owned()]);
         let acts = proxy_actions(&buckets, &readings, &denied, &ours);
         assert!(
-            !acts.iter().any(|a| matches!(a, Act::Disable(n) if n == "out")),
+            !acts
+                .iter()
+                .any(|a| matches!(a, Act::Disable(n) if n == "out")),
             "an exhausted credential is never disabled"
         );
         assert!(acts.contains(&Act::Priority("out".into(), 0)));
@@ -1055,9 +1181,7 @@ mod tests {
         )];
         let ranks = priorities(&buckets);
         let readings = [reading("a", "claude:a", false, Some(ranks["a"]))];
-        assert!(
-            proxy_actions(&buckets, &readings, &BTreeSet::new(), &BTreeSet::new()).is_empty()
-        );
+        assert!(proxy_actions(&buckets, &readings, &BTreeSet::new(), &BTreeSet::new()).is_empty());
     }
 
     fn entry(ep: &str, step: &str) -> Value {
@@ -1095,6 +1219,120 @@ mod tests {
         assert!(
             should_redeem(&old, &later, true, NOW + 700_000),
             "a new episode may redeem"
+        );
+    }
+
+    fn at(ep: &str, step: &str, t: i64) -> Value {
+        json!({"episode": ep, "step": step, "t": t})
+    }
+
+    #[test]
+    fn deadline_fires_inside_the_margin_regardless_of_usage() {
+        let exp = NOW + 10 * 3600;
+        let credits = [("c1".to_owned(), exp)];
+        assert_eq!(
+            deadline_pick(&[], "x", &credits, NOW),
+            Some(("x!c1".to_owned(), "c1".to_owned()))
+        );
+        assert_eq!(
+            deadline_pick(&[], "x", &[("c1".into(), NOW + 3 * 86400)], NOW),
+            None
+        );
+        assert_eq!(
+            deadline_pick(&[], "x", &[("c1".into(), NOW - 1)], NOW),
+            None,
+            "expired"
+        );
+    }
+
+    #[test]
+    fn deadline_picks_earliest_and_skips_finished_episodes() {
+        let credits = [
+            ("late".to_owned(), NOW + 7200),
+            ("soon".to_owned(), NOW + 3600),
+        ];
+        assert_eq!(
+            deadline_pick(&[], "x", &credits, NOW).map(|p| p.1),
+            Some("soon".into())
+        );
+        let j = [at("x!soon", "intent", NOW), at("x!soon", "confirmed", NOW)];
+        assert_eq!(
+            deadline_pick(&j, "x", &credits, NOW).map(|p| p.1),
+            Some("late".into())
+        );
+    }
+
+    #[test]
+    fn failed_redemptions_retry_with_bounded_backoff_until_expiry() {
+        let ep = "x!c1";
+        let credits = [("c1".to_owned(), NOW + 3600)];
+        let j = [at(ep, "intent", NOW), at(ep, "rejected", NOW)];
+        assert!(
+            deadline_pick(&j, "x", &credits, NOW + 30).is_none(),
+            "too soon"
+        );
+        assert!(deadline_pick(&j, "x", &credits, NOW + 60).is_some());
+        let u = [at(ep, "intent", NOW), at(ep, "uncertain", NOW)];
+        assert!(deadline_pick(&u, "x", &credits, NOW + 61).is_some());
+        assert!(
+            deadline_pick(&u, "x", &credits, NOW + 3600).is_none(),
+            "expired"
+        );
+        let inflight = [at(ep, "intent", NOW)];
+        assert!(
+            !retry_due(&inflight, ep, NOW + 99999),
+            "recovery must first mark it uncertain"
+        );
+        let many: Vec<Value> = (0..MAX_ATTEMPTS)
+            .flat_map(|_| [at(ep, "intent", NOW), at(ep, "rejected", NOW)])
+            .collect();
+        assert!(!retry_due(&many, ep, NOW + 99999), "bounded");
+        assert_eq!(
+            [1, 2, 3, 6, 7, 50].map(retry_backoff_s),
+            [60, 120, 240, 1800, 1800, 1800]
+        );
+    }
+
+    #[test]
+    fn vanished_credit_without_our_attempt_is_unaccounted() {
+        let old = [
+            ("a".to_owned(), 1),
+            ("b".to_owned(), 2),
+            ("c".to_owned(), 3),
+        ];
+        let new = [("c".to_owned(), 3)];
+        let j = [json!({"episode": "x!b", "step": "intent", "detail": {"credit_id": "b"}})];
+        assert_eq!(unaccounted(&old, &new, &j), vec!["a".to_owned()]);
+    }
+
+    #[test]
+    fn exhaustion_retry_needs_a_failed_last_step() {
+        let b = bucket("x", "codex", Status::Exhausted, 100.0, Some(NOW + 5));
+        let ep = episode(&b).unwrap_or_default();
+        let j = [at(&ep, "intent", NOW), at(&ep, "rejected", NOW)];
+        assert!(should_retry(&j, &b, true, NOW + 60));
+        assert!(!should_retry(&j, &b, false, NOW + 60));
+        let done = [at(&ep, "intent", NOW), at(&ep, "confirmed", NOW)];
+        assert!(!should_retry(&done, &b, true, NOW + 9999));
+    }
+
+    #[test]
+    fn only_a_usage_drop_shows_a_reset() {
+        assert!(quota_reset((100.0, None), (0.0, None)));
+        assert!(!quota_reset((100.0, Some(5)), (100.0, Some(5))));
+        assert!(!quota_reset((60.0, None), (55.0, None)));
+        assert!(
+            quota_reset((10.0, Some(1000)), (0.0, Some(90_000))),
+            "small drop with a new window"
+        );
+        assert!(
+            !quota_reset((10.0, Some(1000)), (10.0, Some(90_000))),
+            "no drop"
+        );
+        assert!(!quota_reset((10.0, Some(1000)), (5.0, Some(1000))));
+        assert_eq!(
+            parse_expiry("2026-11-06T23:33:35.351659Z"),
+            Some(1_794_008_015)
         );
     }
 
@@ -1181,7 +1419,6 @@ mod tests {
     }
 
     /// Replay of the 2026-11-04 Midas incident: the account was disabled at 7d 100%, and came back after its reset.
-
 
     #[test]
     fn json_round_trip() {

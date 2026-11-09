@@ -347,8 +347,10 @@ pub fn send(
     let stream = settings::get(settings, "zulip.stream_id");
     let mut fields = vec![("content", content)];
     // 🧑 "The PB news should be in its own channel. So is PB urgent."
-    let report_stream =
-        settings::get(settings, &format!("zulip.report_streams.{}", mail::bare(subject).trim()));
+    let report_stream = settings::get(
+        settings,
+        &format!("zulip.report_streams.{}", mail::bare(subject).trim()),
+    );
     if !report_stream.is_empty() {
         fields.extend([
             ("type", "stream".to_owned()),
@@ -389,7 +391,10 @@ pub fn send(
             };
             {
                 let to = value("to");
-                let stream = to.parse::<u64>().map(Value::from).unwrap_or(Value::from(to));
+                let stream = to
+                    .parse::<u64>()
+                    .map(Value::from)
+                    .unwrap_or(Value::from(to));
                 json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":value("topic")}])
             }
         }

@@ -272,7 +272,10 @@ impl Store {
         };
         for entry in entries.flatten() {
             let month = entry.file_name().to_string_lossy().into_owned();
-            if month.len() != 6 || !month.bytes().all(|b| b.is_ascii_digit()) || !entry.path().is_dir() {
+            if month.len() != 6
+                || !month.bytes().all(|b| b.is_ascii_digit())
+                || !entry.path().is_dir()
+            {
                 continue;
             }
             for file in fs::read_dir(entry.path()).into_iter().flatten().flatten() {
@@ -292,7 +295,11 @@ impl Store {
         if root_file.is_file() {
             return root_file;
         }
-        match self.month_files().into_iter().find(|(_, found)| found == name) {
+        match self
+            .month_files()
+            .into_iter()
+            .find(|(_, found)| found == name)
+        {
             Some((month, _)) => self.root.join(month).join(name),
             None => root_file,
         }
@@ -313,7 +320,14 @@ impl Store {
         let Ok(out) = std::process::Command::new("git")
             .arg("-C")
             .arg(&self.root)
-            .args(["log", "--format=%ct", "--name-only", "--no-renames", "--", "*.md"])
+            .args([
+                "log",
+                "--format=%ct",
+                "--name-only",
+                "--no-renames",
+                "--",
+                "*.md",
+            ])
             .output()
         else {
             return times;
@@ -332,9 +346,16 @@ impl Store {
     }
 
     /// When the task became done: its last `done` status event, else the last git commit of its file (`git_times`, read at most once per export), else now.
-    fn done_month(&self, database: &Database, name: &str, git: &mut Option<BTreeMap<String, i64>>) -> String {
+    fn done_month(
+        &self,
+        database: &Database,
+        name: &str,
+        git: &mut Option<BTreeMap<String, i64>>,
+    ) -> String {
         let from_event = database.done_time(name).ok().flatten().and_then(|time| {
-            chrono::DateTime::parse_from_rfc3339(&time).ok().map(|t| t.with_timezone(&chrono::Utc))
+            chrono::DateTime::parse_from_rfc3339(&time)
+                .ok()
+                .map(|t| t.with_timezone(&chrono::Utc))
         });
         let from_git = |git: &mut Option<BTreeMap<String, i64>>| {
             let seconds = *git.get_or_insert_with(|| self.git_times()).get(name)?;
@@ -352,7 +373,13 @@ impl Store {
     /// A done task goes to the `YYYYMM` folder of the month it became done; a reopened task returns to the root.
     /// A move that would overwrite a different file, or a stray root copy of a filed task, is left alone and reported.
     // 🧑 "when a task finishes, amh moves its file into its month folder ... so the root holds only active tasks"
-    fn settle(&self, database: &Database, name: &str, text: &str, git: &mut Option<BTreeMap<String, i64>>) -> Result<PathBuf, String> {
+    fn settle(
+        &self,
+        database: &Database,
+        name: &str,
+        text: &str,
+        git: &mut Option<BTreeMap<String, i64>>,
+    ) -> Result<PathBuf, String> {
         let key = format!("month:{name}");
         let done = name != "TODO.md"
             && text.contains("done")
@@ -1036,7 +1063,10 @@ mod tests {
             "---\nstatus: running\nrunat: omnigent://worker\n---\n\nbody\n",
         )?;
         taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
-        let store = Store { root: root.clone(), state_dir: root.join("state") };
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
         drop(store.lock()?);
         Ok((root, store))
     }
@@ -1051,19 +1081,46 @@ mod tests {
     }
 
     #[test]
-    fn the_month_is_when_the_task_became_done_not_the_file_time() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_month_is_when_the_task_became_done_not_the_file_time()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (root, store) = month_store("month-event")?;
         let mut db = Database::open(&store.state_dir.join("amh.sqlite3"))?;
         db.commit(&[], &[serde_json::json!({"time": "2026-08-03T10:00:00+00:00", "actor": "x", "kind": "agent record changed", "subject": "t.md", "data": {"status": "done", "address": "a"}})])?;
         assert_eq!(store.done_month(&db, "t.md", &mut None), "202608");
-        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&root).args(args).env("GIT_COMMITTER_DATE", "2026-05-02T00:00:00Z").env("GIT_AUTHOR_DATE", "2026-05-02T00:00:00Z").output();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .env("GIT_COMMITTER_DATE", "2026-05-02T00:00:00Z")
+                .env("GIT_AUTHOR_DATE", "2026-05-02T00:00:00Z")
+                .output()
+        };
         git(&["init", "-q"])?;
         git(&["add", "t.md"])?;
-        git(&["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-qm", "x"])?;
-        assert_eq!(store.done_month(&db, "other.md", &mut None), chrono::Utc::now().format("%Y%m").to_string());
-        assert_eq!(store.done_month(&db, "t.md", &mut None), "202608", "events win over git");
+        git(&[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@e.invalid",
+            "commit",
+            "-qm",
+            "x",
+        ])?;
+        assert_eq!(
+            store.done_month(&db, "other.md", &mut None),
+            chrono::Utc::now().format("%Y%m").to_string()
+        );
+        assert_eq!(
+            store.done_month(&db, "t.md", &mut None),
+            "202608",
+            "events win over git"
+        );
         db.commit(&[], &[])?;
-        let git_only = Store { root: root.clone(), state_dir: root.join("none") };
+        let git_only = Store {
+            root: root.clone(),
+            state_dir: root.join("none"),
+        };
         let empty = Database::open(&root.join("empty.sqlite3"))?;
         assert_eq!(git_only.done_month(&empty, "t.md", &mut None), "202605");
         fs::remove_dir_all(&root)?;
@@ -1071,27 +1128,36 @@ mod tests {
     }
 
     #[test]
-    fn a_name_collision_in_the_month_folder_leaves_the_task_at_the_root_and_reports() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_name_collision_in_the_month_folder_leaves_the_task_at_the_root_and_reports()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (root, store) = month_store("month-collide")?;
         let month = chrono::Utc::now().format("%Y%m").to_string();
         fs::create_dir(root.join(&month))?;
         fs::write(root.join(&month).join("t.md"), "different\n")?;
         close(&store)?;
         assert!(root.join("t.md").is_file());
-        assert_eq!(fs::read_to_string(root.join(&month).join("t.md"))?, "different\n");
+        assert_eq!(
+            fs::read_to_string(root.join(&month).join("t.md"))?,
+            "different\n"
+        );
         assert!(store.record("filing-problems")?.contains("already exists"));
         fs::remove_dir_all(&root)?;
         Ok(())
     }
 
     #[test]
-    fn a_root_edit_of_a_filed_task_is_reported_and_month_tasks_survive_reinit() -> Result<(), Box<dyn std::error::Error>> {
+    fn a_root_edit_of_a_filed_task_is_reported_and_month_tasks_survive_reinit()
+    -> Result<(), Box<dyn std::error::Error>> {
         let (root, store) = month_store("month-stray")?;
         close(&store)?;
         let month = chrono::Utc::now().format("%Y%m").to_string();
         fs::write(root.join("t.md"), "stray\n")?;
         drop(store.lock()?);
-        assert!(store.record("filing-problems")?.contains("edited at the root"));
+        assert!(
+            store
+                .record("filing-problems")?
+                .contains("edited at the root")
+        );
         assert!(root.join(&month).join("t.md").is_file());
         fs::remove_file(root.join("t.md"))?;
         // Losing the database re-imports the filed task from its month folder.
