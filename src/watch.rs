@@ -1449,8 +1449,17 @@ pub fn run() -> u8 {
         }
         let phase = Instant::now();
         let request_effects = store
-            .lock()
-            .and_then(|_lock| crate::actions::request_effects(&store));
+            .lock_timed()
+            .and_then(|(_lock, timing)| {
+                let computing = Instant::now();
+                let result = crate::actions::request_effects(&store);
+                if phase.elapsed() >= Duration::from_secs(1) {
+                    log(&format!("request state timing: acquire_ms={:.3} import_ms={:.3} export_ms={:.3} dependencies_ms={:.3}",
+                        timing.acquire_ms, timing.import_ms, timing.export_ms,
+                        computing.elapsed().as_secs_f64() * 1000.0));
+                }
+                result
+            });
         if let Err(error) = request_effects {
             log(&format!("request effects failed: {error}"));
         }

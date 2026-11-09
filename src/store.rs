@@ -17,6 +17,13 @@ pub struct Store {
 /// A wait for the lock at least this long is logged with the holder's name.
 const LONG_LOCK_WAIT_S: u64 = 5;
 
+/// Milliseconds spent acquiring the writer lock and repairing derived state.
+pub struct LockTiming {
+    pub acquire_ms: f64,
+    pub import_ms: f64,
+    pub export_ms: f64,
+}
+
 impl Store {
     pub fn new(values: &BTreeMap<String, String>) -> Self {
         Self {
@@ -27,6 +34,12 @@ impl Store {
 
     /// Serialize every writer of the root through one lock file, held until the returned file is dropped.
     pub fn lock(&self) -> Result<File, String> {
+        self.lock_timed().map(|(lock, _)| lock)
+    }
+
+    /// Acquire the same writer lock and report its preparation costs.
+    pub fn lock_timed(&self) -> Result<(File, LockTiming), String> {
+        let began = std::time::Instant::now();
         let failed = |error: std::io::Error| {
             format!("amh: cannot lock {}: {error}", self.state_dir.display())
         };
@@ -61,6 +74,8 @@ impl Store {
                 }
             }
         }
+        let acquire_ms = began.elapsed().as_secs_f64() * 1000.0;
+        let importing = std::time::Instant::now();
         let me: Vec<String> = std::env::args().take(4).collect();
         lock.set_len(0).map_err(failed)?;
         lock.write_all(format!("pid {} {}", std::process::id(), me.join(" ")).as_bytes())
@@ -140,8 +155,17 @@ impl Store {
             database.commit(&snapshots, &events)?;
             database.set_record("pending-block-queue-v1", "done")?;
         }
+        let import_ms = importing.elapsed().as_secs_f64() * 1000.0;
+        let exporting = std::time::Instant::now();
         self.export(&database)?;
-        Ok(lock)
+        Ok((
+            lock,
+            LockTiming {
+                acquire_ms,
+                import_ms,
+                export_ms: exporting.elapsed().as_secs_f64() * 1000.0,
+            },
+        ))
     }
 
     /// Keep body lines someone typed into an exported task file, which the next export would overwrite.
