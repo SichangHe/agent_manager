@@ -95,6 +95,17 @@ fn epoch_s() -> f64 {
     since.unwrap_or_default().as_secs_f64()
 }
 
+/// Report slow serial watcher phases without writing an event for every idle poll.
+fn log_elapsed(phase: &str, began: Instant) {
+    let elapsed = began.elapsed();
+    if elapsed >= Duration::from_secs(1) {
+        log(&format!(
+            "watcher phase {phase}: {:.1} ms",
+            elapsed.as_secs_f64() * 1000.0
+        ));
+    }
+}
+
 /// An epoch as the local time of day `HH:MM`.
 fn hour_minute(epoch_s: f64) -> String {
     chrono::DateTime::from_timestamp(epoch_s as i64, 0)
@@ -453,6 +464,7 @@ fn take_in_mail(
 }
 
 fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
+    let poll_started_at = chrono::Local::now().to_rfc3339();
     let mut cursor = store
         .record("amh-zulip-cursor.txt")?
         .trim()
@@ -493,6 +505,13 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
                 store.queue_mail(Some(&key), &task, &name)?;
                 log(&format!("Zulip {id} -> {}", task.name));
                 received(store, &task.name, &name);
+                let _ = crate::log::event(
+                    &store.state_dir,
+                    "zulip pickup",
+                    &task.name,
+                    serde_json::json!({"zulip_message_id": id.to_string(),
+                        "source_timestamp_s": message["timestamp"], "poll_started_at": poll_started_at}),
+                );
             }
         }
         cursor = id;
@@ -1362,6 +1381,7 @@ pub fn run() -> u8 {
         };
         let store = Store::new(&settings);
         if last_archive.is_none_or(|last| last.elapsed().as_secs() >= 86400) {
+            let phase = Instant::now();
             let archived = store.lock().and_then(|_lock| {
                 let mut database =
                     crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
@@ -1378,10 +1398,12 @@ pub fn run() -> u8 {
                 Ok(_) => last_archive = Some(Instant::now()),
                 Err(error) => log(&format!("archival failed: {error}")),
             }
+            log_elapsed("archive", phase);
         }
         if settings::get(&settings, "archive.commit") != "false"
             && last_commit.is_none_or(|last| last.elapsed() >= COMMIT_EVERY)
         {
+            let phase = Instant::now();
             match crate::archive::commit_markdown(&store.root) {
                 Ok(_) => last_commit = Some(Instant::now()),
                 Err(error) => {
@@ -1389,16 +1411,22 @@ pub fn run() -> u8 {
                     log(&format!("Markdown commit failed: {error}"));
                 }
             }
+            log_elapsed("git commit", phase);
         }
         if last_poll.is_none_or(|last| last.elapsed() >= MAIL_POLL) {
+            let phase = Instant::now();
             watcher.take_in(&settings, &store);
+            log_elapsed("IMAP intake", phase);
+            let phase = Instant::now();
             if crate::zulip::enabled(&settings)
                 && let Err(error) = take_in_zulip(&settings, &store)
             {
                 log(&format!("Zulip intake failed: {error}"));
             }
+            log_elapsed("Zulip intake", phase);
             last_poll = Some(Instant::now());
         }
+        let phase = Instant::now();
         let request_effects = store
             .lock()
             .and_then(|_lock| crate::actions::request_effects(&store));
@@ -1408,14 +1436,20 @@ pub fn run() -> u8 {
         if let Err(error) = crate::actions::deliver_requests(&settings, &store) {
             log(&format!("request notifications failed: {error}"));
         }
+        log_elapsed("request notifications", phase);
+        let phase = Instant::now();
         let scanned = watcher.deliver_pending(&settings, &store);
+        log_elapsed("message delivery", phase);
         if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
+            let phase = Instant::now();
             last_compress = Some(Instant::now());
             if let Err(error) = notify_compression(&settings, &store) {
                 log(&format!("mailbox compression check failed: {error}"));
             }
+            log_elapsed("compression check", phase);
         }
         if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
+            let phase = Instant::now();
             last_flush = Some(Instant::now());
             if crate::zulip::enabled(&settings)
                 && let Err(error) = crate::zulip::replace(&settings, &[])
@@ -1425,18 +1459,23 @@ pub fn run() -> u8 {
             for line in mail::flush_outbox(&settings, &store.state_dir) {
                 log(&line);
             }
+            log_elapsed("outbox flush", phase);
         }
+        let phase = Instant::now();
         for line in jobs.tick(&settings, &store) {
             log(&line);
         }
+        log_elapsed("scheduled jobs", phase);
         if crate::zulip::enabled(&settings)
             && last_zulip_cleanup.is_none_or(|last| last.elapsed().as_secs() >= 86400)
         {
+            let phase = Instant::now();
             last_zulip_cleanup = Some(Instant::now());
             match crate::zulip_cleanup::run(&settings, &store) {
                 Ok(summary) => log(&summary),
                 Err(error) => log(&format!("Zulip cleanup failed: {error}")),
             }
+            log_elapsed("Zulip cleanup", phase);
         }
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));

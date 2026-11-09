@@ -8,6 +8,8 @@ scope
 
 events
 - `human mail received`: recorded after durable queueing
+- `zulip pickup`: original provider `source_timestamp_s`, local `poll_started_at` and `zulip_message_id`
+    - recorded only for a newly queued message ID
 - `delivery started`: before session checks and message preparation
     - `zulip_message_id`, `to`, `block`
 - `dispatch started`: before HTTP send
@@ -28,6 +30,9 @@ correlation
 - retries share the Zulip ID; each dispatch has its own start time and server request ID
 - message contents and authorization headers are excluded from new dispatch events
 - event write failure does not prevent delivery
+- watcher diagnostic log reports phases taking at least one second
+    - archival, Git, IMAP, Zulip intake, request notifications, message delivery, compression, outbox, scheduled jobs and cleanup
+    - durations expose serial work that delays the next nominal five-second poll
 
 verification
 - loopback HTTP test checks request header, response correlation and content exclusion
