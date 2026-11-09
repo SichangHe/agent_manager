@@ -89,7 +89,7 @@ export function createVoice({zulip, cfg, log}) {
     if (!up.ok) return {ok: false, error: up.error};
     for (let attempt = 0; attempt < 3; attempt++) {
       const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {}), ...(kws ? {kws: true} : {})}, 60000);
-      if (r.ok) return {ok: true, text: r.result.text.trim(), noSpeechProb: r.result.noSpeechProb, avgLogprob: r.result.avgLogprob, kws: r.result.kws};
+      if (r.ok) return {ok: true, text: r.result.text.trim(), timings: {...r.result.timings, roundTripMs: r.totalMs}, noSpeechProb: r.result.noSpeechProb, avgLogprob: r.result.avgLogprob, kws: r.result.kws};
       if (attempt === 2) return r;
     }
   }

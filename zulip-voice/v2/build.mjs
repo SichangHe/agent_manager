@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 
 const output = process.argv[2];
 if (!output) throw Error('Usage: node build.mjs OUTPUT_DIRECTORY');
-const files = ['index.html', 'test.html', 'selftest.mjs', 'app.css', 'app.mjs', 'log.mjs', 'model.mjs', 'player.mjs', 'recorder.mjs', 'view.mjs', 'voice.mjs', 'zulip.mjs', 'text.mjs'];
+const files = ['index.html', 'latency.mjs', 'test.html', 'selftest.mjs', 'app.css', 'app.mjs', 'log.mjs', 'model.mjs', 'player.mjs', 'recorder.mjs', 'view.mjs', 'voice.mjs', 'zulip.mjs', 'text.mjs'];
 const here = name => new URL('./' + name, import.meta.url);
 const sources = Object.fromEntries(await Promise.all(files.map(async name => [name, await readFile(here(name), 'utf8')])));
 const version = createHash('sha1').update(files.map(n => sources[n]).join('\0')).digest('hex').slice(0, 10);

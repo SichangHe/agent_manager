@@ -1,5 +1,6 @@
 /** Wires the model, Zulip events, voice service, player, recorder and DOM. Behavior is described in `../docs/v2/design.md`. */
 import {createLog} from './log.mjs';
+import {createLatency} from './latency.mjs';
 import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
@@ -15,6 +16,7 @@ const store = {
   set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* private mode */ } },
 };
 const log = createLog();
+const lat = createLatency(log);
 addEventListener('error', e => log('err', `${e.message} @${e.filename?.split('/').pop()}:${e.lineno}`));
 addEventListener('unhandledrejection', e => log('err', `unhandled: ${e.reason?.message ?? e.reason}`));
 
@@ -113,7 +115,7 @@ if (cache) { model.restore(cache); current ??= cache.current; }
 const player = createPlayer({
   micOpen: () => recorder.micOpen(),
   log, voice,
-  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(item); },
+  onItemStart(item) { log('audio', `start ${item.key}`); lat.finish('play:' + item.msgId, 'ready+playing'); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(item); },
   onItemEnd(item) {
     if (!item.last) return;
     store.set('voice2-pos', null); if (pausedItem?.msgId === item.msgId) pausedItem = null;
@@ -174,7 +176,7 @@ function appendMessage(m) {
   els.set(m.id, node);
   if (model.isMine(m)) {   // the server copy replaces the local bubble in the same tick: never two copies on screen
     const local = (locals.get(m.subject) ?? []).find(l => l.localId === m.local_message_id || (l.text === m.content && l.state !== 'failed'));
-    if (local) { local.node?.replaceWith(node); locals.set(m.subject, locals.get(m.subject).filter(x => x !== local)); return; }
+    if (local) { lat.finish('send:' + local.localId, 'echo-visible'); local.node?.replaceWith(node); locals.set(m.subject, locals.get(m.subject).filter(x => x !== local)); return; }
   }
   // keep message order by id even when older messages arrive late (history or reconnect), so nothing looks re-sent
   const later = [...feed.querySelectorAll('.msg[data-id]')].find(n => +n.dataset.id > m.id);
@@ -310,6 +312,8 @@ const userSpeaking = () => !!dict || !!vc || utterancePending || Date.now() < an
 const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); };
 
 function onNewAgentMessage(m) {
+  lat.begin('play:' + m.id, 'playback', performance.now() - Math.max(0, Date.now() - m.timestamp * 1000));   // starts at the server's timestamp
+  lat.stage('play:' + m.id, 'to-client');
   const items = itemsOf(m);
   const p = parsed(m);
   if (p.switchTo && !hasActed(m.id) && !m.flags?.includes('read')) pendingSwitch = {to: p.switchTo, msgId: items.length ? m.id : null, sourceId: m.id};
@@ -486,6 +490,7 @@ function switchBack() {
 }
 
 function switchTopic(topic) {
+  lat.finish('switch', 'switched');
   if (topic === current) { $('picker').close(); return; }
   player.stop();
   nowMsgId = null; pendingSwitch = null; hideBanner();
@@ -673,6 +678,7 @@ function sendDictationNow(finished) {
   dict = null; draftEl.value = ''; autosize(); saveDraft();
   if (!items.some(i => i.blob || i.text.trim())) { if (finished.wasPlaying) resumeAfterPause(); return; }
   const local = {localId: `l${Date.now()}_${localCounter++}`, sendId: 'send_' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(16).padStart(2, '0')).join(''), topic: current, text: preview || '…', items, state: 'sending', sentAtMs: Date.now()};
+  lat.begin('send:' + local.localId, 'send-voice');
   locals.set(current, [...(locals.get(current) ?? []), local]);
   feed.querySelector('#empty')?.remove(); feed.append(localEl(local)); feed.scrollTop = feed.scrollHeight;
   log('send', `voice send ${local.sendId}: ${items.length} parts, ${items.filter(i => i.blob).length} still to transcribe`);
@@ -762,6 +768,7 @@ function resumeBarge() {
 }
 function onBarge() {
   if (dict) return;
+  if (!vc) lat.begin('sw', 'startword');   // speech onset
   const st = player.position().status;
   log('vc', `speech detected while ${st}${vc ? ' (session open)' : ''}`);
   utterancePending = true; clearTimeout(utteranceTimer); utteranceTimer = setTimeout(utteranceDone, 6000);
@@ -781,6 +788,7 @@ function noteStartResult(useful) {
   if (emptyRun >= EMPTY_RUN_BACKOFF && Date.now() > backoffUntil) { backoffUntil = Date.now() + BACKOFF_MS; recorder.setBackoff(true); log('vc', `noisy room: ${emptyRun} useless clips in a row, stricter detection for 60 s`); setTimeout(() => { recorder.setBackoff(false); emptyRun = 0; }, BACKOFF_MS); }
 }
 async function handleCommandClip(blob, meta) {
+  lat.stage('sw', 'clip-end');
   if (!vc && !pendingChoice) {
     startWordUploads = startWordUploads.filter(t => Date.now() - t < 60000);
     if (startWordUploads.length >= UPLOADS_PER_MIN || zulip.rateLimitedForMs() > 0) { log('vc', `dropped a clip without uploading (${startWordUploads.length} uploads this minute${zulip.rateLimitedForMs() ? ', Zulip rate limit' : ''})`); recorder.setReplyMode(false); vcIdle(); return; }
@@ -791,6 +799,7 @@ async function handleCommandClip(blob, meta) {
   const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening);   // start-word clips also get keyword spotting on the server
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); resumeBarge(); vcIdle(); return; }
   const heard = r.text.trim();
+  lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
   log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
   if (!listening && normalize(heard) && ((meta.speechMs ?? 1e9) < START_MIN_SPEECH_MS || r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB)) {
     log('vc', 'rejected as noise: too short or low confidence'); recorder.setReplyMode(false); resumeBarge(); vcIdle(); return;
@@ -881,6 +890,7 @@ function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.sa
 function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); maybeAutoplay(); } }
 const ranksConfident = spoken => (rankTopics(spoken)[0]?.score ?? 0) >= SWITCH_MIN_SCORE;
 function voiceSwitch(spoken) {
+  lat.begin('switch', 'switch');
   const ranked = rankTopics(spoken);
   log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
   if (!ranked.length) { log('vc', 'no agent matches'); recorder.beep('error'); toast(`No agent called “${spoken}”`); sayAndMute(`No agent called ${spoken}`); return false; }
@@ -897,6 +907,7 @@ function voiceSwitch(spoken) {
 function openSession(rest) {
   bargePaused = false;
   if (['playing', 'loading'].includes(player.position().status)) player.pause();
+  lat.finish('sw', 'pause-applied');
  
   vc = {base: draftEl.value, text: '', timer: 0, emptyTimer: 0};
   recorder.setReplyMode(true); recorder.beep('ready');
@@ -1007,6 +1018,7 @@ function send() {
   draftEl.value = '';
   saveDraft(); autosize();
   const local = {localId: `l${Date.now()}_${localCounter++}`, topic: current, text, state: 'sending', sentAtMs: Date.now()};
+  lat.begin('send:' + local.localId, local.items ? 'send-voice' : 'send-text');
   locals.set(current, [...(locals.get(current) ?? []), local]);
   saveOutbox();
   feed.querySelector('#empty')?.remove();
@@ -1057,14 +1069,14 @@ async function deliver(l) {
     }
     if (l.items) {   // a voice reply: the service joins the transcripts and posts it, so nothing here waits for text
       const v = await voice.sendVoice({sendId: l.sendId, topic: l.topic, items: l.items});
-      if (v.ok) { l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) toast('Nothing was recognised in that recording'); return; }
+      if (v.ok) { lat.finish('send:' + l.localId, 'server-posted'); l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) toast('Nothing was recognised in that recording'); return; }
       l.attempts = (l.attempts ?? 0) + 1;
       if (l.attempts <= 12) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
       else { l.state = 'failed'; refreshLocal(l); toast(v.error); }
       return;
     }
     const r = await zulip.call('POST', 'messages', {type: 'stream', to: cfg.streamId, topic: l.topic, content: l.text, queue_id: events.queueId() ?? '', local_id: l.localId});
-    if (r.ok) { l.state = 'sent'; l.sentId = r.data.id; saveOutbox(); setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
+    if (r.ok) { lat.stage('send:' + l.localId, 'post'); l.state = 'sent'; l.sentId = r.data.id; saveOutbox(); setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
     l.uncertain = r.uncertain;
     l.attempts = (l.attempts ?? 0) + 1;
     if (l.attempts <= 8) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
@@ -1183,6 +1195,7 @@ function debugStatus() {
     `voice: ${voiceState.text}; prepared=${voice.preparedCount()} pending=${voice.pendingCount()}`,
     `player: ${JSON.stringify(player.snapshot())}`,
     `api: ${zulip.callsLastMinute()} calls in the last minute${zulip.rateLimitedForMs() ? '; RATE LIMITED for ' + Math.ceil(zulip.rateLimitedForMs() / 1000) + 's' : ''}`,
+    ...lat.summary().map(l => 'latency ' + l),
     `view: topic=${current} msgs=${model.messages(current).length} unread=${model.unreadAgentMessages(current).length} autoplay=${autoplay} readQueue=${readQueue.size}`,
   ].join('\n');
 }

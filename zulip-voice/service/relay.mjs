@@ -293,7 +293,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   }
 
   /** Does the work for an accepted request, then posts the result message; never throws. */
-  async function process(request, record, queuedMs) {
+  async function process(request, record, queuedMs, eventLagMs = null) {
     const t = now();
     const result = {voice: 1, id: request.id, op: 'result', of: request.op};
     if (request.op === 'tts' && request.proactive) Object.assign(result, {proactive: true, bundle: true, messageId: request.messageId, firstIdx: request.firstIdx});
@@ -304,7 +304,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       result.error = 'Speech processing failed. Try a new request.';
       detail = 'error=' + error.message;
     }
-    result.timings = {queueMs: queuedMs, workMs: now() - t};
+    result.timings = {queueMs: queuedMs, workMs: now() - t, eventLagMs};   // eventLagMs: Zulip server time of the request to this service seeing it
     record.status = 'sending';
     if (request.op === 'send') record.resultBody = JSON.stringify(result);
     await save();
@@ -314,7 +314,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       record.status = 'sent';
     } catch (error) { detail += ' post=' + error.message; }
     await save();
-    console.log(`${request.op} id=${request.id.slice(0, 24)}${request.proactive ? ' proactive' : ''} queued=${queuedMs}ms work=${now() - t}ms ${detail}`);
+    console.log(`${request.op} id=${request.id.slice(0, 24)}${request.proactive ? ' proactive' : ''} lag=${eventLagMs}ms queued=${queuedMs}ms work=${now() - t}ms total_here=${now() - t + queuedMs}ms ${detail}`);
   }
 
   /** Appends a client's debug text to `client.log`; at 1 MiB the file rotates to `client.log.1` (older data is dropped), so disk use stays under 2 MiB. */
@@ -398,7 +398,8 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       const record = records[request.id] = {created: now(), status: 'working', proactive: !!request.proactive, messageId: request.messageId};
       await save();
       const enqueuedMs = now();
-      (pools[request.op] ?? pools.stt).add(request.proactive ? 1 : 0, () => process(request, record, now() - enqueuedMs));
+      const eventLagMs = message.timestamp ? Math.max(0, now() - message.timestamp * 1000) : null;
+      (pools[request.op] ?? pools.stt).add(request.proactive ? 1 : 0, () => process(request, record, now() - enqueuedMs, eventLagMs));
     },
     /** Pre-renders speech for a new agent message so playback starts instantly. */
     async prepare(message, taskStreamId) {
