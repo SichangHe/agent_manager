@@ -1296,22 +1296,23 @@ fn scan_agents() {
     }
 }
 
-/// Tell the main manager `notice` once under the record `key`; an empty notice clears the record so the next problem is told again.
+/// Tell the main manager `notice` once per `token`, remembered under the record `key`; an empty token clears it so the next problem is told again.
 fn notify_manager(
     settings: &Settings,
     store: &Store,
     key: &str,
+    token: &str,
     notice: &str,
 ) -> Result<(), String> {
-    if notice == record(store, key) {
+    if token == record(store, key) {
         return Ok(());
     }
-    if !notice.is_empty() {
+    if !token.is_empty() {
         let manager = store.load(settings::get(settings, "main_manager"))?;
         omnigent::send(settings, manager.address(), notice)?;
         log(&format!("told the main manager: {notice}"));
     }
-    store.set_record(key, notice)
+    store.set_record(key, token)
 }
 
 /// The notice for files `amh` refuses to commit for exceeding the size limit.
@@ -1466,18 +1467,35 @@ pub fn run() -> u8 {
         {
             let phase = Instant::now();
             last_commit = Some(Instant::now());
-            let (oversize, failure) = match crate::history::commit_and_push(&store.root) {
-                Ok(done) => (done.oversize, String::new()),
+            // A failed run says nothing about oversize files or merges, so their records stay as they are; one failure streak is told once.
+            let mut notices: Vec<(&str, String, String)> = Vec::new();
+            match crate::history::commit_and_push(&store.root) {
+                Ok(done) => {
+                    let oversize = oversize_notice(&done.oversize);
+                    notices.push(("oversize-notified", oversize.clone(), oversize));
+                    notices.push(("push-failure-notified", String::new(), String::new()));
+                    if !done.notes.is_empty() {
+                        let text = format!("amh merge notes:\n{}", done.notes.join("\n"));
+                        notices.push(("merge-notes-notified", text.clone(), text));
+                    }
+                }
                 Err(error) => {
                     log(&format!("Markdown commit failed: {error}"));
-                    (Vec::new(), format!("amh could not commit or push the work logs: {error}"))
+                    notices.push((
+                        "push-failure-notified",
+                        "failing".to_owned(),
+                        format!("amh could not commit or push the work logs: {error}"),
+                    ));
                 }
-            };
-            for (key, notice) in [
-                ("oversize-notified", oversize_notice(&oversize)),
-                ("push-failure-notified", failure),
-            ] {
-                if let Err(error) = notify_manager(&settings, &store, key, &notice) {
+            }
+            let filing = record(&store, "filing-problems");
+            notices.push((
+                "filing-problems-notified",
+                filing.clone(),
+                format!("amh left these task files unfiled or unreconciled:\n{filing}"),
+            ));
+            for (key, token, notice) in &notices {
+                if let Err(error) = notify_manager(&settings, &store, key, token, notice) {
                     log(&format!("{key} notice failed: {error}"));
                 }
             }

@@ -118,6 +118,18 @@ impl Database {
             .map_err(error)
     }
 
+    /// Time of the task's latest status change to `done`, if the event is still in the database.
+    pub fn done_time(&self, name: &str) -> Result<Option<String>, String> {
+        self.0
+            .query_row(
+                "SELECT time FROM events WHERE kind = 'agent record changed' AND subject = ?1 AND json_extract(data, '$.status') = 'done' ORDER BY id DESC LIMIT 1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)
+    }
+
     pub fn tasks(&self) -> Result<Vec<(String, String)>, String> {
         let mut query = self
             .0

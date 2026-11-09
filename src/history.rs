@@ -14,6 +14,7 @@ use std::process::{Command, Output, Stdio};
 pub const MAX_BYTES: u64 = 5 * 1024 * 1024;
 const REMOTE: &str = "origin";
 const PUSH_TRIES: usize = 3;
+const SYNC_TRIES: usize = 3;
 const PATHSPEC: [&str; 2] = ["*.md", ":(exclude)amh_views"];
 
 /// What one run did.
@@ -23,6 +24,8 @@ pub struct Outcome {
     pub pushed: bool,
     /// Changed files left uncommitted for exceeding `MAX_BYTES`, with their sizes.
     pub oversize: Vec<(String, u64)>,
+    /// Merge decisions worth telling the manager, such as a frontmatter conflict resolved for the local side.
+    pub notes: Vec<String>,
 }
 
 struct Repo {
@@ -33,7 +36,7 @@ struct Repo {
 impl Repo {
     fn run(&self, args: &[&str], input: Option<&[u8]>) -> Result<Output, String> {
         let mut command = Command::new("timeout");
-        command.args(["60s", "git", "-C"]).arg(&self.root).args(args);
+        command.args(["300s", "git", "-C"]).arg(&self.root).args(args);
         if let Some(index) = &self.index {
             command.env("GIT_INDEX_FILE", index);
         }
@@ -115,10 +118,14 @@ pub fn commit_and_push(root: &Path) -> Result<Outcome, String> {
     let private = shared.with_index(git_dir.join("amh.index"));
     let mut outcome = Outcome::default();
     let ours = match own_commit(&shared, &private, &head, &mut outcome)? {
-        Some(commit) => {
-            sync_local(&shared, &head, &commit, false)?;
-            move_branch(&shared, &branch, &commit, &head)?;
+        // The branch moves before the index so a lost race never leaves the index ahead of HEAD.
+        Some(commit) if move_branch(&shared, &branch, &commit, &head) => {
+            sync_local(&shared, &head, &commit, None)?;
             commit
+        }
+        Some(_) => {
+            outcome.committed = false;
+            return Ok(outcome);
         }
         None => head,
     };
@@ -163,7 +170,7 @@ fn own_commit(
     });
     let ignored = nul_list(
         &private
-            .run(&["check-ignore", "--no-index", "-z", "--stdin"], Some(&listed))?
+            .run(&["check-ignore", "-z", "--stdin"], Some(&listed))?
             .stdout,
     );
     paths.retain(|path| !ignored.contains(path));
@@ -212,11 +219,12 @@ fn publish(
                     return Ok(());
                 }
             } else if shared.succeeds(&["merge-base", "--is-ancestor", &ours, &theirs])? {
-                sync_local(shared, &ours, &theirs, true)?;
-                move_branch(shared, branch, &theirs, &ours)?;
+                if move_branch(shared, branch, &theirs, &ours) {
+                    sync_local(shared, &ours, &theirs, Some(&mut outcome.notes))?;
+                }
                 return Ok(());
             } else {
-                target = merge(shared, &ours, &theirs)?;
+                target = merge(shared, &ours, &theirs, &mut outcome.notes)?;
             }
         }
         let pushed = shared.run(&["push", "-q", "--no-verify", REMOTE, &format!("{target}:refs/heads/{branch}")], None)?;
@@ -224,29 +232,88 @@ fn publish(
             continue;
         }
         outcome.pushed = true;
-        if target != ours {
-            sync_local(shared, &ours, &target, true)?;
+        if target != ours && move_branch(shared, branch, &target, &ours) {
+            sync_local(shared, &ours, &target, Some(&mut outcome.notes))?;
         }
-        move_branch(shared, branch, &target, &ours)?;
         shared.out(&["update-ref", &tracking, &target], None)?;
         return Ok(());
     }
     Err("amh: git push was rejected repeatedly".to_owned())
 }
 
-/// Move the branch only if nobody else moved it meanwhile; their move wins and the next run resumes from it.
-fn move_branch(shared: &Repo, branch: &str, to: &str, from: &str) -> Result<(), String> {
-    shared.out(&["update-ref", &format!("refs/heads/{branch}"), to, from], None).map(|_| ())
+/// Move the branch only if nobody else moved it meanwhile; their move wins, `false` is returned, and the next run resumes from it.
+fn move_branch(shared: &Repo, branch: &str, to: &str, from: &str) -> bool {
+    shared.out(&["update-ref", &format!("refs/heads/{branch}"), to, from], None).is_ok()
 }
 
-/// A merge commit of `ours` and `theirs` made in a temporary index; clashing files keep both sides' lines.
+/// The frontmatter (through its closing `---` line) and the rest of a Markdown file.
+fn split_frontmatter(bytes: &[u8]) -> (&[u8], &[u8]) {
+    if !bytes.starts_with(b"---\n") {
+        return (&[], bytes);
+    }
+    match bytes.windows(5).skip(3).position(|w| w == b"\n---\n") {
+        Some(at) => bytes.split_at(at + 3 + 5),
+        None => (&[], bytes),
+    }
+}
+
+/// Line-wise union of two edits of `base`; files are append-mostly logs, so this loses the least.
+fn union(dir: &Path, base: &[u8], mine: &[u8], other: &[u8]) -> Result<Vec<u8>, String> {
+    let write = |name: &str, bytes: &[u8]| -> Result<PathBuf, String> {
+        let file = dir.join(name);
+        fs::write(&file, bytes).map_err(|e| format!("amh: merge: {e}"))?;
+        Ok(file)
+    };
+    let (m, b, o) = (write("m", mine)?, write("b", base)?, write("o", other)?);
+    let merged = Command::new("git")
+        .args(["merge-file", "-p", "--union"])
+        .args([&m, &b, &o])
+        .output()
+        .map_err(|e| format!("amh: git merge-file: {e}"))?;
+    if merged.status.code().is_none_or(|code| code > 127) {
+        return Err("amh: git merge-file failed".to_owned());
+    }
+    Ok(merged.stdout)
+}
+
+/// Merge two edits of a file: the body by union; the frontmatter, which a union would corrupt with duplicate keys, from the local side when both changed it.
+fn merge_file(dir: &Path, path: &str, base: &[u8], mine: &[u8], other: &[u8], notes: &mut Vec<String>) -> Result<Vec<u8>, String> {
+    let ((bf, bb), (mf, mb), (of, ob)) = (split_frontmatter(base), split_frontmatter(mine), split_frontmatter(other));
+    if mf.is_empty() && of.is_empty() {
+        return union(dir, base, mine, other);
+    }
+    let front = if mf == bf {
+        of
+    } else {
+        if of != bf && of != mf {
+            notes.push(format!("{path}: both sides changed the frontmatter; kept the local one, origin's change was dropped"));
+        }
+        mf
+    };
+    let mut merged = front.to_vec();
+    merged.extend(union(dir, bb, mb, ob)?);
+    Ok(merged)
+}
+
+/// Where `commit` keeps the task file `path` of the root after it was filed under a month folder.
+fn filed_path(shared: &Repo, commit: &str, path: &str) -> Option<String> {
+    if path.contains('/') {
+        return None;
+    }
+    let tops = shared.text(&["ls-tree", "--name-only", commit]).ok()?;
+    tops.lines()
+        .filter(|top| top.len() == 6 && top.bytes().all(|b| b.is_ascii_digit()))
+        .map(|top| format!("{top}/{path}"))
+        .find(|candidate| shared.succeeds(&["cat-file", "-e", &format!("{commit}:{candidate}")]).unwrap_or(false))
+}
+
+/// A merge commit of `ours` and `theirs` made in a temporary index.
 ///
-/// The files are append-mostly logs, so a line-wise union loses the least.
-fn merge(shared: &Repo, ours: &str, theirs: &str) -> Result<String, String> {
+/// An edit on one side of a file the other side filed under a month folder is applied to the filed copy, not the root.
+fn merge(shared: &Repo, ours: &str, theirs: &str, notes: &mut Vec<String>) -> Result<String, String> {
     let base = shared.text(&["merge-base", ours, theirs]).ok();
     let scratch = tempdir(shared)?;
-    let index = scratch.join("merge.index");
-    let temp = shared.with_index(index);
+    let temp = shared.with_index(scratch.join("merge.index"));
     let mut args = vec!["read-tree", "-m", "--aggressive"];
     let empty;
     match &base {
@@ -262,37 +329,39 @@ fn merge(shared: &Repo, ours: &str, theirs: &str) -> Result<String, String> {
     for (mode, sha, stage, path) in index_entries(&temp.out(&["ls-files", "-u", "-z"], None)?) {
         stages.entry(path).or_default()[usize::from(stage) - 1] = Some((mode, sha));
     }
+    let blob = |entry: &Option<(String, String)>| -> Result<Vec<u8>, String> {
+        match entry {
+            Some((_, sha)) => shared.out(&["cat-file", "blob", sha], None),
+            None => Ok(Vec::new()),
+        }
+    };
+    let store = |bytes: &[u8]| -> Result<String, String> {
+        Ok(String::from_utf8_lossy(&shared.out(&["hash-object", "-w", "--stdin"], Some(bytes))?).trim().to_owned())
+    };
     for (path, [base, mine, other]) in stages {
-        let chosen = match (mine, other) {
-            (Some(mine), Some(other)) => {
-                let blob = |name: &str, entry: &Option<(String, String)>| -> Result<PathBuf, String> {
-                    let file = scratch.join(name);
-                    let bytes = match entry {
-                        Some((_, sha)) => shared.out(&["cat-file", "blob", sha], None)?,
-                        None => Vec::new(),
-                    };
-                    fs::write(&file, bytes).map_err(|e| format!("amh: merge: {e}"))?;
-                    Ok(file)
-                };
-                let (b, m, o) = (blob("b", &base)?, blob("m", &Some(mine.clone()))?, blob("o", &Some(other))?);
-                let merged = Command::new("git")
-                    .args(["merge-file", "-p", "--union"])
-                    .args([&m, &b, &o])
-                    .output()
-                    .map_err(|e| format!("amh: git merge-file: {e}"))?;
-                if merged.status.code().is_none_or(|code| code > 127) {
-                    return Err(format!("amh: git merge-file failed for {path}"));
-                }
-                let sha = String::from_utf8_lossy(&shared.out(&["hash-object", "-w", "--stdin"], Some(&merged.stdout))?)
-                    .trim()
-                    .to_owned();
-                Some((mine.0, sha))
+        let moved = match (&mine, &other, &base) {
+            (None, Some(_), Some(_)) => filed_path(shared, ours, &path).map(|at| (at, true)),
+            (Some(_), None, Some(_)) => filed_path(shared, theirs, &path).map(|at| (at, false)),
+            _ => None,
+        };
+        let (target, chosen) = match (mine, other, moved) {
+            (mine, other, Some((at, we_moved))) => {
+                let side = if we_moved { ours } else { theirs };
+                let filed = Some(("100644".to_owned(), shared.text(&["rev-parse", &format!("{side}:{at}")])?));
+                let (m, o) = if we_moved { (filed, other) } else { (mine, filed) };
+                let merged = merge_file(&scratch, &path, &blob(&base)?, &blob(&m)?, &blob(&o)?, notes)?;
+                temp.out(&["update-index", "--force-remove", &path], None)?;
+                (at, Some(("100644".to_owned(), store(&merged)?)))
+            }
+            (Some(mine), Some(other), None) => {
+                let merged = merge_file(&scratch, &path, &blob(&base)?, &blob(&Some(mine.clone()))?, &blob(&Some(other))?, notes)?;
+                (path, Some((mine.0, store(&merged)?)))
             }
             // Deleted on one side, edited on the other: keep the edit.
-            (one, other) => one.or(other),
+            (one, other, None) => (path, one.or(other)),
         };
         if let Some((mode, sha)) = chosen {
-            temp.out(&["update-index", "--add", "--cacheinfo", &format!("{mode},{sha},{path}")], None)?;
+            temp.out(&["update-index", "--add", "--cacheinfo", &format!("{mode},{sha},{target}")], None)?;
         }
     }
     let tree = temp.text(&["write-tree"])?;
@@ -313,7 +382,7 @@ fn tempdir(shared: &Repo) -> Result<PathBuf, String> {
 ///
 /// A path is only moved when the worktree or index still holds what `from` had, so uncommitted edits stay as edits against `to`.
 /// A worktree file that has local edits gets `from`->`to` merged into it, keeping both.
-fn sync_local(shared: &Repo, from: &str, to: &str, worktree: bool) -> Result<(), String> {
+fn sync_local(shared: &Repo, from: &str, to: &str, mut worktree: Option<&mut Vec<String>>) -> Result<(), String> {
     let diff = shared.out(&["diff-tree", "-r", "-z", "--no-renames", "--raw", from, to], None)?;
     let fields = nul_list(&diff);
     let mut changes = Vec::new();
@@ -337,8 +406,8 @@ fn sync_local(shared: &Repo, from: &str, to: &str, worktree: bool) -> Result<(),
             let mode = if new.0 == "000000" { "0" } else { new.0.as_str() };
             info.extend_from_slice(format!("{mode} {}\t{path}\0", new.1).as_bytes());
         }
-        if worktree {
-            sync_file(shared, path, &old.1, &new.1)?;
+        if let Some(notes) = worktree.as_deref_mut() {
+            sync_file(shared, path, &old.1, &new.1, notes)?;
         }
     }
     if !info.is_empty() {
@@ -348,47 +417,50 @@ fn sync_local(shared: &Repo, from: &str, to: &str, worktree: bool) -> Result<(),
 }
 
 /// Apply `old`->`new` to one worktree file: replace it when untouched, else merge, else leave it.
-fn sync_file(shared: &Repo, path: &str, old: &str, new: &str) -> Result<(), String> {
+///
+/// The file is read again right before it is replaced; if someone wrote to it meanwhile, the work is redone on the new content.
+fn sync_file(shared: &Repo, path: &str, old: &str, new: &str, notes: &mut Vec<String>) -> Result<(), String> {
     let file = shared.root.join(path);
+    let missing = |sha: &str| sha.chars().all(|c| c == '0');
     let blob = |sha: &str| -> Result<Vec<u8>, String> {
-        if sha.chars().all(|c| c == '0') { Ok(Vec::new()) } else { shared.out(&["cat-file", "blob", sha], None) }
+        if missing(sha) { Ok(Vec::new()) } else { shared.out(&["cat-file", "blob", sha], None) }
     };
-    let new_missing = new.chars().all(|c| c == '0');
-    let have = fs::read(&file).ok();
     let (old_bytes, new_bytes) = (blob(old)?, blob(new)?);
-    let result = match &have {
-        None if old.chars().all(|c| c == '0') => Some(new_bytes),
-        None => None,
-        Some(have) if *have == new_bytes && !new_missing => None,
-        Some(have) if *have == old_bytes => {
-            if new_missing {
-                let _ = fs::remove_file(&file);
-                return Ok(());
+    for _ in 0..SYNC_TRIES {
+        let have = fs::read(&file).ok();
+        let result = match &have {
+            None if missing(old) => Some(new_bytes.clone()),
+            None => return Ok(()),
+            Some(have) if *have == new_bytes && !missing(new) => return Ok(()),
+            Some(have) if *have == old_bytes => {
+                if missing(new) {
+                    if fs::read(&file).ok() == have.clone().into() {
+                        let _ = fs::remove_file(&file);
+                    }
+                    return Ok(());
+                }
+                Some(new_bytes.clone())
             }
-            Some(new_bytes)
-        }
-        Some(_) if new_missing => None,
-        Some(_) => {
-            let dir = tempdir(shared)?;
-            let (a, b, c) = (dir.join("a"), dir.join("b"), dir.join("c"));
-            fs::write(&b, &old_bytes).and_then(|_| fs::write(&c, &new_bytes)).map_err(|e| format!("amh: merge: {e}"))?;
-            fs::copy(&file, &a).map_err(|e| format!("amh: merge: {e}"))?;
-            let merged = Command::new("git").args(["merge-file", "--union"]).args([&a, &b, &c]).status().map_err(|e| format!("amh: git merge-file: {e}"))?;
-            let bytes = fs::read(&a).map_err(|e| format!("amh: merge: {e}"));
-            let _ = fs::remove_dir_all(&dir);
-            if merged.code().is_none_or(|code| code > 127) {
-                return Ok(());
+            Some(_) if missing(new) => return Ok(()),
+            Some(have) => {
+                let dir = tempdir(shared)?;
+                let merged = merge_file(&dir, path, &old_bytes, have, &new_bytes, notes);
+                let _ = fs::remove_dir_all(&dir);
+                Some(merged?)
             }
-            Some(bytes?)
-        }
-    };
-    if let Some(bytes) = result {
+        };
+        let Some(bytes) = result else { return Ok(()) };
         if let Some(parent) = file.parent() {
             fs::create_dir_all(parent).map_err(|e| format!("amh: {e}"))?;
         }
         let temp = file.with_file_name(format!(".{}.amh-tmp", file.file_name().unwrap_or_default().to_string_lossy()));
-        fs::write(&temp, bytes).and_then(|_| fs::rename(&temp, &file)).map_err(|e| format!("amh: {e}"))?;
+        fs::write(&temp, bytes).map_err(|e| format!("amh: {e}"))?;
+        if fs::read(&file).ok() == have {
+            return fs::rename(&temp, &file).map_err(|e| format!("amh: {e}"));
+        }
+        let _ = fs::remove_file(&temp);
     }
+    notes.push(format!("{path}: kept changing while syncing; left as it was, shows as a local edit"));
     Ok(())
 }
 
@@ -500,6 +572,57 @@ mod tests {
         assert_eq!(fs::read_to_string(a.join("t.md")).unwrap().lines().count(), 5);
         assert_eq!(sh(&a, &["rev-parse", "HEAD"]), sh(&origin, &["rev-parse", "main"]));
         assert_eq!(sh(&a, &["diff", "--stat"]), "", "worktree equals the commit, nothing looks reverted");
+        fs::remove_dir_all(top).unwrap();
+    }
+
+    const FM: &str = "---\nstatus: running\nrunat: x\n---\n\nbody\n";
+
+    #[test]
+    fn frontmatter_conflict_keeps_the_local_side_and_reports() {
+        let (top, origin, a, b) = setup("fm");
+        put(&a, "f.md", FM);
+        sh(&a, &["add", "f.md"]);
+        sh(&a, &["commit", "-qm", "f"]);
+        sh(&a, &["push", "-q", "origin", "main"]);
+        sh(&b, &["pull", "-q"]);
+        put(&b, "f.md", &FM.replace("running", "blocked"));
+        sh(&b, &["commit", "-qam", "b"]);
+        sh(&b, &["push", "-q", "origin", "main"]);
+        put(&a, "f.md", &FM.replace("running", "done").replace("body\n", "body\nmore\n"));
+        let out = commit_and_push(&a).unwrap();
+        let merged = sh(&origin, &["show", "main:f.md"]);
+        assert_eq!(merged.matches("status:").count(), 1, "{merged}");
+        assert!(merged.contains("status: done") && merged.contains("more"));
+        assert!(out.notes.iter().any(|n| n.contains("f.md")), "{:?}", out.notes);
+        fs::remove_dir_all(top).unwrap();
+    }
+
+    #[test]
+    fn an_edit_of_a_task_that_the_other_side_filed_lands_in_the_month_folder() {
+        let (top, origin, a, b) = setup("moved");
+        // a files t.md under 202611; b appends to it at the root.
+        fs::create_dir(a.join("202611")).unwrap();
+        sh(&a, &["mv", "t.md", "202611/t.md"]);
+        put(&b, "t.md", "one\ntwo\nthree\nfrom b\n");
+        sh(&b, &["commit", "-qam", "b"]);
+        sh(&b, &["push", "-q", "origin", "main"]);
+        commit_and_push(&a).unwrap();
+        let files = sh(&origin, &["ls-tree", "-r", "--name-only", "main"]);
+        assert!(files.contains("202611/t.md") && !files.lines().any(|l| l == "t.md"), "{files}");
+        assert!(sh(&origin, &["show", "main:202611/t.md"]).contains("from b"));
+        assert!(!a.join("t.md").exists());
+        fs::remove_dir_all(top).unwrap();
+    }
+
+    #[test]
+    fn tracked_files_matching_gitignore_are_still_committed() {
+        let (top, origin, a, _b) = setup("tracked-ignored");
+        put(&a, "skip.md", "v1\n");
+        sh(&a, &["add", "-f", "skip.md"]);
+        sh(&a, &["commit", "-qm", "force"]);
+        put(&a, "skip.md", "v2\n");
+        commit_and_push(&a).unwrap();
+        assert_eq!(sh(&origin, &["show", "main:skip.md"]), "v2");
         fs::remove_dir_all(top).unwrap();
     }
 

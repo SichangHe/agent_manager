@@ -136,6 +136,11 @@ impl Store {
                 }
             }
             database.import(&snapshots, &events)?;
+            for (month, name) in self.month_files() {
+                if !self.root.join(&name).is_file() {
+                    database.set_record(&format!("month:{name}"), &month)?;
+                }
+            }
         }
         self.take_in_edits(&database)?;
         if database.record("pending-block-queue-v1")?.is_none() {
@@ -258,9 +263,75 @@ impl Store {
         })
     }
 
+    /// The `YYYYMM` folders of the root and the task files in them, as `(month, name)`.
+    fn month_files(&self) -> Vec<(String, String)> {
+        let mut found = Vec::new();
+        let Ok(entries) = fs::read_dir(&self.root) else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let month = entry.file_name().to_string_lossy().into_owned();
+            if month.len() != 6 || !month.bytes().all(|b| b.is_ascii_digit()) || !entry.path().is_dir() {
+                continue;
+            }
+            for file in fs::read_dir(entry.path()).into_iter().flatten().flatten() {
+                let name = file.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".md") && !name.starts_with('.') {
+                    found.push((month.clone(), name));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// Where a task file is on disk: the root, else the first month folder holding it.
+    fn locate(&self, name: &str) -> PathBuf {
+        let root_file = self.root.join(name);
+        if root_file.is_file() {
+            return root_file;
+        }
+        match self.month_files().into_iter().find(|(_, found)| found == name) {
+            Some((month, _)) => self.root.join(month).join(name),
+            None => root_file,
+        }
+    }
+
+    /// Add a line to the record of filing problems, which the watcher reports to the main manager.
+    fn report_filing(&self, database: &Database, line: &str) -> Result<(), String> {
+        let known = database.record("filing-problems")?.unwrap_or_default();
+        if !known.lines().any(|seen| seen == line) {
+            database.set_record("filing-problems", &format!("{known}{line}\n"))?;
+        }
+        Ok(())
+    }
+
+    /// When the task became done: its last `done` status event, else the last git commit of its file, else now.
+    fn done_month(&self, database: &Database, name: &str) -> String {
+        let from_event = database.done_time(name).ok().flatten().and_then(|time| {
+            chrono::DateTime::parse_from_rfc3339(&time).ok().map(|t| t.with_timezone(&chrono::Utc))
+        });
+        let from_git = || {
+            let out = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(["log", "-1", "--format=%ct", "--", name])
+                .output()
+                .ok()?;
+            let seconds: i64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
+            chrono::DateTime::from_timestamp(seconds, 0)
+        };
+        from_event
+            .or_else(from_git)
+            .unwrap_or_else(chrono::Utc::now)
+            .format("%Y%m")
+            .to_string()
+    }
+
     /// Decide the file's home from its status and move it there, so the root holds only active tasks.
     ///
-    /// A done task goes to the `YYYYMM` folder of the root file's last change, else of today; a reopened task returns to the root.
+    /// A done task goes to the `YYYYMM` folder of the month it became done; a reopened task returns to the root.
+    /// A move that would overwrite a different file, or a stray root copy of a filed task, is left alone and reported.
     // 🧑 "when a task finishes, amh moves its file into its month folder ... so the root holds only active tasks"
     fn settle(&self, database: &Database, name: &str, text: &str) -> Result<PathBuf, String> {
         let key = format!("month:{name}");
@@ -268,23 +339,32 @@ impl Store {
             && text.contains("done")
             && Task::parse(name, text).is_ok_and(|task| task.status() == "done");
         let recorded = database.record(&key)?.filter(|month| !month.is_empty());
+        let root_file = self.root.join(name);
         let (from, to) = match (done, recorded) {
-            (false, None) => return Ok(self.root.join(name)),
-            (false, Some(_)) => (self.path_of(database, name)?, self.root.join(name)),
-            (true, Some(_)) => return self.path_of(database, name),
+            (false, None) => return Ok(root_file),
+            (false, Some(month)) => (self.root.join(month).join(name), root_file),
+            (true, Some(month)) => {
+                let filed = self.root.join(month).join(name);
+                if root_file.is_file() {
+                    if fs::read(&root_file).ok() == fs::read(&filed).ok() {
+                        let _ = fs::remove_file(&root_file);
+                    } else {
+                        self.report_filing(database, &format!("{name}: edited at the root although filed under {}; the root copy is not merged", filed.parent().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy()))?;
+                    }
+                }
+                return Ok(filed);
+            }
             (true, None) => {
-                let root_file = self.root.join(name);
-                let changed = fs::metadata(&root_file).and_then(|meta| meta.modified());
-                let month = chrono::DateTime::<chrono::Utc>::from(
-                    changed.unwrap_or_else(|_| std::time::SystemTime::now()),
-                )
-                .format("%Y%m")
-                .to_string();
-                let folder = self.root.join(&month);
-                fs::create_dir_all(&folder)
+                let month = self.done_month(database, name);
+                let target = self.root.join(&month).join(name);
+                if target.exists() && fs::read(&target).ok() != fs::read(&root_file).ok() {
+                    self.report_filing(database, &format!("{name}: not filed, {month}/{name} already exists with different content"))?;
+                    return Ok(root_file);
+                }
+                fs::create_dir_all(self.root.join(&month))
                     .map_err(|error| format!("amh: cannot create {month}: {error}"))?;
                 database.set_record(&key, &month)?;
-                (root_file, folder.join(name))
+                (root_file, target)
             }
         };
         if !done {
@@ -308,7 +388,7 @@ impl Store {
     pub fn contains(&self, name: &str) -> Result<bool, String> {
         match self.database()? {
             Some(database) => Ok(database.task(name)?.is_some()),
-            None => Ok(self.root.join(name).is_file()),
+            None => Ok(self.locate(name).is_file()),
         }
     }
 
@@ -366,7 +446,6 @@ impl Store {
     }
 
     pub fn load(&self, name: &str) -> Result<Task, String> {
-        let path = self.root.join(name);
         if name.contains('/') || !name.ends_with(".md") {
             return Err(format!("amh: no task file {name} in the work-log root"));
         }
@@ -376,7 +455,7 @@ impl Store {
                 .ok_or_else(|| format!("amh: no task file {name} in the work-log root"))?;
             return Task::parse(name, &text).map_err(|message| format!("amh: {message}"));
         }
-        let text = fs::read_to_string(&path)
+        let text = fs::read_to_string(self.locate(name))
             .map_err(|error| format!("amh: cannot read {name}: {error}"))?;
         Task::parse(name, &text).map_err(|message| format!("amh: {message}"))
     }
@@ -646,10 +725,16 @@ impl Store {
             .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
             .filter(|name| name.ends_with(".md") && !name.starts_with('.'))
             .collect();
+        // A filed task is read from its month folder unless a root file of that name exists.
+        for (_, name) in self.month_files() {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
         names.sort();
         let mut parsed = Vec::new();
         for name in names {
-            let text = fs::read_to_string(self.root.join(&name))
+            let text = fs::read_to_string(self.locate(&name))
                 .map_err(|e| format!("amh: cannot read {name}: {e}"))?;
             match Task::parse(&name, &text) {
                 Ok(task) => parsed.push(task),
@@ -919,6 +1004,82 @@ mod tests {
         store.save(&task)?;
         drop(lock);
         assert!(root.join("t.md").is_file() && !root.join(&month).join("t.md").exists());
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    fn month_store(tag: &str) -> Result<(PathBuf, Store), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("amh-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        taskfile::write(
+            &root.join("t.md"),
+            "---\nstatus: running\nrunat: omnigent://worker\n---\n\nbody\n",
+        )?;
+        taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
+        let store = Store { root: root.clone(), state_dir: root.join("state") };
+        drop(store.lock()?);
+        Ok((root, store))
+    }
+
+    fn close(store: &Store) -> Result<(), Box<dyn std::error::Error>> {
+        let lock = store.lock()?;
+        let mut task = store.load("t.md")?;
+        crate::tasks::set_status(&mut task, "done", None)?;
+        store.save(&task)?;
+        drop(lock);
+        Ok(())
+    }
+
+    #[test]
+    fn the_month_is_when_the_task_became_done_not_the_file_time() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, store) = month_store("month-event")?;
+        let mut db = Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        db.commit(&[], &[serde_json::json!({"time": "2026-08-03T10:00:00+00:00", "actor": "x", "kind": "agent record changed", "subject": "t.md", "data": {"status": "done", "address": "a"}})])?;
+        assert_eq!(store.done_month(&db, "t.md"), "202608");
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&root).args(args).env("GIT_COMMITTER_DATE", "2026-05-02T00:00:00Z").env("GIT_AUTHOR_DATE", "2026-05-02T00:00:00Z").output();
+        git(&["init", "-q"])?;
+        git(&["add", "t.md"])?;
+        git(&["-c", "user.name=t", "-c", "user.email=t@e.invalid", "commit", "-qm", "x"])?;
+        assert_eq!(store.done_month(&db, "other.md"), chrono::Utc::now().format("%Y%m").to_string());
+        assert_eq!(store.done_month(&db, "t.md"), "202608", "events win over git");
+        db.commit(&[], &[])?;
+        let git_only = Store { root: root.clone(), state_dir: root.join("none") };
+        let empty = Database::open(&root.join("empty.sqlite3"))?;
+        assert_eq!(git_only.done_month(&empty, "t.md"), "202605");
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_name_collision_in_the_month_folder_leaves_the_task_at_the_root_and_reports() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, store) = month_store("month-collide")?;
+        let month = chrono::Utc::now().format("%Y%m").to_string();
+        fs::create_dir(root.join(&month))?;
+        fs::write(root.join(&month).join("t.md"), "different\n")?;
+        close(&store)?;
+        assert!(root.join("t.md").is_file());
+        assert_eq!(fs::read_to_string(root.join(&month).join("t.md"))?, "different\n");
+        assert!(store.record("filing-problems")?.contains("already exists"));
+        fs::remove_dir_all(&root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_root_edit_of_a_filed_task_is_reported_and_month_tasks_survive_reinit() -> Result<(), Box<dyn std::error::Error>> {
+        let (root, store) = month_store("month-stray")?;
+        close(&store)?;
+        let month = chrono::Utc::now().format("%Y%m").to_string();
+        fs::write(root.join("t.md"), "stray\n")?;
+        drop(store.lock()?);
+        assert!(store.record("filing-problems")?.contains("edited at the root"));
+        assert!(root.join(&month).join("t.md").is_file());
+        fs::remove_file(root.join("t.md"))?;
+        // Losing the database re-imports the filed task from its month folder.
+        fs::remove_file(store.state_dir.join("amh.sqlite3"))?;
+        drop(store.lock()?);
+        assert_eq!(store.load("t.md")?.status(), "done");
+        assert!(root.join(&month).join("t.md").is_file() && !root.join("t.md").exists());
         fs::remove_dir_all(&root)?;
         Ok(())
     }
