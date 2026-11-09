@@ -1296,6 +1296,39 @@ fn scan_agents() {
     }
 }
 
+/// Tell the main manager `notice` once under the record `key`; an empty notice clears the record so the next problem is told again.
+fn notify_manager(
+    settings: &Settings,
+    store: &Store,
+    key: &str,
+    notice: &str,
+) -> Result<(), String> {
+    if notice == record(store, key) {
+        return Ok(());
+    }
+    if !notice.is_empty() {
+        let manager = store.load(settings::get(settings, "main_manager"))?;
+        omnigent::send(settings, manager.address(), notice)?;
+        log(&format!("told the main manager: {notice}"));
+    }
+    store.set_record(key, notice)
+}
+
+/// The notice for files `amh` refuses to commit for exceeding the size limit.
+fn oversize_notice(files: &[(String, u64)]) -> String {
+    if files.is_empty() {
+        return String::new();
+    }
+    let list: String = files
+        .iter()
+        .map(|(path, bytes)| format!("{path} ({} MB)\n", bytes >> 20))
+        .collect();
+    format!(
+        "amh will not commit these work-log files because each is over {} MB; shrink, split, or gitignore them:\n{list}",
+        crate::history::MAX_BYTES >> 20
+    )
+}
+
 /// Tell the task named by `compress.task` to compress the human's mailbox when too many agent emails wait unread there.
 fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> {
     let name = settings::get(settings, "compress.task");
@@ -1432,11 +1465,20 @@ pub fn run() -> u8 {
             && last_commit.is_none_or(|last| last.elapsed() >= COMMIT_EVERY)
         {
             let phase = Instant::now();
-            match crate::archive::commit_markdown(&store.root) {
-                Ok(_) => last_commit = Some(Instant::now()),
+            last_commit = Some(Instant::now());
+            let (oversize, failure) = match crate::history::commit_and_push(&store.root) {
+                Ok(done) => (done.oversize, String::new()),
                 Err(error) => {
-                    last_commit = Some(Instant::now());
                     log(&format!("Markdown commit failed: {error}"));
+                    (Vec::new(), format!("amh could not commit or push the work logs: {error}"))
+                }
+            };
+            for (key, notice) in [
+                ("oversize-notified", oversize_notice(&oversize)),
+                ("push-failure-notified", failure),
+            ] {
+                if let Err(error) = notify_manager(&settings, &store, key, &notice) {
+                    log(&format!("{key} notice failed: {error}"));
                 }
             }
             log_elapsed("git commit", phase);

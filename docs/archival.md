@@ -30,3 +30,15 @@ git
 - watcher archives daily and commits every 10 min; only `*.md`, so no artifact or binary is committed
     - `[archive] commit = false` disables commits
     - runs commands with a 30-second timeout
+
+# Git history (src/history.rs)
+- every 10 min the watcher calls `history::commit_and_push`
+  - private index `.git/amh.index` + `commit-tree`; shared index, hooks, and worktree are never used to build commits
+  - candidates: changed or new `*.md`, not ignored, not under `amh_views`, not removed from the shared index by someone
+  - files over 5 MB are skipped; main manager told once per change of the set (record `oversize-notified`)
+  - fetch origin; diverged => object-space merge, per-file `git merge-file --union` (logs are append-mostly); push; retry 3x
+  - push or fetch failure => main manager told once per distinct error (record `push-failure-notified`)
+- after commit or merge, local branch moves by compare-and-swap `update-ref`
+  - shared index entry moves only if it still equals the old commit's blob
+  - worktree file moves only if untouched; if edited, old->new is union-merged into it, so edits stay edits
+- finished task files (status `done`) move to `YYYYMM/` (month of last root-file change); reopening moves them back (record `month:NAME`)

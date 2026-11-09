@@ -174,7 +174,7 @@ impl Store {
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
     fn take_in_edits(&self, database: &Database) -> Result<(), String> {
         for (name, text) in database.tasks()? {
-            let Ok(file) = fs::read_to_string(self.root.join(&name)) else {
+            let Ok(file) = fs::read_to_string(self.path_of(database, &name)?) else {
                 continue;
             };
             let Some(last) = database.record(&format!("export:{name}"))? else {
@@ -225,8 +225,9 @@ impl Store {
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
     fn export(&self, database: &Database) -> Result<(), String> {
         for (name, text) in database.tasks()? {
-            if fs::read_to_string(self.root.join(&name)).ok().as_deref() != Some(&text) {
-                taskfile::write(&self.root.join(&name), &text)
+            let path = self.settle(database, &name, &text)?;
+            if fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+                taskfile::write(&path, &text)
                     .map_err(|error| format!("amh: cannot export {name}: {error}"))?;
             }
             let key = format!("export:{name}");
@@ -247,6 +248,54 @@ impl Store {
                 .map_err(|error| format!("amh: cannot export events: {error}"))?;
         }
         Ok(())
+    }
+
+    /// Where a task file lives now: its month folder once done, else the root.
+    fn path_of(&self, database: &Database, name: &str) -> Result<PathBuf, String> {
+        Ok(match database.record(&format!("month:{name}"))? {
+            Some(month) if !month.is_empty() => self.root.join(month).join(name),
+            _ => self.root.join(name),
+        })
+    }
+
+    /// Decide the file's home from its status and move it there, so the root holds only active tasks.
+    ///
+    /// A done task goes to the `YYYYMM` folder of the root file's last change, else of today; a reopened task returns to the root.
+    // 🧑 "when a task finishes, amh moves its file into its month folder ... so the root holds only active tasks"
+    fn settle(&self, database: &Database, name: &str, text: &str) -> Result<PathBuf, String> {
+        let key = format!("month:{name}");
+        let done = name != "TODO.md"
+            && text.contains("done")
+            && Task::parse(name, text).is_ok_and(|task| task.status() == "done");
+        let recorded = database.record(&key)?.filter(|month| !month.is_empty());
+        let (from, to) = match (done, recorded) {
+            (false, None) => return Ok(self.root.join(name)),
+            (false, Some(_)) => (self.path_of(database, name)?, self.root.join(name)),
+            (true, Some(_)) => return self.path_of(database, name),
+            (true, None) => {
+                let root_file = self.root.join(name);
+                let changed = fs::metadata(&root_file).and_then(|meta| meta.modified());
+                let month = chrono::DateTime::<chrono::Utc>::from(
+                    changed.unwrap_or_else(|_| std::time::SystemTime::now()),
+                )
+                .format("%Y%m")
+                .to_string();
+                let folder = self.root.join(&month);
+                fs::create_dir_all(&folder)
+                    .map_err(|error| format!("amh: cannot create {month}: {error}"))?;
+                database.set_record(&key, &month)?;
+                (root_file, folder.join(name))
+            }
+        };
+        if !done {
+            database.set_record(&key, "")?;
+        }
+        if from.is_file() && !to.exists() {
+            fs::rename(&from, &to).map_err(|error| format!("amh: cannot move {name}: {error}"))?;
+        } else if from.is_file() && fs::read(&from).ok() == fs::read(&to).ok() {
+            let _ = fs::remove_file(&from);
+        }
+        Ok(to)
     }
 
     pub fn refresh_exports(&self) -> Result<(), String> {
@@ -836,6 +885,41 @@ mod tests {
             None
         );
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_done_task_moves_to_its_month_folder_and_back_when_reopened()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("amh-month-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        taskfile::write(
+            &root.join("t.md"),
+            "---\nstatus: running\nrunat: omnigent://worker\n---\n\nbody\n",
+        )?;
+        taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
+        drop(store.lock()?);
+        let lock = store.lock()?;
+        let mut task = store.load("t.md")?;
+        crate::tasks::set_status(&mut task, "done", None)?;
+        store.save(&task)?;
+        drop(lock);
+        let month = chrono::Utc::now().format("%Y%m").to_string();
+        assert!(!root.join("t.md").exists() && root.join(&month).join("t.md").is_file());
+        drop(store.lock()?);
+        assert!(!root.join("t.md").exists(), "stays filed across exports");
+        let lock = store.lock()?;
+        let mut task = store.load("t.md")?;
+        crate::tasks::set_status(&mut task, "running", None)?;
+        store.save(&task)?;
+        drop(lock);
+        assert!(root.join("t.md").is_file() && !root.join(&month).join("t.md").exists());
+        fs::remove_dir_all(&root)?;
         Ok(())
     }
 

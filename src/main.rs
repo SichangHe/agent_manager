@@ -4,6 +4,7 @@
 mod actions;
 mod agents;
 mod archive;
+mod history;
 mod cli;
 mod database;
 mod decide;

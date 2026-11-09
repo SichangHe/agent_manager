@@ -4,7 +4,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 use chrono::{DateTime, Duration, Utc};
 use serde_json::Value;
@@ -164,116 +163,6 @@ fn event_id(event: &Value) -> Result<i64, String> {
         .ok_or_else(|| "amh: archived event has no integer ID".to_owned())
 }
 
-// 🧑 "Keep the md files in a git repo like we do now with work_logs, and automatically periodically commit all changes."
-/// Commit Markdown only, retaining staged changes to other files. The caller schedules this helper.
-pub fn commit_markdown(root: &Path) -> Result<bool, String> {
-    let output = git(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "*.md",
-        ],
-        None,
-    )?;
-    if !output.status.success() {
-        return Err(command_error(&output));
-    }
-    let paths = output.stdout;
-    if paths.is_empty() {
-        return Ok(false);
-    }
-    let untracked = git(
-        root,
-        &[
-            "ls-files",
-            "-z",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "*.md",
-        ],
-        None,
-    )?;
-    if !untracked.status.success() {
-        return Err(command_error(&untracked));
-    }
-    let diff = git(root, &["diff", "--quiet", "HEAD", "--", "*.md"], None)?;
-    match diff.status.code() {
-        Some(0) if untracked.stdout.is_empty() => return Ok(false),
-        Some(0 | 1) => {}
-        _ => return Err(command_error(&diff)),
-    }
-    if !untracked.stdout.is_empty() {
-        let added = git(
-            root,
-            &[
-                "add",
-                "--intent-to-add",
-                "--pathspec-from-file=-",
-                "--pathspec-file-nul",
-            ],
-            Some(&untracked.stdout),
-        )?;
-        if !added.status.success() {
-            return Err(command_error(&added));
-        }
-    }
-    let committed = git(
-        root,
-        &[
-            "commit",
-            "--only",
-            "-m",
-            "docs: record work logs",
-            "--pathspec-from-file=-",
-            "--pathspec-file-nul",
-        ],
-        Some(&paths),
-    )?;
-    if !committed.status.success() {
-        return Err(command_error(&committed));
-    }
-    Ok(true)
-}
-
-fn git(root: &Path, args: &[&str], input: Option<&[u8]>) -> Result<std::process::Output, String> {
-    let mut child = Command::new("timeout")
-        .args(["30s", "git", "-C"])
-        .arg(root)
-        .args(args)
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(error)?;
-    if let Some(input) = input {
-        child
-            .stdin
-            .take()
-            .ok_or("amh: git stdin unavailable")?
-            .write_all(input)
-            .map_err(error)?;
-    }
-    child.wait_with_output().map_err(error)
-}
-
-fn command_error(output: &std::process::Output) -> String {
-    format!(
-        "amh: work-log commit failed ({}): {}",
-        output.status,
-        String::from_utf8_lossy(&output.stderr).trim()
-    )
-}
-
 fn error(error: std::io::Error) -> String {
     format!("amh: archival: {error}")
 }
@@ -359,35 +248,6 @@ mod tests {
                 .map_err(error)?
                 .contains("complete")
         );
-        fs::remove_dir_all(root).map_err(error)
-    }
-
-    #[test]
-    fn git_commit_preserves_unrelated_staging() -> Result<(), String> {
-        let root = std::env::temp_dir().join(format!("amh-archive-git-{}", std::process::id()));
-        fs::create_dir_all(&root).map_err(error)?;
-        for args in [
-            vec!["init", "-q"],
-            vec!["config", "user.name", "Archive Test"],
-            vec!["config", "user.email", "archive@example.invalid"],
-        ] {
-            let output = git(&root, &args, None)?;
-            assert!(output.status.success(), "{}", command_error(&output));
-        }
-        fs::write(root.join("notes.md"), "old\n").map_err(error)?;
-        fs::write(root.join("code.txt"), "old\n").map_err(error)?;
-        for args in [vec!["add", "."], vec!["commit", "-qm", "initial"]] {
-            let output = git(&root, &args, None)?;
-            assert!(output.status.success(), "{}", command_error(&output));
-        }
-        fs::write(root.join("notes.md"), "new\n").map_err(error)?;
-        fs::write(root.join("new.md"), "new file\n").map_err(error)?;
-        fs::write(root.join("code.txt"), "staged\n").map_err(error)?;
-        assert!(git(&root, &["add", "code.txt"], None)?.status.success());
-        assert!(commit_markdown(&root)?);
-        let staged = git(&root, &["diff", "--cached", "--name-only"], None)?;
-        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "code.txt");
-        assert!(!commit_markdown(&root)?);
         fs::remove_dir_all(root).map_err(error)
     }
 }
