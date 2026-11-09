@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128", "sherpa-onnx"]
+# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128", "sherpa-onnx", "transformers>=5.13", "accelerate"]
 # [[tool.uv.index]]
 # name = "pytorch-cuda"
 # url = "https://download.pytorch.org/whl/cu128"
@@ -47,11 +47,17 @@ class Speech:
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is required for speech")
         self.model = os.environ.get("VOICE_STT_MODEL", "small.en")
+        # 🧑 "I think Whisper is garbage. It hallucinates a lot. Try to find other better... Open source."
+        self.engine = os.environ.get("VOICE_STT_ENGINE", "whisper")
+        if self.engine not in {"whisper", "qwen3"}:
+            raise ValueError("VOICE_STT_ENGINE must be whisper or qwen3")
         if self.kind == "tts":
             self.tts = KPipeline(
                 lang_code="a", repo_id="hexgrad/Kokoro-82M", device="cuda"
             )
             self.speak("Speech is ready. Please choose your conversation.")
+        elif self.engine == "qwen3":
+            self.load_qwen3()
         else:
             self.stt = WhisperModel(
                 self.model, device="cuda", compute_type="float16", cpu_threads=4
@@ -82,6 +88,29 @@ class Speech:
             subtype="PCM_16",
         )
         return output.getvalue()
+
+    def load_qwen3(self) -> None:
+        """Qwen3-ASR (Apache-2.0; `VOICE_STT_MODEL` is its HF id, e.g. `Qwen/Qwen3-ASR-0.6B-hf`), warmed; it has no silence rejection, so `transcribe_qwen3` gates it with Whisper's Silero VAD."""
+        from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+        self.processor = AutoProcessor.from_pretrained(self.model)
+        self.qwen = AutoModelForMultimodalLM.from_pretrained(self.model, dtype=torch.bfloat16, device_map="cuda")
+        self.transcribe_qwen3(np.zeros(16000, dtype=np.float32) + 1e-3, force=True)
+
+    def transcribe_qwen3(self, samples: np.ndarray, force: bool = False) -> tuple[str, float]:
+        """Return `(text, mean token logprob)` of the VAD-trimmed speech; `("", -9.0)` when VAD finds none."""
+        from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
+
+        stamps = get_speech_timestamps(samples, VadOptions())
+        if not stamps and not force:
+            return "", -9.0
+        speech = collect_chunks(samples, stamps)[0] if stamps else samples
+        inputs = self.processor.apply_transcription_request(audio=speech, language="English").to(self.qwen.device, self.qwen.dtype)
+        out = self.qwen.generate(**inputs, max_new_tokens=256, do_sample=False, output_scores=True, return_dict_in_generate=True)
+        ids = out.sequences[:, inputs["input_ids"].shape[1]:]
+        logprobs = self.qwen.compute_transition_scores(out.sequences, out.scores, normalize_logits=True)
+        text = self.processor.decode(ids, return_format="transcription_only")[0].strip()
+        return text, float(logprobs.mean()) if logprobs.numel() else -9.0
 
     def load_kws(self) -> None:
         """Keyword spotter for start-word clips; on only when `"kws": true` is in `~/.config/zulip-voice/settings.json` (reversible: set false and restart)."""
@@ -157,6 +186,10 @@ class Speech:
         samples = np.frombuffer(decoded.stdout, dtype=np.float32)
         if not samples.size or samples.size > MAX_AUDIO_S * 16000:
             return "Record between a fraction of a second and two minutes."
+        if self.engine == "qwen3":
+            text, avg_logprob = self.transcribe_qwen3(samples)
+            heard = self.spot(samples) if kws and self.kws else None
+            return {"text": text, "no_speech_prob": 0.0 if text else 1.0, "avg_logprob": avg_logprob, "kws": heard}
         segments, _ = self.stt.transcribe(
             samples,
             language="en",
