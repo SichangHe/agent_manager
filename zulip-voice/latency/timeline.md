@@ -11,9 +11,11 @@ sources, joined on the Zulip message id
   - round trip = human msg + first non-human msg after it (before the next human msg); human = `--human-id`
 - `amh log <topic>.md -n 5000`: events whose data mentions `zulip-<id>.txt`
   - `message queued`, `human mail received`, `message delivered` (gives session id)
+  - repeated events: first time kept as the mark; later ones listed as `later <kind> attempts: n at times` (json `attempts`)
 - omnigent server logs `latency {...}` JSON (grep by session id, only files modified since earliest msg)
-  - exact join if a record has `zulip_message_id == id`; else inferred: first `POST events` arrival within -2..+10 s of delivery
-  - shown as note (arrival, ack); not a segment, since amh logs `delivered` after the server acks
+  - `zulip_message_id == id` join (header `X-Amh-Zulip-Message-Id` > `X-Omnigent-Timing-Id`, integration in progress; field currently null): labelled `measured`, sets `server_arrival`/`server_ack` marks
+  - else guess: latest `POST events` arrival within `INFER_WINDOW_S` (-60..+2 s) of delivery; labelled `inferred, not measured`; note only, no marks
+  - not a segment, since amh logs `delivered` after the server acks
   - rotated logs lose old sessions: server note missing for old trips
 - relay journal: `tts id=proactive_<replyid>_<n> ... work=Nms`; audio ready = last chunk log time
 - phone `client.log`: phone clock never used; only relative span between lines for the reply (`bundle active_<reply>_`, `audio  start <reply>:`) and `send id=<id>`
@@ -22,6 +24,9 @@ segments
 - human_post>amh_queued, amh_queued>received, amh_received>delivered, delivered>reply_posted, reply>tts_ready, total
 - `delivered>reply_posted` = agent session time (model + tools + posting), includes server dispatch (~0.1 s)
 - summary flags worst segment by median and by p90
+
+probe section of `--summary`
+- `~/.local/state/zulip-voice/latency.jsonl`: last N synthetic voice probe records; median/p90/max per `*_ms` and relay field; not joined to round trips
 
 limits
 - reply = first non-human message; may not answer that message (agent can batch or reply later), inflating think time

@@ -11,6 +11,9 @@ from pathlib import Path
 HOME = Path.home()
 CHANNEL = "AMH"
 SERVER_LOGS = HOME / ".omnigent/logs/server"
+PROBE_LOG = HOME / ".local/state/zulip-voice/latency.jsonl"
+# Inferred server join: POST arrival within this many s of delivery (negative = before). Arrival precedes the delivered log.
+INFER_WINDOW_S = (-60, 2)
 CLIENT_LOG = HOME / ".local/state/zulip-voice/relay/client.log"
 # Segments in order: (name, from-mark, to-mark). Marks are server-clock epoch seconds.
 SEGMENTS = [
@@ -30,6 +33,7 @@ class Trip:
     marks: dict[str, float] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
     phone: list[str] = field(default_factory=list)
+    attempts: dict[str, list[float]] = field(default_factory=dict)  # later queued/received/delivered times
 
     def spans(self) -> dict[str, float | None]:
         m = self.marks
@@ -91,7 +95,10 @@ def amh_events(topic: str) -> list[dict]:
 
 
 def add_amh(t: Trip, evs: list[dict]) -> str | None:
-    """Fills queued/received/delivered marks; returns the session id of delivery."""
+    """Fills queued/received/delivered marks with the first occurrence; later ones go to `attempts`.
+
+    Returns the session id of the first delivery.
+    """
     tag = f"zulip-{t.msg_id}.txt"
     sid = None
     for e in evs:
@@ -100,7 +107,11 @@ def add_amh(t: Trip, evs: list[dict]) -> str | None:
             continue
         k = {"message queued": "queued", "human mail received": "received", "message delivered": "delivered"}.get(e["kind"])
         if k:
-            t.marks[k] = iso2epoch(e["time"])
+            ts = iso2epoch(e["time"])
+            if k in t.marks:
+                t.attempts.setdefault(k, []).append(ts)
+                continue
+            t.marks[k] = ts
             if k == "delivered":
                 sid = e["data"]["to"].rsplit("/", 1)[-1]
     return sid
@@ -122,25 +133,33 @@ def server_records(sids: set[str], t0: float) -> list[dict]:
 
 
 def add_server(t: Trip, sid: str, recs: list[dict]) -> None:
-    """Joins on `zulip_message_id` if the server logs it, else the first events POST near delivery (inferred)."""
+    """Joins on `zulip_message_id` if the server logs it (measured), else guesses (inferred, not measured).
+
+    The guess is the latest events POST arriving within `INFER_WINDOW_S` of delivery; it only adds a note, no marks.
+    """
     mine = [r for r in recs if r["session_id"] == sid]
     exact = {r["request_id"] for r in mine if str(r.get("zulip_message_id")) == str(t.msg_id)}
     d = t.marks.get("delivered")
     if exact:
-        rid, how = next(iter(exact)), "exact"
+        rid, how = next(iter(exact)), "measured"
     else:
         near = [r for r in mine if r["stage"] == "http.arrival" and r.get("method") == "POST"
-                and d is not None and -2 <= r["time_ns"] / 1e9 - d <= 10]
+                and d is not None and INFER_WINDOW_S[0] <= r["time_ns"] / 1e9 - d <= INFER_WINDOW_S[1]]
         if not near:
             t.notes.append("server: no records")
             return
-        rid, how = min(near, key=lambda r: r["time_ns"])["request_id"], "inferred"
+        rid, how = max(near, key=lambda r: r["time_ns"])["request_id"], "inferred, not measured"
     st = {r["stage"]: r["time_ns"] / 1e9 for r in mine if r["request_id"] == rid}
-    if "http.arrival" in st:
-        t.marks["server_arrival"] = st["http.arrival"]
-    t.marks["server_ack"] = st.get("runner.dispatch_ack") or st.get("http.response_headers") or d
-    t.notes.append(f"server join={how} req={rid[:8]} arrival>ack="
-                   f"{(t.marks['server_ack'] - st.get('http.arrival', t.marks['server_ack'])) * 1000:.0f}ms")
+    ack = st.get("runner.dispatch_ack") or st.get("http.response_headers")
+    arr = st.get("http.arrival")
+    if how == "measured":
+        if arr:
+            t.marks["server_arrival"] = arr
+        if ack:
+            t.marks["server_ack"] = ack
+    t.notes.append(f"server join={how} req={rid[:8]}"
+                   + (f" arrival>ack={(ack - arr) * 1000:.0f}ms" if arr and ack else "")
+                   + (f" arrival-delivered={arr - d:+.1f}s" if arr and d else ""))
 
 
 def add_tts(trips: list[Trip]) -> None:
@@ -204,11 +223,14 @@ def show(t: Trip) -> None:
             print(f"  {fmt_abs(t.marks[k])}  {k}")
     for n, v in t.spans().items():
         print(f"  {n:26} {'-' if v is None else f'{v:7.2f}s'}")
+    for k, v in t.attempts.items():
+        print(f"  later {k} attempts: {len(v)} at " + ", ".join(fmt_abs(x) for x in v))
     for line in t.notes:
         print(f"  note: {line}")
     for line in t.phone:
         print(f"  phone(relative only): {line}")
-    print("JSON " + json.dumps({"msg_id": t.msg_id, "marks": t.marks, "spans_s": t.spans(), "notes": t.notes}))
+    print("JSON " + json.dumps({"msg_id": t.msg_id, "marks": t.marks, "spans_s": t.spans(), "attempts": t.attempts,
+                       "notes": t.notes}))
 
 
 def summary(trips: list[Trip]) -> None:
@@ -225,6 +247,27 @@ def summary(trips: list[Trip]) -> None:
     worst = max(segs, key=lambda n: segs[n][1])
     print(f"worst segment by median: {worst} ({segs[worst][1]:.2f}s); by p90: {max(segs, key=lambda n: segs[n][2])}")
     print("JSON " + json.dumps({n: {"n": c, "median_s": m, "p90_s": p} for n, (c, m, p) in rows.items()}))
+
+
+def probe_summary(path: Path, n: int) -> None:
+    """Separate section: last `n` voice probe records (synthetic probe, not Zulip round trips); ms fields."""
+    if not path.exists():
+        print("probe: no log")
+        return
+    recs = [json.loads(l) for l in path.read_text().splitlines() if l.startswith("{")][-n:]
+    print(f"probe ({len(recs)} records from {path.name}; synthetic, separate from round trips); ms")
+    print(f"  {'field':32} {'n':>3} {'median':>7} {'p90':>7} {'max':>7}")
+    out = {}
+    flat = [{**{k: v for k, v in r.items() if k.endswith("_ms")},
+             **{f"{p}.{k}": v for p in ("sw_relay", "play_relay") for k, v in (r.get(p) or {}).items()}} for r in recs]
+    for k in dict.fromkeys(k for r in flat for k in r):
+        v = sorted(x for r in flat if isinstance(x := r.get(k), (int, float)))
+        if v:
+            out[k] = {"n": len(v), "median": statistics.median(v), "p90": v[min(len(v) - 1, int(0.9 * len(v)))], "max": v[-1]}
+            print(f"  {k:32} {len(v):3} {out[k]['median']:7.0f} {out[k]['p90']:7.0f} {v[-1]:7.0f}")
+    bad = sum(not r.get("play_bytes_ok", True) for r in recs)
+    print(f"  play_bytes_ok failures: {bad}")
+    print("JSON " + json.dumps({"probe": out, "play_bytes_failures": bad}))
 
 
 def main() -> None:
@@ -252,6 +295,7 @@ def main() -> None:
     build(trips, topic)
     if a.summary:
         summary(trips)
+        probe_summary(PROBE_LOG, a.summary)
     else:
         for t in trips:
             show(t)
