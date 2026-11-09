@@ -11,11 +11,13 @@ const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
 const MIN_LEVEL = 0.008;     // lowered from 0.012 and the margin from 3x to 2.5x: a false trigger is harmless now (the start word gates everything)
 const NOISE_MARGIN = 2.5;
+const BACKOFF_MARGIN = 5;   // after repeated empty results the room is noisy: only clearly louder speech may start a clip
 const GRACE_MS = 10000;   // the open microphone keeps iOS in its quieter play-and-record mode, so release it soon after dictation
 const BARGE_MS = 180;
 const LISTEN_PREROLL_MS = 1200;
 const EARCON_NOTE_S = 0.14;
 const EARCON_GAIN = 0.5;
+const BACKOFF_BARGE_MS = 300;
 const REPLY_BARGE_MS = 100;        // while a spoken reply is open, a short word like "over" must still become a clip
 const REPLY_MIN_SPEECH_MS = 100;
 
@@ -62,7 +64,7 @@ function resampleToWav(frames, fromHz) {
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
-  let beepCtx = null, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
+  let beepCtx = null, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -81,7 +83,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
     const level = Math.sqrt(sum / frame.length);
-    const speaking = level > Math.max(MIN_LEVEL, noise * NOISE_MARGIN);
+    const speaking = level > Math.max(MIN_LEVEL, noise * (backoff ? BACKOFF_MARGIN : NOISE_MARGIN));
     if (!speaking) noise = noise * 0.98 + level * 0.02;
     onLevel?.(Math.min(1, level * 8));
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
@@ -89,7 +91,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       if (!speaking && sustainMs >= 80 && sustainMs < BARGE_MS) log('mic', `near miss: speech ${Math.round(sustainMs)}ms < ${BARGE_MS}ms (level ${level.toFixed(3)}, floor ${noise.toFixed(3)})`);
       sustainMs = speaking ? sustainMs + ms : 0;
       preroll.push(frame); while (preroll.length * ms > LISTEN_PREROLL_MS) preroll.shift();   // ring buffer: speech before the decision is kept
-      if (sustainMs < (replyMode ? REPLY_BARGE_MS : BARGE_MS)) return;
+      if (sustainMs < (replyMode ? REPLY_BARGE_MS : backoff ? BACKOFF_BARGE_MS : BARGE_MS)) return;
       sustainMs = 0; log('mic', `barge-in: speech sustained ${replyMode ? REPLY_BARGE_MS : BARGE_MS}ms`); onBarge?.();
       frames = preroll; preroll = []; clipMs = frames.length * ms; speechMs = replyMode ? REPLY_BARGE_MS : BARGE_MS; silentMs = 0;
       return;
@@ -188,6 +190,8 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     muteFor(ms) { earconUntilMs = performance.now() + ms + 250; },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
     setReplyMode(on) { replyMode = on; },
+    /** Noisy-room mode: higher level and longer duration needed to start a start-word clip. */
+    setBackoff(on) { backoff = on; },
     active: () => capturing,
   };
 }

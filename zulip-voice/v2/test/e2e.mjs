@@ -1258,6 +1258,40 @@ scenarios.voiceSwitchAbbrev = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.directiveWithFooter = async ({srv}) => {
+  // Exact amh content: the [switch:] line is followed by a footer block; the message is already unread when the page loads (backlog).
+  await L.wipeTasks();
+  await L.agentSays('vl_meeting_work', '[vl_meeting_work] Meeting\n\nMeeting agent is here.');
+  await L.agentSays('human_mgr', '[human_mgr] Zulip message\n\nNext: vl_meeting_work, to discuss research directions for your advisors.\n\n[switch: vl_meeting_work]\n\npending item deleted:\n- Switch me to the next agent I should talk to.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'human_mgr', 'voice2-autoplay': true}});
+  try {
+    await L.waitFor(c.page, 'message', () => document.querySelector('.msg.agent'));
+    await c.page.locator('#feed').tap();
+    await L.waitFor(c.page, 'switched by the directive', () => window.__voice.current() === 'vl_meeting_work', 40000);
+    assert.ok(!(await c.page.evaluate(() => document.querySelector('#feed').innerText)).includes('[switch'), 'directive line hidden');
+  } finally { await c.close(); }
+};
+
+scenarios.noisyRoomUploads = async () => {
+  // Noise bursts every ~2 s for a minute: uploads stay under the per-minute cap and the app backs off.
+  await L.wipeTasks();
+  const {spawnSync} = await import('node:child_process');
+  const bursts = Array.from({length: 40}, (_, i) => `anoisesrc=color=pink:amplitude=0.5,atrim=0:0.6,adelay=${i * 2000}|${i * 2000}`);
+  const noise = spawnSync('ffmpeg', ['-nostdin', '-v', 'error', '-f', 'lavfi', '-i', 'anoisesrc=color=pink:amplitude=0.45:duration=80,volume=enable=\'lt(mod(t,2),0.6)\':volume=1,volume=enable=\'gte(mod(t,2),0.6)\':volume=0.01', '-ar', '24000', '-ac', '1', '-f', 'wav', 'pipe:1'], {maxBuffer: 1e9}).stdout;
+  void bursts;
+  const srv2 = await L.serve(undefined, {'/__noise2.wav': noise});
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 12}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const c = await L.openClient({url: srv2.url, mic: '/__noise2.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  try {
+    await L.waitFor(c.page, 'message', () => document.querySelector('.msg.agent'));
+    await c.page.locator('#listen').tap(); await L.sleep(1000); await c.page.locator('#listen').tap();   // off then on: a tap arms the microphone
+    await L.sleep(70000);
+    const log = await c.page.evaluate(() => window.__voice.log.text());
+    const uploads = (log.match(/http +POST user_uploads/g) || []).length;
+    return {uploadsIn70s: uploads, droppedByCap: (log.match(/dropped a clip without uploading/g) || []).length, backoffs: (log.match(/noisy room/g) || []).length, speechDetected: (log.match(/speech detected/g) || []).length};
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

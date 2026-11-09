@@ -111,6 +111,8 @@ const player = createPlayer({
   onItemEnd(item) {
     if (!item.last) return;
     store.set('voice2-pos', null); if (pausedItem?.msgId === item.msgId) pausedItem = null;
+    const played = model.find(item.msgId), wasUnread = played && !played.flags?.includes('read');
+    if (wasUnread && !pendingSwitch && parsed(played).switchTo) pendingSwitch = {to: parsed(played).switchTo, msgId: item.msgId};   // also for messages played from the backlog after a reload
     markRead([item.msgId]);
     if (pendingSwitch?.msgId === item.msgId) runSwitch();
   },
@@ -724,7 +726,7 @@ function onBarge() {
   if (dict) return;
   const st = player.position().status;
   log('vc', `speech detected while ${st}${vc ? ' (session open)' : ''}`);
-  utterancePending = true; clearTimeout(utteranceTimer); utteranceTimer = setTimeout(utteranceDone, 15000);
+  utterancePending = true; clearTimeout(utteranceTimer); utteranceTimer = setTimeout(utteranceDone, 6000);
   if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
   setVcState('heard', 'hearing you');
 }
@@ -733,7 +735,19 @@ async function onCommandClip(blob, meta = {}) {
   try { await handleCommandClip(blob, meta); } finally { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); }
 }
 const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
+const UPLOADS_PER_MIN = 8, EMPTY_RUN_BACKOFF = 3, BACKOFF_MS = 60000;
+let startWordUploads = [], emptyRun = 0, backoffUntil = 0;
+/** Every start-word clip costs a Zulip upload plus messages: cap them, and back off in a noisy room instead of exhausting the rate limit. */
+function noteStartResult(useful) {
+  emptyRun = useful ? 0 : emptyRun + 1;
+  if (emptyRun >= EMPTY_RUN_BACKOFF && Date.now() > backoffUntil) { backoffUntil = Date.now() + BACKOFF_MS; recorder.setBackoff(true); log('vc', `noisy room: ${emptyRun} useless clips in a row, stricter detection for 60 s`); setTimeout(() => { recorder.setBackoff(false); emptyRun = 0; }, BACKOFF_MS); }
+}
 async function handleCommandClip(blob, meta) {
+  if (!vc && !pendingChoice) {
+    startWordUploads = startWordUploads.filter(t => Date.now() - t < 60000);
+    if (startWordUploads.length >= UPLOADS_PER_MIN || zulip.rateLimitedForMs() > 0) { log('vc', `dropped a clip without uploading (${startWordUploads.length} uploads this minute${zulip.rateLimitedForMs() ? ', Zulip rate limit' : ''})`); recorder.setReplyMode(false); vcIdle(); return; }
+    startWordUploads.push(Date.now());
+  }
   const listening = !!vc || (!!pendingChoice && Date.now() < pendingChoice.until);
   // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
   const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening);   // start-word clips also get keyword spotting on the server
@@ -743,7 +757,7 @@ async function handleCommandClip(blob, meta) {
   if (!listening && normalize(heard) && ((meta.speechMs ?? 1e9) < START_MIN_SPEECH_MS || r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB)) {
     log('vc', 'rejected as noise: too short or low confidence'); recorder.setReplyMode(false); resumeBarge(); vcIdle(); return;
   }
-  if (!normalize(heard)) { if (!vc) { recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
+  if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
   if (pendingChoice && Date.now() < pendingChoice.until) {   // while a switch question is open, answers are matched first, even inside or after "pause"
     const w = normalize(heard).replace(/^((pause|paws|pulse|pose) )+/, '');
     const NUMBERS = ['one first 1', 'two second 2', 'three third 3'];
@@ -758,11 +772,12 @@ async function handleCommandClip(blob, meta) {
   if (!vc) {
     // With server keyword spotting on (r.kws is a list): it must have heard PAUSE, and Whisper must confirm the standalone word, so "paused"/"paws" never open a session.
     const kwsOn = Array.isArray(r.kws) && Date.now() - lastReplyEndMs >= FOLLOW_UP_GRACE_MS;   // a follow-up right after a send needs no start word
-    if (kwsOn && !r.kws.includes('PAUSE')) { log('vc', `ignored: "${heard}" (keyword spotter did not hear pause)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
+    if (kwsOn && !r.kws.includes('PAUSE')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear pause)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     let rest = afterStartWord(heard);
     if (kwsOn && rest !== null && !/^(pause|pulse|pulls|polls|pawz)\b/i.test(normalize(heard))) { log('vc', `ignored: "${heard}" (transcript is not the word pause)`); rest = null; resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
-    if (rest === null) { resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
+    if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
+    noteStartResult(true);
     openSession(rest);
     return;
   }

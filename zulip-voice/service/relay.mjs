@@ -352,7 +352,10 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
       for (const [owner, prefix] of [[api, 'voice-'], [humanApi, 'dictation-']]) {
         if (!owner) continue;
         const {attachments} = await owner.call('GET', 'attachments');
-        for (const a of attachments) if (a.name.startsWith(prefix) && now() - a.create_time * 1000 > (prefix === 'voice-' ? ttlMs : orphanTtlMs) && await owner.call('DELETE', 'attachments/' + a.id).then(() => true, () => false)) u++;
+        for (const a of attachments) {
+          if (u >= MAX_DELETES_PER_SWEEP) break;   // the human key is shared with the phone: never burn its rate limit on cleanup
+          if (a.name.startsWith(prefix) && now() - a.create_time * 1000 > (prefix === 'voice-' ? ttlMs : orphanTtlMs) && await owner.call('DELETE', 'attachments/' + a.id).then(() => true, () => false)) u++;
+        }
       }
       if (n || u) console.log(`swept ${n} orphan messages and ${u} uploads`);
     },
