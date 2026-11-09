@@ -1,0 +1,11 @@
+/home/sichangheagent/.cache/uv/environments-v2/gen-8735da1ff3e8db8d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/gen-8735da1ff3e8db8d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+af_heart done
+am_adam done
+am_michael done
+af_bella done
+bf_emma done
+bm_george done
+af_sarah done
