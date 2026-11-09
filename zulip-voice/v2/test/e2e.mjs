@@ -1292,6 +1292,52 @@ scenarios.noisyRoomUploads = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.tapToPause = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'banner', () => document.querySelector('#banner').innerText.includes('Tap to listen'));
+    await p.locator('#banner').tap();
+    await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing');
+    await p.locator('.s.now').tap();            // tap the playing sentence: pauses
+    await L.waitFor(p, 'paused', () => window.__voice.player.snapshot().status === 'paused', 3000);
+    assert.ok(await p.evaluate(() => document.querySelector('#tap-flash').classList.contains('show')), 'visual feedback');
+    const before = await p.evaluate(() => window.__voice.player.currentTime());
+    await p.locator('#feed').tap({position: {x: 4, y: 300}});   // empty space: resumes in place
+    await L.waitFor(p, 'resumed', () => window.__voice.player.snapshot().status === 'playing', 5000);
+    assert.ok(await p.evaluate(t => window.__voice.player.currentTime() >= t - 0.3, before), 'resumed in place');
+    // media session: the lock screen / headphone handlers drive the same controls
+    const ms = await p.evaluate(async () => { const ok = 'mediaSession' in navigator; return {ok, title: ok ? navigator.mediaSession.metadata?.title : null, state: ok ? navigator.mediaSession.playbackState : null}; });
+    if (ms.ok) assert.ok(ms.title && ms.state === 'playing', JSON.stringify(ms));
+    return {mediaSession: ms.ok};
+  } finally { await c.close(); }
+};
+
+scenarios.directiveFiresOnce = async ({srv}) => {
+  await L.wipeTasks();
+  await L.agentSays('beta', '[beta] B\n\nBeta agent here.');
+  const dirId = await L.agentSays('alpha', '[alpha] Handoff\n\nPassing you to beta now.\n\n[switch: beta]');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('#feed').tap();
+    await L.waitFor(p, 'switched to beta by the directive', () => window.__voice.current() === 'beta', 40000);
+    assert.ok(await L.serverRead(dirId), 'directive message marked read');
+    await L.waitFor(p, 'quiet on beta', () => window.__voice.player.snapshot().status === 'idle' && !document.querySelector('.msg.unread'), 40000);
+    // switch back by hand: the read directive must not replay or switch again
+    await p.locator('#find').tap(); await p.locator('#topics li', {hasText: 'alpha'}).tap();
+    await L.waitFor(p, 'on alpha', () => window.__voice.current() === 'alpha', 10000);
+    await L.sleep(8000);
+    assert.equal(await p.evaluate(() => window.__voice.current()), 'alpha', 'no second switch');
+    assert.equal((await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => new RegExp('audio\\s+start ' + 0 + '').test(l) && false).length, 0);
+    const starts = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio\s+start /.test(l) && l.includes(String(dirId)));
+    assert.equal(starts.length, 1, 'directive message played once: ' + starts.length);
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

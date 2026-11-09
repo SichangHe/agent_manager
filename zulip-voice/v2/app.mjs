@@ -98,6 +98,11 @@ let autoplay = store.get('voice2-autoplay', true);
 let rate = store.get('voice2-rate', 1);
 let follow = true, nowMsgId = null, nowIdx = -1, hasEarlier = false, voiceState = {ok: null, text: 'checking'};
 let pendingSwitch = null;
+/** Directive messages already acted on (persisted): each `[switch:]` fires at most once ever, so returning to the topic never replays it. */
+const actedKey = 'voice2-acted';
+const acted = new Set(store.get(actedKey, []));
+const hasActed = id => id !== null && acted.has(id);
+function markActed(id) { if (id === null) return; acted.add(id); store.set(actedKey, [...acted].slice(-400)); }
 const locals = new Map();
 const els = new Map();
 const feed = $('feed');
@@ -107,16 +112,16 @@ if (cache) { model.restore(cache); current ??= cache.current; }
 
 const player = createPlayer({
   log, voice,
-  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(); },
+  onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(item); },
   onItemEnd(item) {
     if (!item.last) return;
     store.set('voice2-pos', null); if (pausedItem?.msgId === item.msgId) pausedItem = null;
     const played = model.find(item.msgId), wasUnread = played && !played.flags?.includes('read');
-    if (wasUnread && !pendingSwitch && parsed(played).switchTo) pendingSwitch = {to: parsed(played).switchTo, msgId: item.msgId};   // also for messages played from the backlog after a reload
+    if (wasUnread && !pendingSwitch && parsed(played).switchTo && !hasActed(item.msgId)) pendingSwitch = {to: parsed(played).switchTo, msgId: item.msgId};   // also for messages played from the backlog after a reload
     markRead([item.msgId]);
     if (pendingSwitch?.msgId === item.msgId) runSwitch();
   },
-  onIdle() { store.set('voice2-pos', null); nowMsgId = null; highlight(); $('jump').hidden = true; if (pendingSwitch) runSwitch(); maybeAutoplay(); },
+  onIdle() { store.set('voice2-pos', null); nowMsgId = null; highlight(); $('jump').hidden = true; if (pendingSwitch && (pendingSwitch.msgId === null || model.find(pendingSwitch.msgId)?.flags?.includes('read'))) runSwitch(); else if (pendingSwitch) pendingSwitch = null; /* an unplayed message's directive does not fire */ maybeAutoplay(); },
   onStatus: renderTransport,
 });
 player.setRate(rate);
@@ -306,7 +311,7 @@ const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTi
 function onNewAgentMessage(m) {
   const items = itemsOf(m);
   const p = parsed(m);
-  if (p.switchTo) pendingSwitch = {to: p.switchTo, msgId: items.length ? m.id : null};
+  if (p.switchTo && !hasActed(m.id) && !m.flags?.includes('read')) pendingSwitch = {to: p.switchTo, msgId: items.length ? m.id : null, sourceId: m.id};
   if (!items.length) markRead([m.id]);
   else if (userSpeaking()) { /* stays unread; read after the user finishes */ }
   else if (autoplay || player.position().status !== 'idle') {
@@ -420,6 +425,7 @@ function togglePlay() {
 
 function renderTransport({status, error}) {
   $('play').dataset.state = status;
+  try { navigator.mediaSession.playbackState = status === 'playing' || status === 'loading' ? 'playing' : status === 'paused' ? 'paused' : 'none'; } catch { /* unsupported */ }
   $('play').setAttribute('aria-label', status === 'playing' ? 'Pause' : 'Play');
   if (status === 'error') showBanner(`Waiting for audio (${error}). Retrying by itself…`, 'warn', () => player.retry());
   else if (status === 'blocked') showBanner('Tap to resume audio', 'tap', () => player.unlock());
@@ -427,13 +433,13 @@ function renderTransport({status, error}) {
   $('dock').classList.toggle('min', status === 'idle' && scrolledAway);
 }
 
-function setMediaSession() {
+/** Lock screen, Control Center and headphone buttons: metadata names the agent and message; play/pause/next/previous map to the app's own controls. */
+function setMediaSession(item) {
   if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({title: current ?? 'Voice', artist: 'Agent'});
-  navigator.mediaSession.setActionHandler('play', () => togglePlay());
-  navigator.mediaSession.setActionHandler('pause', () => player.pause());
-  navigator.mediaSession.setActionHandler('nexttrack', () => jump(1));
-  navigator.mediaSession.setActionHandler('previoustrack', () => jump(-1));
+  const m = item ? model.find(item.msgId) : null, title = m ? (parsed(m).title.replace(/^\[[^\]]*\]\s*/, '') || current) : current;
+  navigator.mediaSession.metadata = new MediaMetadata({title: title ?? 'Voice', artist: current ?? 'Agent', album: 'Zulip voice'});
+  const handlers = {play: () => { player.unlock(); if (player.position().status === 'paused') resumeAfterPause(); else togglePlay(); }, pause: () => player.pause(), nexttrack: () => jump(1, false, true), previoustrack: () => jump(-1, false, true), seekforward: () => jump(1), seekbackward: () => jump(-1)};
+  for (const [name, fn] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(name, fn); } catch { /* unsupported action */ } }
 }
 
 // ---- read flags ----
@@ -526,8 +532,11 @@ async function loadTopicUntilLoaded(topic) {
 }
 
 function runSwitch() {
-  const {to} = pendingSwitch;
+  const {to, sourceId, msgId} = pendingSwitch;
   pendingSwitch = null;
+  const id = msgId ?? sourceId ?? null;
+  if (hasActed(id)) return;
+  if (id !== null) { markRead([id]); markActed(id); }   // read first, then act: the message is never unread when the switch happens
   const target = model.hasTopic(to) ? to : null;
   if (!target) return toast(`Agent “${to}” not found`);
   const from = current;
@@ -1036,12 +1045,18 @@ feed.addEventListener('scroll', () => {
   }, 700);
 }, {passive: true});
 $('jump').onclick = () => { setFollow(true); scrollToNow(true); };
+/** Tapping the feed: while audio plays, a tap on empty space or on the playing sentence pauses (another sentence seeks); while paused, a tap on empty space resumes and a tap on a sentence reads from there; idle, a tap on a message reads it. */
+function flash(text) { const el = $('tap-flash'); el.textContent = text; el.classList.remove('show'); void el.offsetWidth; el.classList.add('show'); }
 feed.addEventListener('click', event => {
+  if (event.target.closest('a, button, pre, .att, .footer') || String(getSelection()).length) return;
+  const status = player.position().status;
   const node = event.target.closest('.msg.agent');
-  if (!node || event.target.closest('a')) return;
-  const m = model.messages(current).find(x => x.id === +node.dataset.id);
   const span = event.target.closest('.s');
-  playFrom(m, span ? +span.dataset.from : 0);
+  const other = span && node && !span.classList.contains('now');   // a different sentence still seeks
+  if ((status === 'playing' || status === 'loading') && !other) { player.unlock(); player.pause(); flash('❚❚'); return; }
+  if (span && node) { const m = model.messages(current).find(x => x.id === +node.dataset.id); playFrom(m, +span.dataset.from); return; }
+  if (status === 'paused') { player.unlock(); resumeAfterPause(); flash('▶'); return; }
+  if (node) { const m = model.messages(current).find(x => x.id === +node.dataset.id); playFrom(m, 0); }
 });
 // iOS only treats touchend/click as audio-unlocking gestures (not pointerdown); autoplay starts after the tap's own handlers ran.
 for (const type of ['pointerup', 'touchend', 'click']) addEventListener(type, e => { if (e.target.closest?.('#listen')) return; if (!player.isUnlocked()) { player.unlock(); setTimeout(maybeAutoplay); } if (voiceControl && !recorder.active() && !voiceListening) setVoiceControl(true); }, {capture: true});
