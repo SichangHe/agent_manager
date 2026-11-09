@@ -236,10 +236,7 @@ impl Store {
         }
         let mut text =
             "# AMH events\n\n(authored by agents unless marked 🧑)\n\n```json\n".to_owned();
-        for event in database.events()? {
-            text.push_str(&event.to_string());
-            text.push('\n');
-        }
+        text.push_str(&database.event_lines()?);
         text.push_str("```\n");
         let folder = self.root.join("amh_views");
         fs::create_dir_all(&folder)

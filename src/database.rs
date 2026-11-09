@@ -342,6 +342,26 @@ impl Database {
         Ok(())
     }
 
+    /// Render the event view directly from stored JSON without rebuilding each event as a Rust value.
+    pub fn event_lines(&self) -> Result<String, String> {
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT json_object('actor', actor, 'data', json(data), 'id', id,
+                'kind', kind, 'subject', subject, 'time', time) FROM events ORDER BY id",
+            )
+            .map_err(error)?;
+        let rows = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(error)?;
+        let mut text = String::new();
+        for row in rows {
+            text.push_str(&row.map_err(error)?);
+            text.push('\n');
+        }
+        Ok(text)
+    }
+
     pub fn events(&self) -> Result<Vec<Value>, String> {
         let mut query = self
             .0
@@ -490,6 +510,24 @@ mod tests {
         assert_eq!(db.pending_messages("agent")?.len(), 2);
         drop(db);
         std::fs::remove_dir_all(folder)?;
+        Ok(())
+    }
+
+    #[test]
+    fn event_view_preserves_json_values_and_order() -> Result<(), Box<dyn std::error::Error>> {
+        let mut db = Database::open(Path::new(":memory:"))?;
+        let events = [
+            serde_json::json!({"time":"now", "actor":"agent\n🧑", "kind":"test", "subject":"quotes\"\\", "data":{"array":[null,true,42,1.25],"text":"line\n\t中文","nested":{"a":1}}}),
+            serde_json::json!({"time":"later", "actor":"agent", "kind":"test", "subject":"second", "data":null}),
+        ];
+        db.commit(&[], &events)?;
+        let rendered = db.event_lines()?;
+        let values = rendered
+            .lines()
+            .map(serde_json::from_str::<Value>)
+            .collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(values, db.events()?);
+        assert!(rendered.ends_with('\n'));
         Ok(())
     }
 

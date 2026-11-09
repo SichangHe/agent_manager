@@ -1374,6 +1374,7 @@ pub fn run() -> u8 {
     let mut last_zulip_cleanup: Option<Instant> = None;
     let mut last_commit: Option<Instant> = None;
     let mut last_poll: Option<Instant> = None;
+    let mut last_state_profile: Option<Instant> = None;
     // Only one watcher may run: request notifications are read and sent without the amh lock, so a second watcher would send them twice.
     let _single = match watcher_lock(&settings::state_dir()) {
         Ok(lock) => lock,
@@ -1453,7 +1454,9 @@ pub fn run() -> u8 {
             .and_then(|(_lock, timing)| {
                 let computing = Instant::now();
                 let result = crate::actions::request_effects(&store);
-                if phase.elapsed() >= Duration::from_secs(1) {
+                if phase.elapsed() >= Duration::from_secs(1)
+                    || last_state_profile.is_none_or(|at| at.elapsed() >= Duration::from_secs(30)) {
+                    last_state_profile = Some(Instant::now());
                     log(&format!("request state timing: acquire_ms={:.3} import_ms={:.3} export_ms={:.3} dependencies_ms={:.3}",
                         timing.acquire_ms, timing.import_ms, timing.export_ms,
                         computing.elapsed().as_secs_f64() * 1000.0));

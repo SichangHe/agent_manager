@@ -33,12 +33,14 @@ correlation
 - watcher diagnostic log reports phases taking at least one second
     - archival, Git, IMAP, Zulip intake, request notifications, message delivery, compression, outbox, scheduled jobs and cleanup
     - durations expose serial work that delays the next nominal five-second poll
-- slow request-state phases also log actual Rust subphase timings
+- request-state phases log actual Rust subphase timings when slow or every 30 seconds
     - `acquire_ms`: lock-file setup and lock acquisition, including waiting
     - `import_ms`: lock-owner metadata, database setup/migration and Markdown edit import
     - `export_ms`: repair/regeneration of task and event Markdown exports
     - `dependencies_ms`: request synchronization and dependency release, while retaining the lock
     - failed lock preparation retains existing errors without a timing breakdown
+- event export uses SQLite JSON rendering instead of reconstructing every event as a Rust JSON value
+    - retains all rows and ordering, full export comparison/repair, and external-edit import under the existing lock
 - IMAP intake owns its connections on one separate thread
     - measured serial intake took 25.5 seconds before Zulip pickup
     - existing receipt locks, deduplication, retries and database wakeups are retained
