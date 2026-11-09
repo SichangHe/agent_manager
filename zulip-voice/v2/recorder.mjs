@@ -202,5 +202,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     /** Noisy-room mode: higher level and longer duration needed to start a start-word clip. */
     setBackoff(on) { backoff = on; },
     active: () => capturing,
+    /** True while the microphone stream is open (dictation or voice control). */
+    micOpen: () => !!ctx,
   };
 }

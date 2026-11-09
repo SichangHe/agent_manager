@@ -287,7 +287,7 @@ scenarios.clipDeletedRecovers = async ({srv}) => {
   const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
   try {
     const id = await L.agentSays('alpha', '[alpha] Victim\n\nThis clip will lose its upload before it plays.');
-    await L.waitFor(c.page, 'prepared clip known', () => window.__voice.voice.preparedCount() > 0 && document.querySelector('.msg.agent'), 20000);
+    await L.waitFor(c.page, 'prepared clip known', mid => window.__voice.voice.preparedEntries().some(e => e.messageId === mid && e.loudUri) && document.querySelector('.msg.agent'), 30000, id);
     const att = (await L.bot('GET', 'attachments')).attachments.filter(a => a.name.startsWith('voice-proactive_' + id));
     assert.ok(att.length, 'found the prepared upload');
     for (const a of att) await L.bot('DELETE', 'attachments/' + a.id);
@@ -1370,6 +1370,59 @@ scenarios.voiceSendNoWait = async () => {
       assert.equal(got.length, want, `exactly ${want} message(s): ` + JSON.stringify(got));
       assert.match(got.at(-1), /deploy/i); assert.doesNotMatch(got.at(-1), /kangaroo/i, 'end word stripped: ' + JSON.stringify(got));
     }
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.outboxSurvivesReload = async () => {
+  // A voice send queued while the network is blocked survives a page reload and is sent exactly once afterwards.
+  await L.wipeTasks();
+  const sp = await L.speechWav('Deploy the build to staging now.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([sp.subarray(at + 8), Buffer.alloc(48000 * 30)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__ob.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__ob.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  const mine = async () => (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content);
+  try {
+    await L.agentSays('alpha', '[alpha] A\n\nSeed message.');
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    await p.locator('#mic').tap();
+    await L.waitFor(p, 'recording', () => document.querySelector('#composer').classList.contains('rec'), 8000);
+    await L.sleep(4500);
+    await p.route(/\/api\/v1\//, r => r.abort('connectionfailed'));
+    await p.locator('#send').tap();
+    await L.waitFor(p, 'queued bubble', () => document.querySelector('.msg.mine'), 3000);
+    await L.sleep(2500);   // the outbox is saved shortly after the state changes
+    assert.ok(await p.evaluate(() => (JSON.parse(localStorage.getItem('voice2-outbox') || '[]')).length >= 1), 'outbox saved');
+    await p.unroute(/\/api\/v1\//);
+    await p.reload();
+    let got = [];
+    for (let i = 0; i < 40; i++) { got = await mine(); if (got.length) break; await L.sleep(1500); }
+    await L.sleep(4000); got = await mine();
+    assert.equal(got.length, 1, 'exactly one message after the reload: ' + JSON.stringify(got));
+    assert.match(got[0], /deploy/i);
+    assert.equal(await p.evaluate(() => (JSON.parse(localStorage.getItem('voice2-outbox') || '[]')).length), 0, 'outbox cleared');
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.loudVariant = async () => {
+  // Normal rendering with the microphone closed, the loud twin once voice control opens it; no mix-up inside one item.
+  await L.wipeTasks();
+  const sp = await L.speechWav('Quiet room.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([Buffer.alloc(48000 * 60)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__silent.wav': Buffer.concat([head, data])});
+  const m1 = await L.agentSays('alpha', '[alpha] One\n\nFirst message for the normal rendering.');
+  const c = await L.openClient({url: srv2.url, mic: '/__silent.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'prepared', id => window.__voice.voice.preparedEntries().some(e => e.messageId === id && e.loudUri), 30000, m1);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'normal played', () => /clip \d+ bundle \S+ normal/.test(window.__voice.log.text()), 20000);
+    await L.waitFor(p, 'idle', () => window.__voice.player.snapshot().status === 'idle', 20000);
+    await p.locator('#listen').tap();
+    await L.waitFor(p, 'mic open', () => /mic\s+ready/.test(window.__voice.log.text()), 15000);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'loud played', () => /clip \d+ bundle \S+ loud/.test(window.__voice.log.text()), 20000);
+    await L.waitFor(p, 'plays', () => window.__voice.player.snapshot().status === 'playing' || /ended/.test(window.__voice.log.text().split('loud')[1] ?? ''), 15000);
   } finally { await c.close(); await srv2.close(); }
 };
 

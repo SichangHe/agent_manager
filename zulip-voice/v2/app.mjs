@@ -111,6 +111,7 @@ const cache = store.get('voice2-cache', null);
 if (cache) { model.restore(cache); current ??= cache.current; }
 
 const player = createPlayer({
+  micOpen: () => recorder.micOpen(),
   log, voice,
   onItemStart(item) { log('audio', `start ${item.key}`); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(item); },
   onItemEnd(item) {
@@ -1007,19 +1008,48 @@ function send() {
   saveDraft(); autosize();
   const local = {localId: `l${Date.now()}_${localCounter++}`, topic: current, text, state: 'sending', sentAtMs: Date.now()};
   locals.set(current, [...(locals.get(current) ?? []), local]);
+  saveOutbox();
   feed.querySelector('#empty')?.remove();
   feed.append(localEl(local));
   feed.scrollTop = feed.scrollHeight;
   deliver(local);
 }
 
-function removeLocal(l) { locals.set(l.topic, (locals.get(l.topic) ?? []).filter(x => x !== l)); l.node?.remove(); }
+/** Unsent messages survive a reload: queued/sending/failed locals are saved (voice clips as base64 WAV) and re-sent with the same id. */
+const OUTBOX_KEY = 'voice2-outbox';
+const blobToB64 = blob => new Promise(res => { const r = new FileReader(); r.onload = () => res(String(r.result).split(',')[1]); r.readAsDataURL(blob); });
+const b64ToBlob = b64 => new Blob([Uint8Array.from(atob(b64), c => c.charCodeAt(0))], {type: 'audio/wav'});
+let outboxTimer = 0;
+function saveOutbox() {
+  clearTimeout(outboxTimer);
+  outboxTimer = setTimeout(async () => {
+    const list = [];
+    for (const l of [...locals.values()].flat()) {
+      if (l.state === 'sent') continue;
+      list.push({sendId: l.sendId ?? null, localId: l.localId, topic: l.topic, text: l.text, sentAtMs: l.sentAtMs, items: l.items ? await Promise.all(l.items.map(async i => i.blob ? {b64: await blobToB64(i.blob), uri: i.uri} : {text: i.text})) : null});
+    }
+    store.set(OUTBOX_KEY, list.slice(-10));
+  }, 300);
+}
+async function restoreOutbox() {
+  for (const e of store.get(OUTBOX_KEY, [])) {
+    const items = e.items?.map(i => i.b64 ? {blob: b64ToBlob(i.b64), uri: i.uri} : {text: i.text});
+    const l = {localId: e.localId, sendId: e.sendId ?? undefined, topic: e.topic, text: e.text, items, state: 'queued', sentAtMs: e.sentAtMs};
+    if (!l.items) delete l.items;
+    locals.set(e.topic, [...(locals.get(e.topic) ?? []), l]);
+    log('send', `restored unsent ${e.sendId ?? e.localId} from the previous session`);
+    deliver(l);
+  }
+  if (current) renderFeed();
+}
+
+function removeLocal(l) { locals.set(l.topic, (locals.get(l.topic) ?? []).filter(x => x !== l)); l.node?.remove(); saveOutbox(); }
 function refreshLocal(l) { if (l.topic !== current) return; const old = l.node; const fresh = localEl(l); old?.replaceWith(fresh); }
 
 /** Sends `l`; failures requeue it with backoff (and at once when the connection returns) so it never needs a manual retry unless 8 attempts failed. */
 async function deliver(l) {
   if (l.inflight) return;
-  l.inflight = true; l.state = 'sending'; refreshLocal(l);
+  l.inflight = true; l.state = 'sending'; refreshLocal(l); saveOutbox();
   try {
     if (l.uncertain && !l.items) {
       const found = await zulip.call('GET', 'messages', {narrow: topicQuery(l.topic), anchor: 'newest', num_before: 5, num_after: 0, apply_markdown: false});
@@ -1027,14 +1057,14 @@ async function deliver(l) {
     }
     if (l.items) {   // a voice reply: the service joins the transcripts and posts it, so nothing here waits for text
       const v = await voice.sendVoice({sendId: l.sendId, topic: l.topic, items: l.items});
-      if (v.ok) { l.state = 'sent'; removeLocal(l); if (v.empty) toast('Nothing was recognised in that recording'); return; }
+      if (v.ok) { l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) toast('Nothing was recognised in that recording'); return; }
       l.attempts = (l.attempts ?? 0) + 1;
       if (l.attempts <= 12) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
       else { l.state = 'failed'; refreshLocal(l); toast(v.error); }
       return;
     }
     const r = await zulip.call('POST', 'messages', {type: 'stream', to: cfg.streamId, topic: l.topic, content: l.text, queue_id: events.queueId() ?? '', local_id: l.localId});
-    if (r.ok) { l.state = 'sent'; l.sentId = r.data.id; setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
+    if (r.ok) { l.state = 'sent'; l.sentId = r.data.id; saveOutbox(); setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
     l.uncertain = r.uncertain;
     l.attempts = (l.attempts ?? 0) + 1;
     if (l.attempts <= 8) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
@@ -1216,6 +1246,7 @@ if (current) { draftEl.value = store.get('voice2-draft:' + current, ''); renderF
 autosize();
 renderConn(events.info());
 events.start();
+restoreOutbox();
 if (cfg.relayStreamId) {
   ensureRelayMuted(zulip, cfg.relayStreamId);
   setTimeout(checkVoice, 1500);
