@@ -403,6 +403,24 @@ impl Store {
             (true, None) => {
                 let month = self.done_month(database, name, git);
                 let target = self.root.join(&month).join(name);
+                // 🧑 (via the manager) "Make amh export filed (month-dir) tasks to their filed location": adopt a filed copy found in any month folder.
+                let same = |month: &str| {
+                    let filed = fs::read(self.root.join(month).join(name)).ok();
+                    filed.as_deref() == Some(text.as_bytes())
+                        || (root_file.is_file() && filed == fs::read(&root_file).ok())
+                };
+                if let Some((found, _)) = self.month_files().into_iter().find(|(month, file)| file == name && same(month)) {
+                    database.set_record(&key, &found)?;
+                    let filed = self.root.join(&found).join(name);
+                    if root_file.is_file() {
+                        if fs::read(&root_file).ok() == fs::read(&filed).ok() {
+                            let _ = fs::remove_file(&root_file);
+                        } else {
+                            self.report_filing(database, &format!("{name}: edited at the root although filed under {found}; the root copy is not merged"))?;
+                        }
+                    }
+                    return Ok(filed);
+                }
                 if target.exists() && fs::read(&target).ok() != fs::read(&root_file).ok() {
                     self.report_filing(database, &format!("{name}: not filed, {month}/{name} already exists with different content"))?;
                     return Ok(root_file);
@@ -1016,6 +1034,32 @@ mod tests {
             None
         );
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_done_task_filed_by_hand_is_adopted_not_rewritten_at_the_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("amh-adopt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        let text = "---\nstatus: done\nrunat: omnigent://worker\n---\n\nbody\n";
+        taskfile::write(&root.join("t.md"), text)?;
+        taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
+        fs::create_dir(root.join("190001"))?;
+        taskfile::write(&root.join("190001").join("t.md"), text)?;
+        drop(store.lock()?);
+        assert!(!root.join("t.md").exists(), "root copy removed");
+        fs::remove_file(root.join("190001").join("t.md"))?;
+        fs::create_dir_all(root.join("190001"))?;
+        drop(store.lock()?);
+        assert!(root.join("190001").join("t.md").exists(), "exported to the filed folder");
+        assert!(!root.join("t.md").exists(), "not recreated at the root");
+        let _ = fs::remove_dir_all(&root);
         Ok(())
     }
 
