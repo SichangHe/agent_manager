@@ -17,7 +17,7 @@ observer (`amh quota serve`, `--live` to act)
     - per credential: freshest `quota.signals` or `model_quotas.*.signals`, plus `cooldowns` with reason `credential_quota` (the proxy saw a quota error)
     - never reads tokens; `id_token` is read only for `chatgpt_account_id`, the Codex principal
 - shadow mode (default): computes actions, logs `shadow: would ...` once per change, changes nothing
-- live mode: sole writer of proxy `disabled` and `priority`; redeems
+- live mode: sole writer of proxy `priority` (soonest weekly reset first, exhausted at 0) and of `disabled` only for `quota.deny`; never disables an exhausted credential, since a pool with every credential disabled has no provider (Nov 9 incident); redeems
 - files in the state folder
     - `quota-snapshot.json`: atomic, read by amh; older than 15 min means a dead observer, so every pool is unknown
     - `quota-events.jsonl`: samples and events; rotated at 8 MB to `.1`
@@ -26,11 +26,11 @@ observer (`amh quota serve`, `--live` to act)
 - the watcher's minute pass (`quota_observer::watcher_pass`) clears Claude's session limit evidence on `quota_appeared` and tells about a dead observer
 - amh never pauses or holds back workers for pool quota; a session's own limit pause stays (`docs/session-quota-pauses.md`)
 - notices once per key via `quota-notices.json`, to `quota.notify_task` (default `quota_support.md`)
-    - new credential, observer dead, proxy unreadable twice, actuator failed twice, uncertain or rejected redemption
+    - observer dead, proxy unreadable twice, actuator failed twice, uncertain or rejected redemption
 
 settings (dotted keys, `env.toml` or `config.toml`)
 - `quota.proxy_key_file` (required for the observer), `quota.proxy_url`
-- `quota.allow`, `quota.deny`: comma lists of auth file names
+- `quota.deny`: comma list of auth file names never to use; a new credential is used at once
 - `quota.redeem`: `"true"`
 - `quota.notify_task`
 

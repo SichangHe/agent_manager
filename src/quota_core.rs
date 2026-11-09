@@ -469,15 +469,14 @@ pub enum Act {
 
 /// What the proxy must change so its routing matches the buckets; the observer is the sole writer of `disabled` and `priority`.
 ///
-/// Denied and unclassified credentials stay disabled; exhausted ones get disabled; available ones that we disabled get enabled again; a credential disabled by anyone else is left alone.
+/// Denied credentials stay disabled; any other credential we disabled gets enabled again; a credential disabled by anyone else is left alone.
 ///
-/// A disabled credential gets no traffic, so its signals may never refresh. Hence one we disabled whose bucket has gone unknown is enabled again once its reset hint has passed: traffic then refreshes the reading, and an exhausted bucket gets disabled again.
+/// Exhausted credentials are never disabled, only ranked lowest (priority 0): disabling every credential of a pool left Codex with no provider ("unknown provider for model"), and a disabled credential gets no traffic, so its quota never refreshes. The proxy itself skips an exhausted credential after its 429.
 pub fn proxy_actions(
     buckets: &[Bucket],
     readings: &[Reading],
     denied: &BTreeSet<String>,
     ours: &BTreeSet<String>,
-    now: i64,
 ) -> Vec<Act> {
     let ranks = priorities(buckets);
     let mut acts = Vec::new();
@@ -490,29 +489,20 @@ pub fn proxy_actions(
             }
             continue;
         }
-        match status {
-            Some(Status::Exhausted) if !r.disabled => acts.push(Act::Disable(r.name.clone())),
-            Some(Status::Available) => {
-                if r.disabled && !ours.contains(&r.name) {
-                    continue;
-                }
-                if r.disabled {
-                    acts.push(Act::Enable(r.name.clone()));
-                }
-                if let Some(rank) = ranks.get(&r.name).filter(|rank| r.priority != Some(**rank)) {
-                    acts.push(Act::Priority(r.name.clone(), *rank));
-                }
-            }
-            Some(Status::Unknown)
-                if r.disabled
-                    && ours.contains(&r.name)
-                    && bucket
-                        .and_then(|b| b.next_reset)
-                        .is_some_and(|at| at <= now) =>
-            {
+        if r.disabled {
+            if ours.contains(&r.name) {
                 acts.push(Act::Enable(r.name.clone()));
+            } else {
+                continue;
             }
-            _ => {}
+        }
+        let rank = match status {
+            Some(Status::Available) => ranks.get(&r.name).copied(),
+            Some(Status::Exhausted) => Some(0),
+            _ => None,
+        };
+        if let Some(rank) = rank.filter(|rank| r.priority != Some(*rank)) {
+            acts.push(Act::Priority(r.name.clone(), rank));
         }
     }
     acts
@@ -648,8 +638,6 @@ pub struct Snapshot {
     pub pools: BTreeMap<String, Pool>,
     /// Credentials ever seen; the first run grandfathers them.
     pub seen: BTreeSet<String>,
-    /// Credentials added later that no config classified yet; they stay disabled.
-    pub unclassified: BTreeSet<String>,
     /// Credentials the observer disabled, which it alone may enable again.
     pub ours: BTreeSet<String>,
     /// Per pool, when `quota_appeared` last happened.
@@ -661,7 +649,7 @@ impl Snapshot {
         json!({"version": 1, "generated_at": self.generated_at, "live": self.live,
             "buckets": self.buckets.iter().map(Bucket::to_json).collect::<Vec<_>>(),
             "pools": self.pools.iter().map(|(k, p)| (k.clone(), p.to_json())).collect::<serde_json::Map<_, _>>(),
-            "seen": self.seen, "unclassified": self.unclassified, "ours": self.ours, "appeared_at": self.appeared_at})
+            "seen": self.seen, "ours": self.ours, "appeared_at": self.appeared_at})
     }
 
     pub fn from_json(v: &Value) -> Self {
@@ -689,7 +677,6 @@ impl Snapshot {
                 .map(|(k, p)| (k.clone(), Pool::from_json(p)))
                 .collect(),
             seen: set("seen"),
-            unclassified: set("unclassified"),
             ours: set("ours"),
             appeared_at: v["appeared_at"]
                 .as_object()
@@ -999,7 +986,20 @@ mod tests {
     }
 
     #[test]
-    fn proxy_actions_disable_exhausted_enable_ours_and_leave_the_humans_alone() {
+    fn every_credential_we_disabled_comes_back_even_while_exhausted() {
+        // The Nov 9 incident: disabling all exhausted Codex credentials left Codex with no provider.
+        let b = [bucket("out", "codex", Status::Exhausted, 100.0, Some(NOW + 9))];
+        let mut r = [reading("out", "codex:out", true, Some(5))];
+        let ours = BTreeSet::from(["out".to_owned()]);
+        let acts = proxy_actions(&b, &r, &BTreeSet::new(), &ours);
+        assert_eq!(acts, vec![Act::Enable("out".into()), Act::Priority("out".into(), 0)]);
+        r[0].disabled = false;
+        r[0].priority = Some(0);
+        assert!(proxy_actions(&b, &r, &BTreeSet::new(), &BTreeSet::new()).is_empty());
+    }
+
+    #[test]
+    fn proxy_actions_rank_exhausted_lowest_enable_ours_and_leave_the_humans_alone() {
         let buckets = [
             bucket("ok", "claude", Status::Available, 10.0, Some(NOW + 1)),
             bucket("out", "claude", Status::Exhausted, 100.0, Some(NOW + 1)),
@@ -1017,8 +1017,12 @@ mod tests {
         ];
         let denied = BTreeSet::from(["new".to_owned()]);
         let ours = BTreeSet::from(["back".to_owned()]);
-        let acts = proxy_actions(&buckets, &readings, &denied, &ours, NOW);
-        assert!(acts.contains(&Act::Disable("out".into())));
+        let acts = proxy_actions(&buckets, &readings, &denied, &ours);
+        assert!(
+            !acts.iter().any(|a| matches!(a, Act::Disable(n) if n == "out")),
+            "an exhausted credential is never disabled"
+        );
+        assert!(acts.contains(&Act::Priority("out".into(), 0)));
         assert!(acts.contains(&Act::Enable("back".into())));
         assert!(acts.contains(&Act::Disable("new".into())));
         assert!(
@@ -1052,7 +1056,7 @@ mod tests {
         let ranks = priorities(&buckets);
         let readings = [reading("a", "claude:a", false, Some(ranks["a"]))];
         assert!(
-            proxy_actions(&buckets, &readings, &BTreeSet::new(), &BTreeSet::new(), NOW).is_empty()
+            proxy_actions(&buckets, &readings, &BTreeSet::new(), &BTreeSet::new()).is_empty()
         );
     }
 
@@ -1177,48 +1181,7 @@ mod tests {
     }
 
     /// Replay of the 2026-11-04 Midas incident: the account was disabled at 7d 100%, and came back after its reset.
-    #[test]
-    fn midas_is_disabled_when_out_and_enabled_again_after_its_reset() {
-        let out = |at: i64| claude_file("midas", None, "1.0", -at);
-        let (b, _) = run(&[], vec![out(0)], NOW);
-        let r = read(vec![out(0)]);
-        let acts = proxy_actions(&b, &r, &BTreeSet::new(), &BTreeSet::new(), NOW);
-        assert_eq!(acts, vec![Act::Disable("midas".into())]);
-        let ours = BTreeSet::from(["midas".to_owned()]);
-        let mut disabled = read(vec![out(0)]);
-        disabled[0].disabled = true;
-        assert!(
-            proxy_actions(&b, &disabled, &BTreeSet::new(), &ours, NOW).is_empty(),
-            "still out: stays disabled"
-        );
-        let back = |at: i64| claude_file("midas", None, "0.0", -at);
-        let (b, _) = run(&b, vec![back(1)], NOW + 1);
-        assert!(
-            proxy_actions(&b, &disabled, &BTreeSet::new(), &ours, NOW).is_empty(),
-            "one reading is not enough"
-        );
-        let (b, e) = run(&b, vec![back(2)], NOW + 2);
-        assert_eq!(e[0].kind, "quota_appeared");
-        let acts = proxy_actions(&b, &disabled, &BTreeSet::new(), &ours, NOW);
-        assert!(acts.contains(&Act::Enable("midas".into())));
-    }
 
-    #[test]
-    fn a_disabled_stale_bucket_is_probed_after_its_reset_hint_so_it_cannot_stay_off_forever() {
-        let (b, _) = run(&[], vec![claude_file("a", Some("1.0"), "0.2", 10)], NOW);
-        let hint = b[0].next_reset.unwrap_or_default();
-        let mut r = read(vec![claude_file("a", Some("1.0"), "0.2", 10)]);
-        r[0].disabled = true;
-        let ours = BTreeSet::from(["a".to_owned()]);
-        let later = hint + TTL_S + 1;
-        let (b, _) = step(&b, &r, later);
-        assert_eq!(b[0].status, Status::Unknown);
-        assert!(proxy_actions(&b, &r, &BTreeSet::new(), &ours, hint - 1).is_empty());
-        assert_eq!(
-            proxy_actions(&b, &r, &BTreeSet::new(), &ours, later),
-            vec![Act::Enable("a".into())]
-        );
-    }
 
     #[test]
     fn json_round_trip() {

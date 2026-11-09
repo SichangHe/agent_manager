@@ -490,33 +490,18 @@ pub fn cycle(
     }
     let mut events = Vec::new();
     let names: BTreeSet<String> = readings.iter().map(|r| r.name.clone()).collect();
-    let (allow, deny) = (list(settings, "quota.allow"), list(settings, "quota.deny"));
-    let mut unclassified = prev.unclassified.clone();
+    // 🧑 "If we lack quota I'll just open another account": a new credential is used at once.
     if !prev.seen.is_empty() {
         for name in names.difference(&prev.seen) {
             events.push(core::Event {
                 kind: "credential_added",
                 subject: name.clone(),
             });
-            if !allow.contains(name) && !deny.contains(name) {
-                unclassified.insert(name.clone());
-                if live {
-                    notice(
-                        settings,
-                        store,
-                        &format!("added:{name}"),
-                        &format!(
-                            "A new proxy credential `{name}` was added. It stays disabled until `quota.allow` or `quota.deny` in config.toml names it."
-                        ),
-                    );
-                }
-            }
         }
     }
-    unclassified.retain(|n| !allow.contains(n) && !deny.contains(n));
-    let denied: BTreeSet<String> = deny.union(&unclassified).cloned().collect();
+    let denied = list(settings, "quota.deny");
     let mut ours = prev.ours.clone();
-    // Only credentials the router may use count towards a pool: not denied, unclassified, or disabled by someone else.
+    // Only credentials the router may use count towards a pool: not denied or disabled by someone else.
     let eligible: Vec<Reading> = readings
         .iter()
         .filter(|r| !denied.contains(&r.name) && (!r.disabled || ours.contains(&r.name)))
@@ -524,7 +509,7 @@ pub fn cycle(
         .collect();
     let (buckets, stepped) = core::step(&prev.buckets, &eligible, now);
     events.extend(stepped);
-    let acts = core::proxy_actions(&buckets, &readings, &denied, &ours, now);
+    let acts = core::proxy_actions(&buckets, &readings, &denied, &ours);
     let intended: BTreeSet<String> = acts.iter().map(|a| format!("{a:?}")).collect();
     for act in &acts {
         let key = format!("{act:?}");
@@ -640,7 +625,6 @@ pub fn cycle(
         buckets,
         pools,
         seen: prev.seen.union(&names).cloned().collect(),
-        unclassified,
         ours,
         appeared_at,
     };
@@ -761,9 +745,6 @@ pub fn status_text(snapshot: &Snapshot, now: i64, events: &[Value]) -> String {
                 windows.join(", ")
             ));
         }
-    }
-    if !snapshot.unclassified.is_empty() {
-        out.push_str(&format!("unclassified credentials (disabled until `quota.allow` or `quota.deny` names them): {}\n", snapshot.unclassified.iter().cloned().collect::<Vec<_>>().join(", ")));
     }
     for e in events {
         out.push_str(&format!(
@@ -927,8 +908,8 @@ mod tests {
         assert!(
             calls
                 .iter()
-                .any(|c| c.contains("a") && c.contains("disabled")),
-            "exhausted `a` is disabled: {calls:?}"
+                .all(|c| !(c.contains("a") && c.contains("\"disabled\":true"))),
+            "exhausted `a` is never disabled: {calls:?}"
         );
         assert_eq!(calls.iter().filter(|c| *c == "consume").count(), 1);
         let steps: Vec<String> = files
@@ -1121,7 +1102,7 @@ mod tests {
     }
 
     #[test]
-    fn new_credential_is_disabled_until_classified_and_a_proxy_restart_is_survived() {
+    fn new_credential_is_used_at_once_and_a_proxy_restart_is_survived() {
         let dir = temp("added");
         let now = 1_794_000_000;
         let proxy = fake_proxy(
@@ -1140,14 +1121,15 @@ mod tests {
         *proxy.files.lock().expect("files") = json!({"files": [codex("a", "10", now + 300, false), codex("new", "10", now + 300, false)]});
         let snap =
             cycle(&settings, &store, &p, &files, &mut memory, true, now + 300).expect("cycle");
-        assert!(snap.unclassified.contains("new"));
+        assert!(snap.seen.contains("new"));
         assert!(
-            proxy
+            !proxy
                 .log
                 .lock()
                 .expect("log")
                 .iter()
-                .any(|c| c.contains("new") && c.contains("true"))
+                .any(|c| c.contains("new") && c.contains("true")),
+            "a new credential is never disabled"
         );
         let bad = Proxy {
             url: "http://127.0.0.1:1/v0/management".into(),
@@ -1168,7 +1150,7 @@ mod tests {
         let snap = cycle(&settings, &store, &p, &files, &mut memory, true, now + 900)
             .expect("cycle after the proxy came back");
         assert!(
-            snap.unclassified.contains("new"),
+            snap.seen.contains("new"),
             "state survives a proxy outage"
         );
         fs::remove_dir_all(&dir).expect("cleanup");
