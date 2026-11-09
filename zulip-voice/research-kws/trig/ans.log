@@ -1,0 +1,37 @@
+Installed 112 packages in 588ms
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+Resolved 1 package in 106ms
+Installed 1 package in 22ms
+ + en-core-web-sm==3.8.0 (from https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl)
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/ans-394b87e270f8387d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+[38;5;2m✔ Download and installation successful[0m
+You can now load the package via spacy.load('en_core_web_sm')
+detection (7 voices): {'YES': '2/7', 'NO': '0/7', 'ONE': '5/7', 'TWO': '1/7', 'THREE': '2/7', 'CANCEL': '7/7'}
+false hits in 35 min of agent speech: {'YES': 2, 'NO': 35, 'ONE': 69, 'TWO': 23, 'THREE': 12, 'CANCEL': 0} per 20 s window: {'YES': 0.019, 'NO': 0.332, 'ONE': 0.655, 'TWO': 0.218, 'THREE': 0.114, 'CANCEL': 0.0}
+done

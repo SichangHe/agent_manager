@@ -114,7 +114,6 @@ const cache = store.get('voice2-cache', null);
 if (cache) { model.restore(cache); current ??= cache.current; }
 
 const player = createPlayer({
-  micOpen: () => recorder.micOpen(),
   log, voice,
   onItemStart(item) { log('audio', `start ${item.key}`); lat.finish('play:' + item.msgId, 'ready+playing'); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); $('jump').hidden = follow; if (follow) scrollToNow(); setMediaSession(item); },
   onItemEnd(item) {
@@ -239,7 +238,7 @@ async function loadEarlier() {
 
 /** Latest messages of the whole channel, so the agent list can show a snippet per agent. */
 async function loadRecent() {
-  const r = await zulip.call('GET', 'messages', {narrow: [{operator: 'stream', operand: cfg.streamId}], anchor: 'newest', num_before: 60, num_after: 0, apply_markdown: false});
+  const r = await zulip.call('GET', 'messages', {narrow: [{operator: 'stream', operand: cfg.streamId}], anchor: 'newest', num_before: 800, num_after: 0, apply_markdown: false});   // one call buckets every topic, so a switch never waits for the network
   if (r.ok) for (const m of r.data.messages) model.add(m);
 }
 
@@ -381,6 +380,14 @@ function maybeAutoplay() {
   player.play(speakable.flatMap(m => itemsOf(m).filter(pastWatermark)), 0);
 }
 
+/** Skipped past the last chunk: stop, mark everything read, play nothing. */
+function endOfQueue() {
+  clearTimeout(burst?.timer); burst = null;
+  player.stop(); nowMsgId = null; highlight();
+  markRead(model.agentMessages(current).map(m => m.id));
+  store.set('voice2-pos', null);
+  toast('End of messages');
+}
 const RESTART_AFTER_S = 2;
 const SKIP_DEBOUNCE_MS = 350;
 let burst = null;   // taps within SKIP_DEBOUNCE_MS of each other: `{msgId, idx, pending, timer}`
@@ -407,7 +414,8 @@ function jump(direction, whole = false, noRestart = false) {
   }
   else if (direction < 0 && !burst && !noRestart && player.currentTime() > RESTART_AFTER_S) target = flat[at];
   else target = flat[at + direction];
-  if (!target) return toast(direction > 0 ? 'No later messages' : 'No earlier messages');
+  if (!target && direction > 0) { endOfQueue(); return; }   // skipping past the last chunk ends reading: nothing plays, nothing wraps around
+  if (!target) return toast('No earlier messages');
   const play = () => playFrom(agents.find(m => m.id === target.msgId), target.idx);
   if (burst) clearTimeout(burst.timer);
   const pending = !!burst;
@@ -491,6 +499,7 @@ function switchBack() {
 }
 
 function switchTopic(topic) {
+  lat.begin('switchfeed', 'switch-render');
   lat.finish('switch', 'switched');
   if (topic === current) { $('picker').close(); return; }
   player.stop();
@@ -506,6 +515,8 @@ function switchTopic(topic) {
   renderFeed();
   $('picker').close();
   loading = model.messages(topic).length ? null : topic;
+  lat.finish('switchfeed', model.messages(topic).length ? 'from-cache' : 'EMPTY-cache');
+  if (model.messages(topic).length) maybeAutoplay();
   loadTopicUntilLoaded(topic);
   renderUnread();
   announceSwitch(topic);
@@ -531,7 +542,9 @@ async function loadTopicUntilLoaded(topic) {
       model.markLoaded(topic);
       if (current !== topic) return;
       hasEarlier = !r.data.found_oldest && r.data.messages.length >= 40;
-      loading = null; renderFeed(); renderUnread(); maybeAutoplay();
+      const shown = els.size; loading = null; renderUnread();
+      if (!shown || model.messages(topic).length > shown) renderFeed();   // a cached topic is only redrawn when the fetch found something new
+      maybeAutoplay();
       return;
     }
     log('app', `loading ${topic} failed (${r.error}); retry ${attempt + 1}`);
@@ -713,8 +726,7 @@ function onKwsHit(word) {
     lat.stage('sw', 'kws-local');
     openSession('');
   } else if (word === 'KANGAROO' && vc && normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT)) === 'kangaroo') {
-    clearTimeout(vc.timer);
-    vc.timer = setTimeout(function finishWhenQuiet() { if (!vc) return; if ((utterancePending || sttInFlight) && Date.now() - lastKwsHitMs < 6000) { vc.timer = setTimeout(finishWhenQuiet, 300); return; } finishVcReply(); }, RESUME_SILENCE_MS);
+    sendVoiceReplyNow('end word on device');
   }
 }
 const recorder = createRecorder({log, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
@@ -795,6 +807,7 @@ function onBarge() {
 }
 async function onCommandClip(blob, meta = {}) {
   if (dict) return;
+  if (vc) { meta.part = {blob, text: null}; (vc.parts ??= []).push(meta.part); }   // kept so a spotted end word can send the audio itself
   try { await handleCommandClip(blob, meta); } finally { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); }
 }
 const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
@@ -818,6 +831,7 @@ async function handleCommandClip(blob, meta) {
   const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening).finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); resumeBarge(); vcIdle(); return; }
   const heard = r.text.trim();
+  if (meta.part) { if (meta.part.sentAway) return; meta.part.text = heard; }   // already sent from the audio: nothing more to do with this transcript
   lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
   log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
   if (!listening && normalize(heard) && ((meta.speechMs ?? 1e9) < START_MIN_SPEECH_MS || r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB)) {
@@ -883,6 +897,12 @@ function navCommand(words) {
   const tokens = words.split(' ').filter(Boolean);
   const whole = tokens.includes('message') || tokens.includes('messages');
   const rest = tokens.filter(t => t !== 'message' && t !== 'messages');
+  const NUMBERS = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10};
+  const n = NUMBERS[rest.at(-1)];
+  if (rest.length === 2 && n && !NUMBERS[rest[0]]) {   // "next three", "skip five", "back two"
+    const d = ['back', 'previous', 'last'].includes(rest[0]) ? -1 : ['next', 'skip', 'forward'].includes(rest[0]) ? 1 : null;
+    if (d) return {dir: d, whole, count: n};
+  }
   if (!rest.length || rest.length > 5) return null;
   const kind = t => ['back', 'previous', 'last'].includes(t) ? -1 : ['next', 'skip', 'forward'].includes(t) ? 1 : ['again', 'repeat'].includes(t) ? 0 : null;
   const dirs = rest.map(kind);
@@ -958,6 +978,7 @@ function cancelSession() {
 function addToSession(heard) {
   if (endsWithCancel(heard)) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
   clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
+  if (stripResumePhrase(heard) !== null && !vc.sending) { vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' '); draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize(); sendVoiceReplyNow('end word in the transcript'); return; }   // no quiet window
   vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
   setVcState('dictating', 'dictating reply');
@@ -982,6 +1003,29 @@ function closeEmptySession() {
 }
 
 /** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
+/** The end word was heard: no quiet window, no waiting for transcripts. The clip in progress is cut here and the service transcribes whatever is not yet text. */
+function sendVoiceReplyNow(why) {
+  const reply = vc; if (!reply) return;
+  recorder.flush();   // hands the last clip to onCommandClip, which records it in reply.parts
+  clearTimeout(reply.timer); clearTimeout(reply.emptyTimer);
+  const items = [];
+  if (reply.base.trim()) items.push({text: reply.base.trim()});
+  if (reply.text.trim()) items.push({text: reply.text.trim()});   // everything already transcribed, in arrival order
+  for (const p of reply.parts ?? []) { p.sentAway = true; if (p.text === null) items.push({blob: p.blob}); }   // clips still waiting for text go as audio
+  vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
+  log('vc', `${why}: sending now (${items.filter(i => i.blob).length} clips for the server to transcribe)`);
+  recorder.beep('done');
+  if (!items.some(i => i.blob || (i.text && i.text.trim()))) { resumeAfterPause(); vcIdle(); return; }
+  const local = {localId: `l${Date.now()}_${localCounter++}`, sendId: 'send_' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(16).padStart(2, '0')).join(''), topic: current, text: reply.text || '…', items, state: 'sending', sentAtMs: Date.now()};
+  lat.begin('send:' + local.localId, 'send-voice');
+  locals.set(current, [...(locals.get(current) ?? []), local]); saveOutbox();
+  feed.querySelector('#empty')?.remove(); feed.append(localEl(local)); feed.scrollTop = feed.scrollHeight;
+  draftEl.value = ''; autosize(); saveDraft();
+  setVcState('sending', 'sending');
+  deliver(local);
+  player.unlock(); resumeAfterPause(); vcIdle();
+}
+
 function finishVcReply() {
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
   vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();

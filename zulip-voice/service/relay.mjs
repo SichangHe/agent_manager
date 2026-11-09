@@ -88,14 +88,11 @@ export function bundleWavs(wavs) {
   return {bytes: Buffer.concat([header, data, pcm]), offsetsMs, durationMs: Math.round(pcm.length / parts[0].byteRate * 1000)};
 }
 
-/** Kokoro output is about -26 LUFS, too quiet on a phone (and iOS lowers it further while the microphone is open): compress, add makeup gain, limit. Result about -12 LUFS. (`loudnorm` misbehaves on one-sentence clips.) */
-const LOUDNESS_FILTER = 'acompressor=threshold=0.05:ratio=4:attack=5:release=60:makeup=8,alimiter=limit=0.8:level=disabled';
+/** Kokoro output is about -26 LUFS, too quiet on a phone: a gentle 2:1 compressor with slow attack, +5 dB and a soft limiter give about -16 LUFS, true peak under -1.5 dBFS, crest factor about 6 dB. Heavier chains sounded blown out. */
+const LOUDNESS_FILTER = 'acompressor=threshold=0.1:ratio=2:attack=20:release=250:makeup=2,volume=5dB,alimiter=limit=0.84:attack=5:release=100:level=disabled';
+const CHAIN = 'gentle-v1';   // bump to re-render clips made with an older chain (a few per sweep)
 
 /** AAC-LC mono m4a (moov first, so playback starts before the download ends) from WAV bytes; about 10x smaller than 16-bit WAV. */
-/** Louder rendering for use while the microphone is open (iOS then plays at call volume): heavy compression, saturation, limiter. Its true peak is measured and attenuated to `LOUD_TP_DB`. */
-const LOUD_FILTER = 'acompressor=threshold=0.03:ratio=8:attack=2:release=40:makeup=8,volume=16dB,asoftclip=type=tanh,volume=-5dB,alimiter=limit=0.8:level=disabled';
-const LOUD_TP_DB = Number(process.env.VOICE_LOUD_TP_DB ?? -1);   // raise (e.g. 2) for louder and more distorted; -1 keeps clipping out
-
 export async function measureTruePeak(m4a) {
   const path = resolve(tmpdir(), `voice-tp-${process.pid}-${Math.random().toString(36).slice(2)}.m4a`);
   await writeFile(path, m4a);
@@ -117,8 +114,7 @@ export async function encodeToPeak(wav, filter, targetDb) {
   }
   return out;
 }
-export const encodeLoud = wav => encodeToPeak(wav, LOUD_FILTER, LOUD_TP_DB);
-export const encodeNormal = wav => encodeToPeak(wav, LOUDNESS_FILTER, -1);
+export const encodeNormal = wav => encodeToPeak(wav, LOUDNESS_FILTER, -1.5);
 
 export async function encodeAac(wav, bitrate = '32k', filter = LOUDNESS_FILTER) {
   const path = resolve(tmpdir(), `voice-enc-${process.pid}-${Math.random().toString(36).slice(2)}.m4a`);
@@ -233,27 +229,13 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     Object.assign(result, {texts, offsetsMs: bundle.offsetsMs, durationMs: bundle.durationMs});
     const encoded = await encodeNormal(bundle.bytes);
     await upload(encoded, request.id, result, record);
-    if (request.proactive) await uploadLoud(await encodeLoud(bundle.bytes), request.id, result, record);   // the louder twin for use while the microphone is open
     return `chunks=${texts.length} tts=${gpuMs}ms enc+upload=${now() - t - gpuMs}ms wav=${bundle.bytes.length}B aac=${encoded.length}B (${Math.round(encoded.length / bundle.durationMs * 1000)}B/s)`;
-  }
-
-  /** Uploads the loud twin: `result.loudUri/loudAudioURL`; its bytes count against the cap and it is evicted first. */
-  async function uploadLoud(bytes, id, result, record) {
-    const form = new FormData();
-    form.append('file', new Blob([bytes], {type: 'audio/mp4'}), 'voice-loud-' + id + '.m4a');
-    const uploaded = await api.call('POST', 'user_uploads', form);
-    attachmentURL(uploaded.uri, api.site);
-    record.loudUri = uploaded.uri; record.loudBytes = bytes.length;
-    await save();
-    const temporary = await api.call('GET', uploaded.uri.slice(1));
-    const audioURL = new URL(temporary.url, api.site);
-    result.loudUri = uploaded.uri; result.loudAudioURL = audioURL.href;
   }
 
   /** Uploads `bytes` and fills `result.uri/attachment/audioURL`. */
   async function upload(bytes, id, result, record) {
     record.bytes = bytes.length;
-    record.loud = true;   // rendered with the loudness filter (about -13 LUFS); older clips are replaced, see `expire`
+    record.chain = CHAIN;   // older clips are re-rendered, see `expire`
     const form = new FormData();
     form.append('file', new Blob([bytes], {type: 'audio/mp4'}), 'voice-' + id + '.m4a');
     const uploaded = await api.call('POST', 'user_uploads', form);
@@ -278,6 +260,9 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     return words.slice(0, n).join(' ');
   }
 
+  /** Leading start word(s) ("attention") removed: a clip recorded around the on-device detection still contains it. */
+  function stripStartWord(text) { return text.replace(/^\s*(?:attention\b[\s,.!?]*)+/i, ''); }
+
   /** `send`: joins the client's typed/transcribed text with the transcripts of its not-yet-transcribed clips, in order, and posts it to the topic as the human. */
   async function sendMessage(request, result) {
     if (!humanApi) throw Error('no human key on the server');
@@ -285,7 +270,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       if (typeof item.text === 'string') return item.text;
       const piece = {}; await transcribe({uri: item.uri}, piece); return piece.text ?? '';
     }));
-    const text = stripEndWord(parts.map(p => p.trim()).filter(Boolean).join(' ')).trim();
+    const text = stripEndWord(stripStartWord(parts.map(p => p.trim()).filter(Boolean).join(' '))).trim();
     if (!text) { result.empty = true; return 'empty message, nothing posted'; }
     const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: taskStreamId, topic: request.topic, content: text});
     result.messageId = sent.id; result.text = text;
@@ -357,14 +342,14 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     const uris = [];
     for (const record of due) {
       if (record.responseId) { try { await api.call('DELETE', 'messages/' + record.responseId); delete record.responseId; } catch { continue; } }
-      if (record.uri || record.loudUri) uris.push(record);
+      if (record.uri) uris.push(record);
       else record.status = 'done';
     }
     if (uris.length) {
       const {attachments} = await api.call('GET', 'attachments');
       for (const record of uris) {
         try {
-          for (const key of ['uri', 'loudUri']) {
+          for (const key of ['uri']) {
             const item = record[key] && attachments.find(a => '/user_uploads/' + a.path_id === record[key]);
             if (item) await api.call('DELETE', 'attachments/' + item.id);
             delete record[key];
@@ -451,23 +436,15 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
           if (sent) { record.responseId = sent.id; record.status = 'sent'; } else if (now() - record.created > 60000) record.status = 'done';
         }
       }
-      // Clips rendered before the loudness change are about 12 dB quieter: drop them (a few per sweep); the next unread render makes fresh ones.
-      const quiet = Object.entries(records).filter(([, r]) => r.proactive && r.status === 'sent' && r.uri && !r.loud).slice(0, MAX_DELETES_PER_SWEEP);
+      // Clips rendered with an older loudness chain are dropped (a few per sweep); the next unread render makes fresh ones.
+      const quiet = Object.entries(records).filter(([, r]) => r.proactive && r.status === 'sent' && r.uri && r.chain !== CHAIN).slice(0, MAX_DELETES_PER_SWEEP);
       if (quiet.length) { await cleanup(quiet.map(([, r]) => r)); for (const [id, r] of quiet) if (r.status === 'done') delete records[id]; console.log(`replaced ${quiet.length} quiet legacy clips`); }
       const sent = Object.values(records).filter(r => r.status === 'sent');
       const age = r => now() - r.created;
       const full = new Set(sent.filter(r => (r.acked && !r.proactive) || age(r) > ttlMs || (!r.uri && age(r) > orphanTtlMs)));
-      // Loud twins go first when over the cap: they only improve volume.
-      let totalAll = sent.filter(r => !full.has(r)).reduce((n, r) => n + (r.bytes ?? 0) + (r.loudBytes ?? 0), 0);
-      for (const r of sent.filter(r => r.loudUri && !full.has(r)).sort((a, b) => a.created - b.created)) {
-        if (totalAll <= maxUploadBytes) break;
-        const {attachments} = await api.call('GET', 'attachments');
-        const item = attachments.find(a => '/user_uploads/' + a.path_id === r.loudUri);
-        if (item && await api.call('DELETE', 'attachments/' + item.id).then(() => true, () => false)) { totalAll -= r.loudBytes ?? 0; delete r.loudUri; delete r.loudBytes; }
-      }
       // Over the size cap: keep unread clips first (newest first), then read ones; evict the rest.
       let total = 0;
-      for (const r of sent.filter(r => r.uri && !full.has(r)).sort((a, b) => (a.read ? 1 : 0) - (b.read ? 1 : 0) || b.created - a.created)) { total += (r.bytes ?? 0) + (r.loudBytes ?? 0); if (total > maxUploadBytes) full.add(r); }
+      for (const r of sent.filter(r => r.uri && !full.has(r)).sort((a, b) => (a.read ? 1 : 0) - (b.read ? 1 : 0) || b.created - a.created)) { total += (r.bytes ?? 0); if (total > maxUploadBytes) full.add(r); }
       await cleanup([...full]);
       // Results of explicit requests are only needed for a moment; their clips stay until acked, the size cap or the TTL.
       for (const r of sent.filter(r => r.uri && !r.proactive && r.responseId && !full.has(r) && age(r) > orphanTtlMs)) {

@@ -20,7 +20,7 @@ export function createVoice({zulip, cfg, log}) {
     if (waiter) { pending.delete(body.id); waiter(body); }
     else if (body.proactive && body.bundle && body.audioURL) {
       const parts = bundles.get(body.messageId) ?? [];
-      if (!parts.some(p => p.id === body.id)) parts.push({...body, arrivedMs: Math.min(Date.now(), message.timestamp * 1000), loudArrivedMs: Math.min(Date.now(), message.timestamp * 1000)});
+      if (!parts.some(p => p.id === body.id)) parts.push({...body, arrivedMs: Math.min(Date.now(), message.timestamp * 1000)});
       bundles.set(body.messageId, parts);
       for (const [key, list] of bundles) if (Date.now() - list[0].arrivedMs > PREPARED_TTL_MS) bundles.delete(key);
     }
@@ -95,13 +95,7 @@ export function createVoice({zulip, cfg, log}) {
   }
 
   /** A playable URL for `clip`, minting a new one when the old one is about to expire; a deleted pre-rendered clip is forgotten so the next `tts` renders afresh. */
-  async function clipUrl(clip, maxAgeMs = URL_TTL_MS, loud = false) {
-    if (loud && clip.loudUri) {   // the louder twin (used while the microphone is open); if it is gone, fall back to the normal rendering
-      if (Date.now() - (clip.loudArrivedMs ?? 0) < maxAgeMs && clip.loudAudioURL) return {ok: true, url: clip.loudAudioURL, loud: true};
-      const l = await zulip.call('GET', clip.loudUri.slice(1));
-      if (l.ok) { Object.assign(clip, {loudAudioURL: new URL(l.data.url, cfg.site).href, loudArrivedMs: Date.now()}); return {ok: true, url: clip.loudAudioURL, loud: true}; }
-      delete clip.loudUri;
-    }
+  async function clipUrl(clip, maxAgeMs = URL_TTL_MS) {
     if (Date.now() - clip.arrivedMs < maxAgeMs) return {ok: true, url: clip.audioURL};
     const r = await zulip.call('GET', clip.uri.slice(1));
     if (!r.ok) { for (const [key, list] of bundles) { const rest = list.filter(p => p !== clip); if (rest.length) bundles.set(key, rest); else bundles.delete(key); } return {ok: false, error: 'clip expired'}; }

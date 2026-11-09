@@ -67,7 +67,13 @@ export function createModel({botId, humanId}) {
     /** Compact copy for the offline cache. */
     snapshot(current) {
       const msgs = {};
-      for (const name of [current]) msgs[name] = this.messages(name).filter(m => !m.local).slice(-40).map(({id, sender_id, subject, content, timestamp, flags}) => ({id, sender_id, subject, content, timestamp, flags}));
+      let budget = 600;   // bounded: the newest 50 of the open topic, 20 of every other, 600 messages in all
+      const names = [current, ...this.topics().map(t => t.name).filter(n => n !== current)];
+      for (const name of names) {
+        if (budget <= 0) break;
+        msgs[name] = this.messages(name).filter(m => !m.local).slice(-Math.min(name === current ? 50 : 20, budget)).map(({id, sender_id, subject, content, timestamp, flags}) => ({id, sender_id, subject, content, timestamp, flags}));
+        budget -= msgs[name].length;
+      }
       return {topics: this.topics().slice(0, 150), msgs, current};
     },
     restore(snapshot) {

@@ -18,10 +18,8 @@ const WARM_AHEAD = 3;
 const HEARD_FRACTION = 0.8;
 const RESUME_BACKUP_MS = 2000;
 
-export function createPlayer({log, voice, micOpen = () => false, onItemStart, onItemEnd, onIdle, onStatus}) {
-  /** Which rendering a part plays: the louder twin while the microphone is open (iOS then plays at call volume), the normal one otherwise. */
-  const wantsLoud = part => !!part.loudUri && micOpen();
-  const variantId = part => part.id + (wantsLoud(part) ? '+L' : '');
+export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStatus}) {
+  const variantId = part => part.id;
   const slots = Array.from({length: N_SLOTS}, () => ({used: 0, el: Object.assign(new Audio(), {preload: 'auto', playsInline: true}), index: -1, ready: false, bundleId: null, chunk: null}));
   for (const slot of slots) { slot.el.setAttribute('playsinline', ''); slot.el.hidden = true; document.body.append(slot.el); }
   let items = [], index = -1, active = null, status = 'idle', gen = 0, unlocked = false, error = '';
@@ -64,17 +62,17 @@ export function createPlayer({log, voice, micOpen = () => false, onItemStart, on
         const fail = await ensureBundle(i);
         if (fail) return fail;
         let bundle = bundleOf(items[i]);
-        let r = await voice.clipUrl(bundle.part, URL_FRESH_MS, wantsLoud(bundle.part));
+        let r = await voice.clipUrl(bundle.part, URL_FRESH_MS);
         if (!r.ok) {   // the upload is gone: the service bundle was dropped; render this message's chunks fresh
           const retry = await ensureBundle(i);
           if (retry) return retry;
           bundle = bundleOf(items[i]);
-          r = await voice.clipUrl(bundle.part, URL_FRESH_MS, wantsLoud(bundle.part));
+          r = await voice.clipUrl(bundle.part, URL_FRESH_MS);
         }
         return r.ok ? {...r, bundle} : r;
       })()};
       clips.set(i, entry);
-      entry.url.then(r => log('audio', `clip ${i} ${r.ok ? 'bundle ' + r.bundle.part.id.slice(-18) + (r.loud ? ' loud' : ' normal') : 'failed ' + r.error}`));
+      entry.url.then(r => log('audio', `clip ${i} ${r.ok ? 'bundle ' + r.bundle.part.id.slice(-18) : 'failed ' + r.error}`));
     }
     return entry;
   }
@@ -155,7 +153,7 @@ export function createPlayer({log, voice, micOpen = () => false, onItemStart, on
   }
 
   function start(slot, myGen, seekMs, bundle) {
-    if (pausedMs !== null && seekMs !== undefined) { seekMs = Math.max(seekMs, pausedMs - RESUME_BACKUP_MS); }
+    if (pausedMs !== null && seekMs !== undefined && (!bundle || pausedMs - RESUME_BACKUP_MS < bundle.endMs)) { seekMs = Math.max(seekMs, pausedMs - RESUME_BACKUP_MS); }
     pausedMs = null;
     for (const s of slots) if (s !== slot) { s.appPause = true; s.el.pause(); }
     active = slot;
@@ -201,9 +199,6 @@ export function createPlayer({log, voice, micOpen = () => false, onItemStart, on
     });
     for (const name of ['waiting', 'stalled', 'error', 'suspend', 'emptied']) slot.el.addEventListener(name, () => { if (slot === active) log('audio', `el ${name} t=${slot.el.currentTime.toFixed(2)} rs=${slot.el.readyState}`); });
   }
-
-  let lastLoud = false;   // not asked yet: `micOpen` may refer to a recorder created after the player
-  setInterval(() => { const now = micOpen(); if (now !== lastLoud) { lastLoud = now; clips.clear(); log('audio', `microphone ${now ? 'open' : 'closed'}: next items use the ${now ? 'loud' : 'normal'} rendering`); } }, 500);
 
   setInterval(() => {   // chunk boundaries inside a bundle
     if (status !== 'playing' || !active?.chunk || active.el.paused) return;
