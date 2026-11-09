@@ -663,9 +663,9 @@ scenarios.voiceControl = async () => {
   };
   const files = {
     '/__pause.wav': await seq(gap(9000), 'Attention attention attention.', gap(12000)),
-    '/__reply.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first. Over.', gap(20000)),
-    '/__phrase.wav': await seq(gap(9000), 'Attention.', gap(6000), 'Over.', gap(20000)),
-    '/__split.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Over.', gap(20000)),
+    '/__reply.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first. Kangaroo.', gap(20000)),
+    '/__phrase.wav': await seq(gap(9000), 'Attention.', gap(6000), 'Kangaroo.', gap(20000)),
+    '/__split.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Kangaroo.', gap(20000)),
     '/__next.wav': await seq(gap(9000), 'Attention. Next.', gap(8000)),
     '/__noise.wav': await seq(gap(9000), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
@@ -712,7 +712,7 @@ scenarios.voiceControl = async () => {
     const sent = await (async () => { for (let i = 0; i < 10; i++) { const m = await mine(); if (m.length) return m; await L.sleep(1000); } return []; })();
     assert.equal(sent.length, 1, 'exactly one message sent: ' + JSON.stringify(sent));
     assert.match(sent[0], /deploy it to staging/i);
-    assert.ok(!/\bover\b/i.test(sent[0]), 'resume phrase stripped: ' + sent[0]);
+    assert.ok(!/kangaroo/i.test(sent[0]), 'resume phrase stripped: ' + sent[0]);
     times.replySent = sent[0];
   });
   await L.wipeTasks(); await L.agentSays('alpha', '[alpha] Long\n\n' + long);
@@ -771,7 +771,7 @@ scenarios.voiceFirstWord = async () => {
   // Speech that starts right at barge-in: the ring-buffer preroll keeps the first word; our own chimes never count as speech.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const speech = await L.speechWav('Attention. Deploy the build to staging now. Over.');
+  const speech = await L.speechWav('Attention. Deploy the build to staging now. Kangaroo.');
   const at = speech.indexOf('data'), head = Buffer.from(speech.subarray(0, at + 8)), data = Buffer.concat([gap(2500), speech.subarray(at + 8), gap(20000)]);
   head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__first.wav': Buffer.concat([head, data])});
@@ -1110,10 +1110,9 @@ scenarios.voiceSwitchRules = async ({srv}) => {
       await check(c.page);
     } finally { await c.close(); }
   };
-  await run('/__plain.wav', {'voice2-long-silence-s': 60}, async p => {   // no confident match: ordinary reply text, no read-back
-    await L.waitFor(p, 'text in draft', () => /switch to the store/i.test(document.querySelector('#draft').value), 60000);
-    const log = await p.evaluate(() => window.__voice.log.text());
-    assert.doesNotMatch(log, /vc\s+switch to "/, "no read-back for a weak match");
+  await run('/__plain.wav', {'voice2-long-silence-s': 60}, async p => {   // a "switch to ..." phrase is never sent as a reply, even without a match
+    await L.waitFor(p, 'switch phrase handled', () => /vc\s+(switch to "|no agent matches)/.test(window.__voice.log.text()), 60000);
+    assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'not reply text');
     assert.equal(await p.evaluate(() => window.__voice.current()), 'alpha');
   });
   await run('/__cancel.wav', {'voice2-long-silence-s': 60}, async p => {   // "cancel" discards the reply and resumes
@@ -1160,7 +1159,7 @@ scenarios.voiceTrailingCancel = async () => {
   // "Pause. Some reply. Cancel." in one utterance discards everything; later silence or "over" sends nothing.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Attention. This is a test whether the cancel works. Cancel.', 'Over.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention. This is a test whether the cancel works. Cancel.', 'Kangaroo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(9000), pcm(ws[0]), gap(6000), pcm(ws[1]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__tc.wav': Buffer.concat([head, data])});
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
@@ -1336,6 +1335,42 @@ scenarios.directiveFiresOnce = async ({srv}) => {
     const starts = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio\s+start /.test(l) && l.includes(String(dirId)));
     assert.equal(starts.length, 1, 'directive message played once: ' + starts.length);
   } finally { await c.close(); }
+};
+
+scenarios.voiceSendNoWait = async () => {
+  // Send while transcripts are pending, and again while offline: the UI frees at once, queued sends retry with the same id, exactly one message each, end word stripped.
+  await L.wipeTasks();
+  const sp = await L.speechWav('Deploy the build to staging now. Kangaroo.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const data = Buffer.concat([sp.subarray(at + 8), Buffer.alloc(48000 * 30)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__sn.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__sn.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  const mine = async () => (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content);
+  try {
+    await L.agentSays('alpha', '[alpha] A\n\nSeed message.');
+    await L.waitFor(p, 'seed', () => document.querySelector('#feed').innerText.includes('Seed message'));
+    for (const offline of [false, true]) {
+      await p.locator('#mic').tap();
+      await L.waitFor(p, 'recording', () => document.querySelector('#composer').classList.contains('rec'), 8000);
+      await L.sleep(4500);
+      if (offline) await c.context.setOffline(true);
+      const t0 = Date.now(); await p.locator('#send').tap();
+      await L.waitFor(p, 'idle composer and a bubble', () => !document.querySelector('#composer').classList.contains('rec') && document.querySelector('.msg.mine.sending, .msg.mine'), 3000);
+      const freeMs = Date.now() - t0;
+      assert.ok(freeMs < 1500, 'composer free after ' + freeMs);
+      if (offline) {
+        await L.sleep(4000);
+        assert.match(await p.locator('.msg.mine .state').last().innerText(), /Waiting for connection|Sending/, 'visible queued state');
+        await c.context.setOffline(false);
+      }
+      const want = offline ? 2 : 1;
+      let got = [];
+      for (let i = 0; i < 40; i++) { got = await mine(); if (got.length >= want) break; await L.sleep(1500); }
+      await L.sleep(3000); got = await mine();
+      assert.equal(got.length, want, `exactly ${want} message(s): ` + JSON.stringify(got));
+      assert.match(got.at(-1), /deploy/i); assert.doesNotMatch(got.at(-1), /kangaroo/i, 'end word stripped: ' + JSON.stringify(got));
+    }
+  } finally { await c.close(); await srv2.close(); }
 };
 
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);

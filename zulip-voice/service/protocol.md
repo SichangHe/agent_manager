@@ -31,6 +31,9 @@ ops
   - at most 10000 chars; one sentence or chunk (<= 1800 chars) per request keeps latency low
   - result: `audioURL` (signed temporary URL, valid about 60 s; play it directly in a media element), `uri`, `durationMs`, `text`
   - mint a fresh URL while the upload exists: `GET /api/v1/<uri without leading slash>` returns `{"url":..}`
+- `send`: `{"op":"send","id":<send id>,"topic":"agent","items":[{"text":".."}|{"uri":"/user_uploads/.."}],"attachment":"[audio](uri) ..."}`
+  - the service joins the items in order (uploaded clips are transcribed first), removes a trailing end word, and posts the message to the agent channel topic as the human (needs the human key on the server)
+  - the id is the idempotency key: resending the same id returns the stored result and never posts twice; result `ok` fields `messageId`, `text`, or `empty: true`
 - `ack`: `{"op":"ack","id":..,"ids":[request ids]}` deletes those results and uploads now (`ids` optional, defaults to `id`)
 - `log`: `{"op":"log","id":..,"label":"..","text":"<=9500 chars"}` appends client debug text to `client.log` in the service state dir
   - long logs: send several requests in order, labelled `part i/n` (the service appends each; a request holds at most 9500 chars)

@@ -12,11 +12,9 @@ const PREROLL_MS = 300;
 const MIN_LEVEL = 0.008;     // lowered from 0.012 and the margin from 3x to 2.5x: a false trigger is harmless now (the start word gates everything)
 const NOISE_MARGIN = 2.5;
 const BACKOFF_MARGIN = 5;   // after repeated empty results the room is noisy: only clearly louder speech may start a clip
-const GRACE_MS = 10000;   // the open microphone keeps iOS in its quieter play-and-record mode, so release it soon after dictation
 const BARGE_MS = 180;
 const LISTEN_PREROLL_MS = 1200;
-const EARCON_NOTE_S = 0.14;
-const EARCON_GAIN = 0.5;
+export const EARCON_NOTE_S = 0.14;
 const BACKOFF_BARGE_MS = 300;
 const REPLY_BARGE_MS = 100;        // while a spoken reply is open, a short word like "over" must still become a clip
 const REPLY_MIN_SPEECH_MS = 100;
@@ -63,8 +61,12 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
-  let beepCtx = null, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
+export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [660, 440]};
+
+export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon}) {
+  /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
+  const setSession = type => { try { if (navigator.audioSession.type !== type) { navigator.audioSession.type = type; log('route', `audioSession.type -> ${type}`); } } catch { /* unsupported */ } };
+  let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -103,16 +105,28 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     if (silentMs >= (capturing || replyMode ? PAUSE_MS : LISTEN_PAUSE_MS) || clipMs >= MAX_CLIP_S * 1000) cut(false);
   }
 
-  /** Builds the context, stream and worklet once; reused by later dictations until `GRACE_MS` after the last one. */
+  /** Builds the context, stream and worklet once; released by `teardown` as soon as neither dictation nor voice control needs it. */
   async function build() {
-    try { navigator.audioSession.type = 'play-and-record'; } catch { /* unsupported */ }
-    ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const resumed = ctx.resume();
-    stream = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
-    await Promise.race([resumed, new Promise(r => setTimeout(r, 400))]);   // stays suspended until a gesture on iOS; a later tap resumes it
-    const url = URL.createObjectURL(new Blob([WORKLET], {type: 'text/javascript'}));
-    await ctx.audioWorklet.addModule(url);
-    URL.revokeObjectURL(url);
+    const mine = ++epoch;
+    const cancelled = () => epoch !== mine;
+    setSession('play-and-record');
+    const c = new (window.AudioContext || window.webkitAudioContext)();
+    let s = null;
+    const abandon = () => { s?.getTracks().forEach(t => t.stop()); c.close().catch(() => {}); throw Error('cancelled'); };   // `teardown` ran while this build was still waiting
+    try {
+      const resumed = c.resume();
+      s = await navigator.mediaDevices.getUserMedia({audio: {echoCancellation: true, noiseSuppression: true, autoGainControl: true}});
+      if (cancelled()) abandon();
+      for (const t of s.getTracks()) for (const ev of ['mute', 'unmute', 'ended']) t.addEventListener(ev, () => log('route', `mic track ${ev}`));
+      c.addEventListener('statechange', () => log('route', `audio context ${c.state}`));
+      await Promise.race([resumed, new Promise(r => setTimeout(r, 400))]);   // stays suspended until a gesture on iOS; a later tap resumes it
+      if (cancelled()) abandon();
+      const url = URL.createObjectURL(new Blob([WORKLET], {type: 'text/javascript'}));
+      await c.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      if (cancelled()) abandon();
+    } catch (error) { if (error.message !== 'cancelled') { s?.getTracks().forEach(t => t.stop()); c.close().catch(() => {}); } throw error; }
+    ctx = c; stream = s;
     sourceNode = ctx.createMediaStreamSource(stream);
     node = new AudioWorkletNode(ctx, 'cap');
     node.connect(ctx.destination);
@@ -121,11 +135,18 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     log('mic', `ready at ${ctx.sampleRate}Hz`);
   }
 
+  /** One in-flight `build`; a failure forgets it, and a cancelled one (superseded by `teardown`) leaves the newer build alone. */
+  function built() {
+    const p = build().catch(error => { if (warm === p) warm = null; if (error.message !== 'cancelled') teardown(); throw error; });
+    return p;
+  }
+
   function teardown() {
+    epoch++;   // abandons a build that is still in flight
     node?.disconnect(); sourceNode?.disconnect();
     stream?.getTracks().forEach(track => track.stop());
     ctx?.close().catch(() => {});
-    try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
+    setSession('playback');
     ctx = stream = node = sourceNode = warm = null;
     log('mic', 'released');
   }
@@ -135,9 +156,9 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
     /** Voice control on/off: keeps the warm microphone open and watches for sustained speech. `{ok}` or `{ok: false, error}`. */
     async listen(on) {
       listening = on; sustainMs = 0; clearTimeout(idleTimer);
-      if (!on) {  if (!capturing) idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS); return {ok: true}; }
+      if (!on) { if (!capturing) teardown(); return {ok: true}; }
       try {
-        warm ??= build().catch(error => { teardown(); throw error; });
+        warm ??= built();
         await warm;
         if (ctx?.state === 'suspended') await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 400))]);   // without a gesture iOS may keep it suspended
         return {ok: true, running: ctx?.state === 'running'};
@@ -145,17 +166,16 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       catch (error) { log('mic', `listen failed: ${error.name} ${error.message}`); listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied.' : `Microphone unavailable (${error.name}).`}; }
     },
     async start() {
-      clearTimeout(idleTimer);
       if (capturing) return {ok: true};
       capturing = true;
       frames = []; preroll = []; speechMs = silentMs = clipMs = 0; clipsOut = 0; sustainMs = 0;
       try {
-        try { navigator.audioSession.type = 'play-and-record'; } catch { /* unsupported */ }
-        warm ??= build().catch(error => { teardown(); throw error; });
+        warm ??= built();
         await warm;
         if (ctx?.state === 'suspended') await ctx.resume();
         return capturing ? {ok: true} : {ok: false, cancelled: true};
       } catch (error) {
+        if (error.message === 'cancelled') return {ok: false, cancelled: true};   // stop() superseded this start; a newer start owns `capturing`
         capturing = false;
         log('mic', `start failed: ${error.name} ${error.message}`);
         return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied. Allow it in Settings > Safari > Microphone.' : `Microphone unavailable (${error.name}).`};
@@ -166,24 +186,13 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip}) {
       if (capturing && ctx && frames.length) cut(true);
       capturing = false;
       onLevel?.(0);
-      if (!listening) { try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ } }   // voice control keeps one stable audio session: flipping it makes the output volume jump
-      clearTimeout(idleTimer);
       sustainMs = 0; frames = []; preroll = [];
-      idleTimer = setTimeout(() => { if (!capturing && !listening) teardown(); }, GRACE_MS);
+      if (!capturing && !listening) teardown();
     },
     /** Short quiet chime on the warm audio context: `ready` (rising), `done` (falling), `error` (low). Voice detection ignores it while it plays. */
     beep(kind) {
-      let c = ctx;
-      if (!c || c.state !== 'running') { c = beepCtx ??= new (window.AudioContext || window.webkitAudioContext)(); c.resume?.(); }   // no microphone open (voice control off): a small standalone context
-      const notes = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [660, 440]}[kind];
-      const t0 = c.currentTime;
-      notes.forEach((hz, i) => {
-        const osc = c.createOscillator(), gain = c.createGain();
-        osc.frequency.value = hz; osc.connect(gain); gain.connect(c.destination);
-        const start = t0 + i * EARCON_NOTE_S;
-        gain.gain.setValueAtTime(0, start); gain.gain.linearRampToValueAtTime(EARCON_GAIN, start + 0.01); gain.gain.linearRampToValueAtTime(0, start + EARCON_NOTE_S);
-        osc.start(start); osc.stop(start + EARCON_NOTE_S + 0.02);
-      });
+      const notes = EARCON_NOTES[kind];
+      onEarcon?.(kind);   // played by the app on an <audio> element: no extra AudioContext, same output path and level as speech
       earconUntilMs = performance.now() + notes.length * EARCON_NOTE_S * 1000 + 250;
     },
     /** Ignore the microphone for `ms` (our own speech or chime is playing). */

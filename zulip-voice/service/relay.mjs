@@ -15,7 +15,8 @@ const MAX_BATCH = 20;
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
 const MAX_DELETES_PER_SWEEP = 40;
 const ID_PATTERN = /^[a-zA-Z0-9_-]{8,100}$/;
-const OPS = ['stt', 'tts', 'ack', 'ping', 'log'];
+const OPS = ['stt', 'tts', 'ack', 'ping', 'log', 'send'];
+const MAX_SEND_ITEMS = 40;
 const MAX_LOG_REQUEST_CHARS = 9500;
 const LOG_ROTATE_BYTES = 100 * 1024 * 1024;
 const LOG_MAX_AGE_MS = 14 * 86400000;
@@ -30,6 +31,7 @@ export function parseRequest(message, humanId, streamId) {
     if (!Array.isArray(request.texts) || !request.texts.length || request.texts.length > MAX_BATCH || request.texts.some(t => typeof t !== 'string' || !t.trim()) || request.texts.join('').length > MAX_TEXT_CHARS) return null;
   } else if (request.op === 'tts' && (typeof request.text !== 'string' || !request.text.trim() || request.text.length > MAX_TEXT_CHARS)) return null;
   if (request.op === 'stt' && (typeof request.uri !== 'string' || (request.prompt !== undefined && (typeof request.prompt !== 'string' || request.prompt.length > 200)) || (request.kws !== undefined && typeof request.kws !== 'boolean'))) return null;
+  if (request.op === 'send' && (typeof request.topic !== 'string' || !request.topic || request.topic.length > 200 || !Array.isArray(request.items) || !request.items.length || request.items.length > MAX_SEND_ITEMS || request.items.some(i => typeof i?.text !== 'string' && typeof i?.uri !== 'string'))) return null;
   if (request.op === 'log' && (typeof request.text !== 'string' || request.text.length > MAX_LOG_REQUEST_CHARS)) return null;
   if (request.op === 'ack' && !(request.ids ?? [request.id]).every(id => typeof id === 'string')) return null;
   return request;
@@ -162,7 +164,7 @@ function createPool(limit) {
   return {add(priority, fn) { waiting.push({priority, fn, seq: seq++}); pump(); }, stats: () => ({running, waiting: waiting.length})};
 }
 
-export async function createRelay({api, humanId, botId, streamId, stateDir, workers = {stt: 'http://127.0.0.1:8771', tts: 'http://127.0.0.1:8770'}, fetchImpl = fetch, now = Date.now, ttlMs = 30 * 86400000, maxActive = 200, maxUploadBytes = 100 * 1024 * 1024, humanApi = null, orphanTtlMs = 120000}) {
+export async function createRelay({api, humanId, botId, streamId, taskStreamId = 0, stateDir, workers = {stt: 'http://127.0.0.1:8771', tts: 'http://127.0.0.1:8770'}, fetchImpl = fetch, now = Date.now, ttlMs = 30 * 86400000, maxActive = 200, maxUploadBytes = 100 * 1024 * 1024, humanApi = null, orphanTtlMs = 120000}) {
   if (!Number.isSafeInteger(streamId) || streamId <= 0) throw Error('Relay channel required');
   await mkdir(stateDir, {recursive: true, mode: 0o700});
   const statePath = resolve(stateDir, 'requests.json');
@@ -209,6 +211,7 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
   /** Uploads `bytes` and fills `result.uri/attachment/audioURL`. */
   async function upload(bytes, id, result, record) {
     record.bytes = bytes.length;
+    record.loud = true;   // rendered with the loudness filter (about -13 LUFS); older clips are replaced, see `expire`
     const form = new FormData();
     form.append('file', new Blob([bytes], {type: 'audio/mp4'}), 'voice-' + id + '.m4a');
     const uploaded = await api.call('POST', 'user_uploads', form);
@@ -224,6 +227,29 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
     result.audioURLExpiresAt = now() + 55000;
   }
 
+  /** Trailing end word ("kangaroo", with common mishearings; repeats allowed) removed from `text`. */
+  function stripEndWord(text) {
+    const words = text.trim().split(/\s+/).filter(Boolean), flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
+    const forms = new Set(['kangaroo', 'kangaroos', 'kangeroo', 'kangaru', 'kangarew', 'kanguru', 'over']);
+    let n = words.length;
+    while (n > 0 && (forms.has(flat(words[n - 1])) || (n >= 2 && flat(words[n - 2]) + flat(words[n - 1]) === 'kangaroo'))) n -= forms.has(flat(words[n - 1])) ? 1 : 2;
+    return words.slice(0, n).join(' ');
+  }
+
+  /** `send`: joins the client's typed/transcribed text with the transcripts of its not-yet-transcribed clips, in order, and posts it to the topic as the human. */
+  async function sendMessage(request, result) {
+    if (!humanApi) throw Error('no human key on the server');
+    const parts = await Promise.all(request.items.map(async item => {
+      if (typeof item.text === 'string') return item.text;
+      const piece = {}; await transcribe({uri: item.uri}, piece); return piece.text ?? '';
+    }));
+    const text = stripEndWord(parts.map(p => p.trim()).filter(Boolean).join(' ')).trim();
+    if (!text) { result.empty = true; return 'empty message, nothing posted'; }
+    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: taskStreamId, topic: request.topic, content: text});
+    result.messageId = sent.id; result.text = text;
+    return `posted ${sent.id} (${text.length} chars from ${parts.length} parts)`;
+  }
+
   /** Does the work for an accepted request, then posts the result message; never throws. */
   async function process(request, record, queuedMs) {
     const t = now();
@@ -231,13 +257,14 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
     if (request.op === 'tts' && request.proactive) Object.assign(result, {proactive: true, bundle: true, messageId: request.messageId, firstIdx: request.firstIdx});
     let detail = '';
     try {
-      detail = request.op === 'stt' ? await transcribe(request, result) : await synthesize(request, result, record);
+      detail = request.op === 'stt' ? await transcribe(request, result) : request.op === 'send' ? await sendMessage(request, result) : await synthesize(request, result, record);
     } catch (error) {
       result.error = 'Speech processing failed. Try a new request.';
       detail = 'error=' + error.message;
     }
     result.timings = {queueMs: queuedMs, workMs: now() - t};
     record.status = 'sending';
+    if (request.op === 'send') record.resultBody = JSON.stringify(result);
     await save();
     try {
       const sent = await api.call('POST', 'messages', {type: 'stream', to: streamId, topic: request.op, content: JSON.stringify(result)});
@@ -312,7 +339,10 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
         records[request.id] ??= {created: now(), status: 'done', ack: true};
         return;
       }
-      if (records[request.id]) return;
+      if (records[request.id]) {   // a retried `send` gets the stored result again instead of being posted twice
+        if (request.op === 'send' && records[request.id].resultBody) await api.call('POST', 'messages', {type: 'stream', to: streamId, topic: 'send', content: records[request.id].resultBody}).catch(() => {});
+        return;
+      }
       if (request.op === 'log') { await writeLog(request).catch(error => console.log('log failed: ' + error.message)); return; }
       if (request.op === 'ping') { await ping(request).catch(error => console.log('ping failed: ' + error.message)); return; }
       const inflight = Object.values(records).filter(r => r.status === 'working' || r.status === 'sending').length;
@@ -320,7 +350,7 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
       const record = records[request.id] = {created: now(), status: 'working', proactive: !!request.proactive, messageId: request.messageId};
       await save();
       const enqueuedMs = now();
-      pools[request.op].add(request.proactive ? 1 : 0, () => process(request, record, now() - enqueuedMs));
+      (pools[request.op] ?? pools.stt).add(request.proactive ? 1 : 0, () => process(request, record, now() - enqueuedMs));
     },
     /** Pre-renders speech for a new agent message so playback starts instantly. */
     async prepare(message, taskStreamId) {
@@ -372,6 +402,9 @@ export async function createRelay({api, humanId, botId, streamId, stateDir, work
           if (sent) { record.responseId = sent.id; record.status = 'sent'; } else if (now() - record.created > 60000) record.status = 'done';
         }
       }
+      // Clips rendered before the loudness change are about 12 dB quieter: drop them (a few per sweep); the next unread render makes fresh ones.
+      const quiet = Object.entries(records).filter(([, r]) => r.proactive && r.status === 'sent' && r.uri && !r.loud).slice(0, MAX_DELETES_PER_SWEEP);
+      if (quiet.length) { await cleanup(quiet.map(([, r]) => r)); for (const [id, r] of quiet) if (r.status === 'done') delete records[id]; console.log(`replaced ${quiet.length} quiet legacy clips`); }
       const sent = Object.values(records).filter(r => r.status === 'sent');
       const age = r => now() - r.created;
       const full = new Set(sent.filter(r => (r.acked && !r.proactive) || age(r) > ttlMs || (!r.uri && age(r) > orphanTtlMs)));
@@ -409,7 +442,7 @@ export async function run(env = process.env) {
   const taskStreamId = Number(env.VOICE_TASK_STREAM_ID);
   const humanApi = await readHumanApi(env);
   console.log(humanApi ? 'human key loaded: orphan sweep covers client requests and recordings' : 'NO human key: client-owned messages and uploads are not swept');
-  const relay = await createRelay({api, humanId, botId: me.user_id, streamId, stateDir: env.VOICE_RELAY_STATE, humanApi, ttlMs: 1000 * Number(env.VOICE_PROACTIVE_TTL_S || 6 * 3600), orphanTtlMs: 1000 * Number(env.VOICE_ORPHAN_TTL_S || 120), maxUploadBytes: 1048576 * Number(env.VOICE_MAX_UPLOAD_MB || 150)});
+  const relay = await createRelay({api, humanId, botId: me.user_id, streamId, taskStreamId, stateDir: env.VOICE_RELAY_STATE, humanApi, ttlMs: 1000 * Number(env.VOICE_PROACTIVE_TTL_S || 6 * 3600), orphanTtlMs: 1000 * Number(env.VOICE_ORPHAN_TTL_S || 120), maxUploadBytes: 1048576 * Number(env.VOICE_MAX_UPLOAD_MB || 150)});
   const stats = {events: 0, errors: 0};
   let queue = null, backoffMs = 1000;
   const guard = (what, promise) => promise.catch(error => console.log(`${what} failed: ${error.message}`));

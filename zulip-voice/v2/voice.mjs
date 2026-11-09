@@ -35,8 +35,7 @@ export function createVoice({zulip, cfg, log}) {
   }
 
   /** Posts a request and waits for its result: `{ok: true, result}` or `{ok: false, error}`. */
-  async function request(op, fields, timeoutMs) {
-    const id = newId(op);
+  async function request(op, fields, timeoutMs, id = newId(op)) {
     const sentMs = performance.now();
     const waiting = new Promise(resolve => {
       pending.set(id, resolve);
@@ -64,6 +63,22 @@ export function createVoice({zulip, cfg, log}) {
       if (r.ok) return {ok: true, clip: {...r.result, arrivedMs: Date.now()}};
       if (attempt) return r;
     }
+  }
+
+  /**
+   * Sends a voice reply without waiting for transcripts: uploads clips not yet transcribed (in parallel) and asks the service to join the pieces and post them.
+   * `sendId` makes retries idempotent. `items`: `{text}` for finished transcripts, `{blob}` for the rest.
+   */
+  async function sendVoice({sendId, topic, items}) {
+    await Promise.all(items.filter(i => i.blob && !i.uri).map(async i => {
+      const form = new FormData(); form.append('file', i.blob, `dictation-${Date.now()}.wav`);
+      const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
+      if (up.ok) i.uri = up.data.uri;
+    }));
+    if (items.some(i => i.blob && !i.uri)) return {ok: false, error: 'upload failed'};
+    const wire = items.map(i => i.blob ? {uri: i.uri} : {text: i.text});
+    const r = await request('send', {topic, items: wire, attachment: wire.filter(i => i.uri).map(i => `[audio](${i.uri})`).join(' ')}, 90000, sendId);
+    return r.ok ? {ok: true, messageId: r.result.messageId, empty: !!r.result.empty} : r;
   }
 
   /** `{ok: true, text}` for a WAV blob. */
@@ -104,5 +119,5 @@ export function createVoice({zulip, cfg, log}) {
     return r.ok ? {ok: true, ...r.result, totalMs: r.totalMs} : r;
   }
 
-  return {onMessage, backfill, bundleFor, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
+  return {onMessage, backfill, sendVoice, bundleFor, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
 }

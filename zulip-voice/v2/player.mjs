@@ -23,6 +23,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   for (const slot of slots) { slot.el.setAttribute('playsinline', ''); slot.el.hidden = true; document.body.append(slot.el); }
   let items = [], index = -1, active = null, status = 'idle', gen = 0, unlocked = false, error = '';
   const sayEl = Object.assign(new Audio(), {preload: 'auto', playsInline: true});
+  const earEl = Object.assign(new Audio(), {preload: 'auto', playsInline: true});
   let rate = 1, lastTimeMs = 0, lastProgressMs = 0;
   const clips = new Map();
   try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
@@ -216,13 +217,22 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     unlock() {
       if (!unlocked) {
         unlocked = true;
-        sayEl.src = SILENCE; sayEl.play().then(() => sayEl.pause(), () => {});
+        for (const e of [sayEl, earEl]) { e.src = SILENCE; e.play().then(() => e.pause(), () => {}); }
         for (const slot of slots) if (slot !== active && !slot.ready) { slot.el.src = SILENCE; slot.el.play().then(() => { if (slot.el.src === SILENCE) slot.el.pause(); }, err => { if (err.name === 'NotAllowedError') unlocked = false; }); }
         log('audio', 'unlocked by gesture');
       }
       if (status === 'blocked') start(active, gen);
     },
     isUnlocked: () => unlocked,
+    /** Plays a short synthesized earcon on the speech element (no AudioContext): same output path and level as speech, about -13 LUFS like the clips. */
+    earcon(notes, noteS) {
+      const hz = 24000, gain = 0.45, n = Math.round(noteS * hz), pcm = new Int16Array(n * notes.length);
+      notes.forEach((f, k) => { for (let i = 0; i < n; i++) { const env = Math.min(1, i / (hz * 0.01), (n - i) / (hz * 0.03)); pcm[k * n + i] = Math.round(Math.sin(2 * Math.PI * f * i / hz) * env * gain * 32767); } });
+      const head = new DataView(new ArrayBuffer(44)), w = (o, t) => [...t].forEach((c, i) => head.setUint8(o + i, c.charCodeAt(0)));
+      w(0, 'RIFF'); head.setUint32(4, 36 + pcm.byteLength, true); w(8, 'WAVEfmt '); head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true); head.setUint32(24, hz, true); head.setUint32(28, hz * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true); w(36, 'data'); head.setUint32(40, pcm.byteLength, true);
+      const url = URL.createObjectURL(new Blob([head, pcm], {type: 'audio/wav'}));
+      earEl.src = url; earEl.play().catch(() => {}); earEl.onended = () => URL.revokeObjectURL(url);
+    },
     /** Speaks `text` (a short prompt) on its own element, without touching the queue. Resolves with the spoken duration in ms (0 on failure). */
     async say(text) {
       const r = await voice.ttsBatch([text.replace(/[_-]/g, ' ')]);

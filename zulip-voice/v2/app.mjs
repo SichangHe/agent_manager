@@ -3,7 +3,7 @@ import {createLog} from './log.mjs';
 import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
-import {createRecorder} from './recorder.mjs';
+import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
 import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
@@ -637,6 +637,7 @@ function transcribe(part, owner) {
     }
     return r;
   })().then(r => {
+    if (owner.sentAway) return;
     part.state = r.ok ? 'done' : 'failed';
     part.text = r.ok ? r.text : '';
     if (!r.ok) log('stt', `clip failed: ${r.error}`);
@@ -655,7 +656,27 @@ function stopDictation({send, cancel}) {
   dict.stopping = true; dict.sendAfter = send; dict.cancelled = !!cancel;
   recorder.stop();
   if (cancel) draftEl.value = dict.base;
+  if (send && !cancel) { sendDictationNow(dict); return; }   // no waiting for transcripts
   maybeFinish();
+}
+/** Send now: finished transcripts go as text, unfinished clips as uploads for the service to transcribe; the UI is free at once. */
+function sendDictationNow(finished) {
+  finished.sentAway = true;
+  const items = [];
+  const prefix = finished.base.trim();
+  if (prefix) items.push({text: prefix});
+  for (const p of finished.parts) items.push(p.state === 'done' ? {text: p.text} : {blob: p.blob});
+  const preview = [prefix, ...finished.parts.map(p => p.state === 'done' ? p.text : '…')].filter(Boolean).join(' ');
+  $('composer').classList.remove('rec'); $('cancel-rec').hidden = true; $('level').hidden = true;
+  draftEl.readOnly = false; $('mic').setAttribute('aria-label', 'Dictate'); $('send').setAttribute('aria-label', 'Send');
+  dict = null; draftEl.value = ''; autosize(); saveDraft();
+  if (!items.some(i => i.blob || i.text.trim())) { if (finished.wasPlaying) resumeAfterPause(); return; }
+  const local = {localId: `l${Date.now()}_${localCounter++}`, sendId: 'send_' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(16).padStart(2, '0')).join(''), topic: current, text: preview || '…', items, state: 'sending', sentAtMs: Date.now()};
+  locals.set(current, [...(locals.get(current) ?? []), local]);
+  feed.querySelector('#empty')?.remove(); feed.append(localEl(local)); feed.scrollTop = feed.scrollHeight;
+  log('send', `voice send ${local.sendId}: ${items.length} parts, ${items.filter(i => i.blob).length} still to transcribe`);
+  deliver(local);
+  if (finished.wasPlaying) resumeAfterPause(); else maybeAutoplay();
 }
 
 function maybeFinish() {
@@ -671,10 +692,11 @@ function maybeFinish() {
   if (finished.wasPlaying) resumeAfterPause(); else maybeAutoplay();
 }
 
-const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip});
+const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
 let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
 
-const RESUME_DEFAULT = 'over';
+const RESUME_DEFAULT = 'kangaroo';   // chosen from the end-word study: 100% detection in every condition, 0 false accepts, never in agent text
+if (store.get('voice2-resume-phrase', null) === 'over') store.set('voice2-resume-phrase', RESUME_DEFAULT);   // the old default migrates; a customised phrase stays
 const RESUME_SILENCE_MS = 1000;   // plus the recorder's 0.7 s end-of-utterance silence: about 1.7 s of quiet after the phrase
 const normalize = t => t.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 function editDistance(a, b) {
@@ -687,14 +709,17 @@ function editDistance(a, b) {
 function stripResumePhrase(text) {
   const words = text.trim().split(/\s+/).filter(Boolean), norm = words.map(w => normalize(w));
   const phrase = normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT));
-  if (phrase === 'over') {
-    let n = norm.length;
-    if (n >= 3 && norm[n - 1] === 'out' && norm[n - 2] === 'and' && norm[n - 3] === 'over') n -= 2;
+  if (phrase === 'kangaroo' || phrase === 'over') {
+    const forms = phrase === 'over' ? ['over'] : ['kangaroo', 'kangaroos', 'kangeroo', 'kangaru', 'kangarew', 'kanguru'];
+    const endIdx = () => norm.length;
+    let n = endIdx();
+    if (phrase === 'over' && n >= 3 && norm[n - 1] === 'out' && norm[n - 2] === 'and' && norm[n - 3] === 'over') n -= 2;
     const end = n;
-    while (n > 0 && norm[n - 1] === 'over') n--;
+    const isForm = (i) => forms.includes(norm[i]);
+    while (n > 0 && (isForm(n - 1) || (phrase === 'kangaroo' && n >= 2 && norm[n - 2] + norm[n - 1] === 'kangaroo'))) n -= (phrase === 'kangaroo' && n >= 2 && norm[n - 2] + norm[n - 1] === 'kangaroo' && !isForm(n - 1)) ? 2 : 1;
     return n < end ? words.slice(0, n).join(' ') : null;
   }
-  for (const q of [phrase, 'over']) {
+  for (const q of [phrase]) {
     const k = q.split(' ').length;
     if (q && words.length >= k && editDistance(normalize(words.slice(-k).join(' ')), q) <= Math.floor(q.length / 6)) return words.slice(0, -k).join(' ');
   }
@@ -708,7 +733,7 @@ const START_ALIASES = {attention: ['attention', 'attension', 'attentions', 'atte
 /** A saved start word of "pause" (the old default) moves to the new default; a customised word stays. */
 if (store.get('voice2-start-word', null) === 'pause') store.set('voice2-start-word', START_DEFAULT);
 const startWord = () => normalize(store.get('voice2-start-word', START_DEFAULT));
-const VC_PROMPT = 'Pause. Pause. Over.';   // biases Whisper toward the control words
+const VC_PROMPT = 'Attention. Attention. Kangaroo.';   // biases Whisper toward the control words
 const EMPTY_SESSION_MS = 8000;
 let vc = null;   // an open voice-control session: `{base, text, timer, emptyTimer}`
 const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
@@ -957,7 +982,7 @@ $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.tri
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
-$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "over"' : 'Voice control off'); };
+$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "kangaroo"' : 'Voice control off'); };
 function drawLevel(level) {
   const canvas = $('level'), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
@@ -996,9 +1021,17 @@ async function deliver(l) {
   if (l.inflight) return;
   l.inflight = true; l.state = 'sending'; refreshLocal(l);
   try {
-    if (l.uncertain) {
+    if (l.uncertain && !l.items) {
       const found = await zulip.call('GET', 'messages', {narrow: topicQuery(l.topic), anchor: 'newest', num_before: 5, num_after: 0, apply_markdown: false});
       if (found.ok && found.data.messages.some(m => m.sender_id === cfg.humanId && m.content === l.text && m.timestamp * 1000 > l.sentAtMs - 5000)) { log('send', 'uncertain send was delivered'); removeLocal(l); for (const m of found.data.messages) if (model.add(m) && l.topic === current) appendMessage(m); return; }
+    }
+    if (l.items) {   // a voice reply: the service joins the transcripts and posts it, so nothing here waits for text
+      const v = await voice.sendVoice({sendId: l.sendId, topic: l.topic, items: l.items});
+      if (v.ok) { l.state = 'sent'; removeLocal(l); if (v.empty) toast('Nothing was recognised in that recording'); return; }
+      l.attempts = (l.attempts ?? 0) + 1;
+      if (l.attempts <= 12) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
+      else { l.state = 'failed'; refreshLocal(l); toast(v.error); }
+      return;
     }
     const r = await zulip.call('POST', 'messages', {type: 'stream', to: cfg.streamId, topic: l.topic, content: l.text, queue_id: events.queueId() ?? '', local_id: l.localId});
     if (r.ok) { l.state = 'sent'; l.sentId = r.data.id; setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
