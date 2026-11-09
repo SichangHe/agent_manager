@@ -346,7 +346,16 @@ pub fn send(
     }
     let stream = settings::get(settings, "zulip.stream_id");
     let mut fields = vec![("content", content)];
-    if stream.is_empty() {
+    // 🧑 "The PB news should be in its own channel. So is PB urgent."
+    let report_stream =
+        settings::get(settings, &format!("zulip.report_streams.{}", mail::bare(subject).trim()));
+    if !report_stream.is_empty() {
+        fields.extend([
+            ("type", "stream".to_owned()),
+            ("to", report_stream.to_owned()),
+            ("topic", mail::bare(subject).trim().to_owned()),
+        ]);
+    } else if stream.is_empty() {
         fields.extend([
             ("type", "direct".to_owned()),
             ("to", json!([id]).to_string()),
@@ -378,7 +387,11 @@ pub fn send(
                     .map(|(_, value)| value.clone())
                     .unwrap_or_default()
             };
-            json!([{"operator":"stream","operand":value("to").parse::<u64>().unwrap_or_default()},{"operator":"topic","operand":value("topic")}])
+            {
+                let to = value("to");
+                let stream = to.parse::<u64>().map(Value::from).unwrap_or(Value::from(to));
+                json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":value("topic")}])
+            }
         }
         _ => {
             json!([{"operator":"dm","operand":fields.iter().find(|(name, _)| *name == "to").map(|(_, value)| value.clone()).unwrap_or_default()}])

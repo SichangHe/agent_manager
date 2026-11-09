@@ -119,6 +119,7 @@ class Speech:
             enabled = _json.loads((Path.home() / ".config/zulip-voice/settings.json").read_text()).get("kws") is True
         except (OSError, ValueError):
             enabled = False
+        print(f"kws: {'enabled' if enabled and self.kind == 'stt' else 'disabled'} (kind={self.kind}, engine={getattr(self, 'engine', '?')})", flush=True)   # visible in the unit's journal
         if not enabled or self.kind != "stt":
             return
         import sherpa_onnx

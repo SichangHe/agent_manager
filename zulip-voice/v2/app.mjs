@@ -700,23 +700,26 @@ function stripResumePhrase(text) {
   }
   return null;
 }
-const START_DEFAULT = 'pause';
+const START_DEFAULT = 'attention';   // chosen from the trigger-word study: long, no clipped final consonant, 98-100% detection, 0 false accepts
 const LONG_SILENCE_DEFAULT_S = 20;   // "over" is the main end signal; a short silence cut replies off while the user was still thinking
 const FOLLOW_UP_GRACE_MS = 6000;
 let lastReplyEndMs = 0;
-const START_ALIASES = {pause: ['pause', 'paws', 'pose', 'pours', 'paused', 'pawz', 'pulse', 'pulls', 'polls']};
+const START_ALIASES = {attention: ['attention', 'attension', 'attentions', 'attenshun', 'a tension', 'attending'], pause: ['pause', 'paws', 'pose', 'pours', 'paused', 'pawz', 'pulse', 'pulls', 'polls']};
+/** A saved start word of "pause" (the old default) moves to the new default; a customised word stays. */
+if (store.get('voice2-start-word', null) === 'pause') store.set('voice2-start-word', START_DEFAULT);
+const startWord = () => normalize(store.get('voice2-start-word', START_DEFAULT));
 const VC_PROMPT = 'Pause. Pause. Over.';   // biases Whisper toward the control words
 const EMPTY_SESSION_MS = 8000;
 let vc = null;   // an open voice-control session: `{base, text, timer, emptyTimer}`
 const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
 const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
 
-/** `text` after a leading start word ("pause", fuzzy, repeated "pause pause" collapsed), or null when it does not start with one. */
+/** `text` after a leading start word (default "attention", fuzzy, repeats collapsed), or null when it does not start with one. */
 function afterStartWord(text) {
-  const word = normalize(store.get('voice2-start-word', START_DEFAULT));
+  const word = startWord();
   const accepted = new Set([word, ...(START_ALIASES[word] ?? [])]);
   const words = text.trim().split(/\s+/).filter(Boolean);
-  const isStart = w => { const n = normalize(w); return n && (accepted.has(n) || editDistance(n, word) <= (word.length >= 5 ? 1 : 0)); };
+  const isStart = w => { const n = normalize(w); return n && (accepted.has(n) || editDistance(n, word) <= Math.floor(word.length / 4)); };
   if (!words.length || !isStart(words[0])) return null;
   let i = 0;
   while (i < words.length && isStart(words[i])) i++;
@@ -768,7 +771,7 @@ async function handleCommandClip(blob, meta) {
   }
   if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
   if (pendingChoice && Date.now() < pendingChoice.until) {   // while a switch question is open, answers are matched first, even inside or after "pause"
-    const w = normalize(heard).replace(/^((pause|paws|pulse|pose) )+/, '');
+    const w = (afterStartWord(heard) !== null ? normalize(afterStartWord(heard)) : normalize(heard));
     const NUMBERS = ['one first 1', 'two second 2', 'three third 3'];
     let pick = null;
     if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
@@ -780,10 +783,13 @@ async function handleCommandClip(blob, meta) {
   }
   if (!vc) {
     // With server keyword spotting on (r.kws is a list): it must have heard PAUSE, and Whisper must confirm the standalone word, so "paused"/"paws" never open a session.
-    const kwsOn = Array.isArray(r.kws) && Date.now() - lastReplyEndMs >= FOLLOW_UP_GRACE_MS;   // a follow-up right after a send needs no start word
-    if (kwsOn && !r.kws.includes('PAUSE')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear pause)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
+    const kwsOn = Array.isArray(r.kws) && startWord() === 'attention' && Date.now() - lastReplyEndMs >= FOLLOW_UP_GRACE_MS;   // the server spots "attention" only   // a follow-up right after a send needs no start word
+    if (kwsOn && !r.kws.includes('ATTENTION')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear the start word)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     let rest = afterStartWord(heard);
-    if (kwsOn && rest !== null && !/^(pause|pulse|pulls|polls|pawz)\b/i.test(normalize(heard))) { log('vc', `ignored: "${heard}" (transcript is not the word pause)`); rest = null; resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
+    // Whisper sometimes drops the leading start word but keeps the command after it: with a spotter hit, a bare command still counts.
+    const commandLike = t => { const n = normalize(t); return SWITCH_RE.test(n) || !!navCommand(n) || CANCEL_RE.test(n) || n === 'send'; };
+    if (kwsOn && rest === null && commandLike(heard)) rest = heard;
+    if (kwsOn && rest !== null && afterStartWord(heard) === null && !commandLike(heard)) { log('vc', `ignored: "${heard}" (transcript is not the start word)`); rest = null; resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
     if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     noteStartResult(true);
@@ -895,7 +901,7 @@ function cancelSession() {
 function addToSession(heard) {
   if (endsWithCancel(heard)) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
   clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
-  vc.text = [vc.text, heard.replace(/^(?:\s*pause\b[\s,.!?]*)+/i, '').trim()].filter(Boolean).join(' ');
+  vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
   setVcState('dictating', 'dictating reply');
   armSessionTimer();
@@ -951,7 +957,7 @@ $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.tri
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
-$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say pause, finish a reply with "over"' : 'Voice control off'); };
+$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "over"' : 'Voice control off'); };
 function drawLevel(level) {
   const canvas = $('level'), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);

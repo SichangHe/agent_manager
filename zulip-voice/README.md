@@ -65,7 +65,7 @@ You need: a Zulip organization, a Linux machine with an NVIDIA GPU (two GPUs rec
    - images and files show inline; swipe an image sideways to fold it; Settings can hide all
    - settings (top right gear): autoplay, speed, hide attachments, sign out
 4. voice control (Settings > Voice control, or the waveform button next to the mic; needs the microphone)
-   - say the start word first (default "pause"); the app stays silent for anything else, so noise and talk around you are ignored
+   - say the start word first (default "attention"); the app stays silent for anything else, so noise and talk around you are ignored
    - then say one of: `back` / `previous` (twice = two steps), `previous message`, `next`, `next message`, `again`, `switch agent to NAME` (the app asks "Switch to NAME?", answer yes or no), `send`
    - anything else is your reply, shown live in the draft; finish with `over` (or a long silence): it is sent and reading resumes
    - the start word, the end phrase and the long-silence time are editable in Settings
