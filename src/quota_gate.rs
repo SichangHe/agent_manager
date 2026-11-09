@@ -207,7 +207,11 @@ pub fn pass(settings: &Settings, store: &Store) -> Vec<String> {
         let waiting = workers
             .iter()
             .any(|w| w.pool.as_deref() == Some(name) && held.contains(&w.address));
-        if pool.state == Status::Unknown && waiting && now - pool.since > UNKNOWN_NOTICE_S {
+        if enforce
+            && pool.state == Status::Unknown
+            && waiting
+            && now - pool.since > UNKNOWN_NOTICE_S
+        {
             notice(
                 settings,
                 store,
@@ -215,7 +219,8 @@ pub fn pass(settings: &Settings, store: &Store) -> Vec<String> {
                 &format!("{name} quota has been unknown for over an hour while work waits on it."),
             );
         }
-        if pool.verdict() == Verdict::Waste
+        if enforce
+            && pool.verdict() == Verdict::Waste
             && !waiting
             && let Some(e) = &pool.estimate
         {

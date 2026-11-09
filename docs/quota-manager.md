@@ -69,7 +69,7 @@ amh side
 - admission (workers only: managers are never held back; a pinned model counts as a named tool): `task start` without `--tool` goes to the default pool, else the other if the default is closed; a named tool is never swapped, a closed pool refuses it
     - closed: not available, or projected to run out and the new priority does not exceed the lowest running worker's
 - `quota.enforce = "true"` turns gating and admission on; otherwise the pass only logs `shadow: would ...`
-- notices once per key via `quota-notices.json`, to `quota.notify_task` (default `quota_support.md`)
+- notices (the unknown-pool and waste ones only with `quota.enforce`) once per key via `quota-notices.json`, to `quota.notify_task` (default `quota_support.md`)
     - new credential, observer dead, proxy unreadable twice, actuator failed twice, pool unknown over 1 h with work waiting, uncertain or rejected redemption
     - predicted waste with nothing waiting goes to the main manager
 
