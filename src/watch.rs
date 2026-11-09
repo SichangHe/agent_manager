@@ -60,11 +60,15 @@ enum IntakeError {
 
 /// What the watcher remembers between polls; a restart forgets it, which only repeats a retry or a reminder early.
 struct Watcher {
-    link: Link,
-    human_link: Link,
     /// When the delivery of a task's blocks last reached nobody.
     failed_at: BTreeMap<String, Instant>,
     pending_events: Option<i64>,
+}
+
+/// The email intake thread owns both persistent IMAP connections.
+struct MailIntake {
+    link: Link,
+    human_link: Link,
 }
 
 // 🧑 "Zulip delay feels very large now": the agent scan asks Omnigent about every agent, which takes about a
@@ -909,7 +913,7 @@ fn deliver_block(
     settled.delivered
 }
 
-impl Watcher {
+impl MailIntake {
     /// Take in the human's and the guest's unread mail on the kept connection, logging in again after a failure.
     fn take_in(&mut self, settings: &Settings, store: &Store) {
         let rules = match crate::mail_routes::rules(settings) {
@@ -975,7 +979,32 @@ impl Watcher {
             retry_at: Instant::now() + RECONNECT,
         };
     }
+}
 
+/// Poll email independently so IMAP waits do not stall Zulip pickup or delivery.
+fn poll_mail() {
+    let mut intake = MailIntake {
+        link: Link::Down {
+            retry_at: Instant::now(),
+        },
+        human_link: Link::Down {
+            retry_at: Instant::now(),
+        },
+    };
+    loop {
+        match settings::load() {
+            Ok(settings) => {
+                let began = Instant::now();
+                intake.take_in(&settings, &Store::new(&settings));
+                log_elapsed("IMAP intake", began);
+            }
+            Err(error) => log(&format!("mail settings failed: {error}")),
+        }
+        thread::sleep(MAIL_POLL);
+    }
+}
+
+impl Watcher {
     /// Deliver queued typed/guest blocks and stored human messages, then mark their rows sent.
     ///
     /// A block in a task that has no agent (done or retired) goes to that task's manager, else to the main manager.
@@ -1335,12 +1364,6 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
 /// Loop forever; the service manager restarts the process if it dies. Returns the exit status when the settings cannot be read.
 pub fn run() -> u8 {
     let mut watcher = Watcher {
-        link: Link::Down {
-            retry_at: Instant::now(),
-        },
-        human_link: Link::Down {
-            retry_at: Instant::now(),
-        },
         failed_at: BTreeMap::new(),
         pending_events: None,
     };
@@ -1371,6 +1394,7 @@ pub fn run() -> u8 {
     omnigent::NO_WAIT.store(true, std::sync::atomic::Ordering::Relaxed);
     log("watcher started");
     std::thread::spawn(scan_agents);
+    std::thread::spawn(poll_mail);
     loop {
         let settings = match settings::load() {
             Ok(settings) => settings,
@@ -1414,9 +1438,6 @@ pub fn run() -> u8 {
             log_elapsed("git commit", phase);
         }
         if last_poll.is_none_or(|last| last.elapsed() >= MAIL_POLL) {
-            let phase = Instant::now();
-            watcher.take_in(&settings, &store);
-            log_elapsed("IMAP intake", phase);
             let phase = Instant::now();
             if crate::zulip::enabled(&settings)
                 && let Err(error) = take_in_zulip(&settings, &store)

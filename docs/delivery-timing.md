@@ -33,6 +33,10 @@ correlation
 - watcher diagnostic log reports phases taking at least one second
     - archival, Git, IMAP, Zulip intake, request notifications, message delivery, compression, outbox, scheduled jobs and cleanup
     - durations expose serial work that delays the next nominal five-second poll
+- IMAP intake owns its connections on one separate thread
+    - measured serial intake took 25.5 seconds before Zulip pickup
+    - existing receipt locks, deduplication, retries and database wakeups are retained
+    - only the main watcher delivers queued messages
 
 verification
 - loopback HTTP test checks request header, response correlation and content exclusion
