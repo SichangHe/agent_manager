@@ -199,7 +199,6 @@ fn revive(settings: &Settings, store: &Store, table: &str, name: &str) -> Result
         long_running: true,
         email: None,
         lines: None,
-        priority: None,
     };
     let address = agents::start_task(settings, store, &new)?;
     let _lock = store.lock()?;

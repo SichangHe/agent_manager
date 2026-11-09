@@ -9,10 +9,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
-use crate::quota_core::{self as core, Act, Bucket, Reading, Snapshot, Status, Verdict};
-use crate::quota_pause;
+use crate::quota_core::{self as core, Act, Bucket, Reading, Snapshot, Status};
 use crate::settings;
 use crate::store::Store;
+use crate::{agents, omnigent};
 
 type Settings = BTreeMap<String, String>;
 
@@ -25,6 +25,83 @@ const NOTICE_AFTER_FAILURES: u32 = 2;
 const EVENTS_MAX_BYTES: u64 = 8 << 20;
 const EVENTS: &str = "quota-events.jsonl";
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+
+const NOTICES_FILE: &str = "quota-notices.json";
+const APPEARED_RECORD: &str = "amh-quota-appeared.txt";
+
+/// Tell once per `key`: the notices file remembers what was sent, and a failed send is tried again next time.
+fn notice_to(settings: &Settings, store: &Store, key: &str, to: &str, text: &str) {
+    let path = store.state_dir.join(NOTICES_FILE);
+    let mut sent: serde_json::Map<String, Value> = fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if sent.contains_key(key) {
+        return;
+    }
+    let delivered = agents::address_of(store, to)
+        .and_then(|a| omnigent::send(settings, &a, &format!("amh quota: {text}")));
+    match delivered {
+        Ok(()) => {
+            sent.insert(key.to_owned(), json!(chrono::Utc::now().timestamp()));
+            if let Err(e) = crate::taskfile::write(&path, &Value::Object(sent).to_string()) {
+                println!("quota: cannot record notice {key}: {e}");
+            }
+        }
+        Err(e) => println!("quota: notice {key} not delivered to {to}: {e}"),
+    }
+}
+
+/// Tell the task that owns quota questions.
+fn notice(settings: &Settings, store: &Store, key: &str, text: &str) {
+    let to = Some(settings::get(settings, "quota.notify_task"))
+        .filter(|t| !t.is_empty())
+        .unwrap_or("quota_support.md");
+    notice_to(settings, store, key, to, text);
+}
+
+/// The watcher's quota pass: tell about a dead observer, and clear Claude's session limit evidence when its quota has appeared. Returns log lines.
+pub fn watcher_pass(settings: &Settings, store: &Store) -> Vec<String> {
+    let now = chrono::Utc::now().timestamp();
+    let snapshot = load_snapshot(&store.state_dir);
+    let mut lines = Vec::new();
+    if snapshot
+        .as_ref()
+        .is_none_or(|s| now - s.generated_at > core::TTL_S)
+    {
+        let seen = snapshot.as_ref().map_or(0, |s| s.generated_at);
+        notice(
+            settings,
+            store,
+            &format!("observer_dead:{seen}"),
+            "the quota snapshot is over 15 minutes old: the observer (`amh quota serve`) is not running.",
+        );
+    }
+    let snapshot = snapshot.unwrap_or_default();
+    let last = store.record(APPEARED_RECORD).unwrap_or_default();
+    let recorded = |pool: &str| {
+        last.lines()
+            .find_map(|l| l.strip_prefix(&format!("{pool}="))?.parse::<i64>().ok())
+            .unwrap_or_default()
+    };
+    let mut record = String::new();
+    for (pool, at) in &snapshot.appeared_at {
+        record.push_str(&format!("{pool}={at}\n"));
+        if *at > recorded(pool) && pool == "claude" {
+            match crate::quota::clear(&store.state_dir.join("amh-quota-pauses.json")) {
+                Ok(()) => lines
+                    .push("quota appeared for claude: cleared session limit evidence".to_owned()),
+                Err(e) => lines.push(format!("cannot clear session limit evidence: {e}")),
+            }
+        }
+    }
+    if record != last
+        && let Err(e) = store.set_record(APPEARED_RECORD, &record)
+    {
+        lines.push(format!("cannot record quota_appeared: {e}"));
+    }
+    lines
+}
 
 fn log(text: &str) {
     println!(
@@ -331,7 +408,7 @@ fn redeem(
     ) {
         Err(CallError::Rejected(why)) => {
             files.step(now, &episode, "rejected", json!({"why": why}));
-            quota_pause::notice(
+            notice(
                 settings,
                 store,
                 &format!("rejected:{episode}"),
@@ -344,7 +421,7 @@ fn redeem(
         Err(CallError::Uncertain(why)) => {
             files.step(now, &episode, "uncertain", json!({"why": why}));
             if !reconcile(proxy, files, now, &episode, reading) {
-                quota_pause::notice(
+                notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),
@@ -358,7 +435,7 @@ fn redeem(
         Ok(_) => {
             files.step(now, &episode, "called", json!({}));
             if !reconcile(proxy, files, now, &episode, reading) {
-                quota_pause::notice(
+                notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),
@@ -390,7 +467,7 @@ pub fn cycle(
         Err(e) => {
             memory.proxy_failures += 1;
             if memory.proxy_failures >= NOTICE_AFTER_FAILURES && live {
-                quota_pause::notice(
+                notice(
                     settings,
                     store,
                     &format!("proxy_down:{}", now / 3600),
@@ -424,7 +501,7 @@ pub fn cycle(
             if !allow.contains(name) && !deny.contains(name) {
                 unclassified.insert(name.clone());
                 if live {
-                    quota_pause::notice(
+                    notice(
                         settings,
                         store,
                         &format!("added:{name}"),
@@ -473,7 +550,7 @@ pub fn cycle(
                 *n += 1;
                 files.event(now, "action_failed", &key, json!({"error": e}));
                 if *n == NOTICE_AFTER_FAILURES {
-                    quota_pause::notice(
+                    notice(
                         settings,
                         store,
                         &format!("actuator:{key}:{}", now / 86400),
@@ -492,15 +569,6 @@ pub fn cycle(
                 e.subject.split(' ').next().unwrap_or_default().to_owned(),
                 now,
             );
-        }
-    }
-    for (name, pool) in &pools {
-        let before = prev.pools.get(name).map(|p| p.verdict());
-        if pool.verdict() == Verdict::Waste && before != Some(Verdict::Waste) {
-            events.push(core::Event {
-                kind: "predicted_waste",
-                subject: name.clone(),
-            });
         }
     }
     let authorized = live && settings::get(settings, "quota.redeem") == "true";
@@ -522,7 +590,7 @@ pub fn cycle(
                 .iter()
                 .find(|r| Some(&r.name) == credit_cred.as_ref());
             if !reading.is_some_and(|r| reconcile(proxy, files, now, &episode, r)) {
-                quota_pause::notice(
+                notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),
@@ -581,8 +649,7 @@ pub fn cycle(
         log(&format!("{} {}", e.kind, e.subject));
     }
     for b in &snapshot.buckets {
-        let mut sample = b.to_json();
-        sample["history"] = Value::Null;
+        let sample = b.to_json();
         files.append(EVENTS, json!({"t": now, "sample": sample}));
     }
     crate::taskfile::write(&snapshot_path(&files.dir), &snapshot.to_json().to_string())
@@ -650,7 +717,7 @@ fn span(seconds: i64) -> String {
     }
 }
 
-/// The human's view: pools with their estimate, buckets, and the latest events.
+/// The human's view: pools, buckets, and the latest events.
 pub fn status_text(snapshot: &Snapshot, now: i64, events: &[Value]) -> String {
     let mut out = format!(
         "snapshot {} old, observer {}\n",
@@ -664,16 +731,6 @@ pub fn status_text(snapshot: &Snapshot, now: i64, events: &[Value]) -> String {
         out.push_str(&format!("{name}: {}", pool.state.name()));
         if let Some(at) = pool.next_reset {
             out.push_str(&format!(", next reset in {}", span(at - now)));
-        }
-        if let Some(e) = &pool.estimate {
-            out.push_str(&format!(
-                ", {:.0}% left, burn {:.1}%/h, {} to reset, projected {:+.0}%: {:?}",
-                e.remaining_pct,
-                e.burn_pct_per_h,
-                span((e.hours_to_reset * 3600.0) as i64),
-                e.projected_pct,
-                pool.verdict()
-            ));
         }
         out.push('\n');
         for b in snapshot.buckets.iter().filter(|b| b.pool == name) {

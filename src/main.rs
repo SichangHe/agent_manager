@@ -17,7 +17,6 @@ mod omnigent;
 mod org;
 mod quota;
 mod quota_core;
-mod quota_pause;
 mod quota_observer;
 mod requests;
 mod settings;

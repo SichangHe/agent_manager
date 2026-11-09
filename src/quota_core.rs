@@ -1,5 +1,4 @@
 //! Quota model and policy as pure functions of (proxy readings, previous snapshot, config, now). See `docs/quota-manager.md`.
-// 🧑 "We just need some priority of tasks plus estimation of whether we'd run out"
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -15,12 +14,6 @@ const OK_BELOW_PCT: f64 = 99.0;
 const OK_STREAK: u32 = 2;
 /// A 5h window above this ranks its bucket below the others until it resets.
 const HOT_5H_PCT: f64 = 90.0;
-/// Burn is measured over this long.
-const HISTORY_S: i64 = 3600;
-/// Less history than this gives no burn estimate.
-const MIN_SPAN_S: i64 = 600;
-/// Projected leftover per bucket, in percentage points, above which quota is predicted to expire unused.
-const WASTE_PCT_PER_BUCKET: f64 = 20.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -98,22 +91,6 @@ pub struct Bucket {
     pub since: i64,
     pub streak: u32,
     pub next_reset: Option<i64>,
-    pub history: Vec<(i64, f64)>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Estimate {
-    pub remaining_pct: f64,
-    pub burn_pct_per_h: f64,
-    pub hours_to_reset: f64,
-    pub projected_pct: f64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Verdict {
-    RunOut,
-    Fits,
-    Waste,
 }
 
 #[derive(Clone, Debug)]
@@ -121,20 +98,6 @@ pub struct Pool {
     pub state: Status,
     pub since: i64,
     pub next_reset: Option<i64>,
-    pub n_buckets: usize,
-    pub estimate: Option<Estimate>,
-}
-
-impl Pool {
-    pub fn verdict(&self) -> Verdict {
-        match &self.estimate {
-            Some(e) if e.projected_pct < 0.0 => Verdict::RunOut,
-            Some(e) if e.projected_pct >= WASTE_PCT_PER_BUCKET * self.n_buckets as f64 => {
-                Verdict::Waste
-            }
-            _ => Verdict::Fits,
-        }
-    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -309,23 +272,6 @@ pub fn parse_auth_files(answer: &Value, now: i64) -> Vec<Reading> {
         .collect()
 }
 
-/// The used percentage that binds: the weekly window if active, else the highest active one.
-fn binding_used(windows: &[Window]) -> Option<f64> {
-    let active = |w: &&Window| w.state == WinState::Active;
-    windows
-        .iter()
-        .filter(active)
-        .find(|w| w.kind == Kind::D7)
-        .map(|w| w.used_pct)
-        .or_else(|| {
-            windows
-                .iter()
-                .filter(active)
-                .map(|w| w.used_pct)
-                .reduce(f64::max)
-        })
-}
-
 enum Raw {
     Exhausted(Option<i64>),
     Ok,
@@ -416,15 +362,6 @@ pub fn step(prev: &[Bucket], readings: &[Reading], now: i64) -> (Vec<Bucket>, Ve
                 .filter(|w| w.state == WinState::Active && w.kind == Kind::D7)
                 .find_map(|w| w.resets_at)
         });
-        let mut history: Vec<(i64, f64)> = old.map(|b| b.history.clone()).unwrap_or_default();
-        if let (Some(used), true, true) = (
-            binding_used(&r.windows),
-            r.observed_at.is_some(),
-            matches!(raw, Raw::Ok | Raw::Borderline | Raw::Exhausted(_)),
-        ) {
-            history.push((now, used));
-        }
-        history.retain(|(t, _)| now - t <= HISTORY_S);
         let since = old.filter(|b| b.status == status).map_or(now, |b| b.since);
         if let Some(old) = old {
             let kind = match (old.status, status) {
@@ -449,23 +386,9 @@ pub fn step(prev: &[Bucket], readings: &[Reading], now: i64) -> (Vec<Bucket>, Ve
             since,
             streak,
             next_reset,
-            history,
         });
     }
     (buckets, events)
-}
-
-/// Observed rise of the used percentage per hour over the last hour; drops (resets) are ignored.
-fn burn_pct_per_h(history: &[(i64, f64)]) -> f64 {
-    let (Some(first), Some(last)) = (history.first(), history.last()) else {
-        return 0.0;
-    };
-    let span_s = last.0 - first.0;
-    if span_s < MIN_SPAN_S {
-        return 0.0;
-    }
-    let rise: f64 = history.windows(2).map(|w| (w[1].1 - w[0].1).max(0.0)).sum();
-    rise * 3600.0 / span_s as f64
 }
 
 /// Per tool: the union of its available buckets; with none, unknown beats exhausted.
@@ -487,27 +410,6 @@ pub fn pools(buckets: &[Bucket], now: i64) -> BTreeMap<String, Pool> {
                 .filter(|b| b.status == state)
                 .filter_map(|b| b.next_reset)
                 .min();
-            let live: Vec<&&Bucket> = of(Status::Available).collect();
-            let remaining_pct = live
-                .iter()
-                .filter_map(|b| binding_used(&b.windows))
-                .map(|u| 100.0 - u)
-                .sum();
-            let burn = live.iter().map(|b| burn_pct_per_h(&b.history)).sum::<f64>();
-            let hours_to_reset = live
-                .iter()
-                .filter_map(|b| b.next_reset)
-                .map(|at| (at - now).max(0) as f64 / 3600.0)
-                .reduce(f64::min);
-            let estimate =
-                hours_to_reset
-                    .filter(|_| state == Status::Available)
-                    .map(|hours_to_reset| Estimate {
-                        remaining_pct,
-                        burn_pct_per_h: burn,
-                        hours_to_reset,
-                        projected_pct: remaining_pct - burn * hours_to_reset,
-                    });
             let since = mine
                 .iter()
                 .filter(|b| b.status == state)
@@ -520,8 +422,6 @@ pub fn pools(buckets: &[Bucket], now: i64) -> BTreeMap<String, Pool> {
                     state,
                     since,
                     next_reset,
-                    n_buckets: mine.len(),
-                    estimate,
                 },
             )
         })
@@ -669,121 +569,6 @@ pub fn unfinished(journal: &[Value]) -> Vec<String> {
         .collect()
 }
 
-#[derive(Clone, Debug)]
-pub struct Worker {
-    pub address: String,
-    pub pool: Option<String>,
-    pub priority: i64,
-    pub is_manager: bool,
-}
-
-#[derive(Debug, Default, PartialEq)]
-pub struct Pauses {
-    /// Address to the reason it gets no nudges and no mail.
-    pub paused: BTreeMap<String, String>,
-    /// Addresses released this pass, highest priority first; each gets one nudge.
-    pub resumed: Vec<String>,
-}
-
-/// Which workers wait, derived afresh from the pools on every watcher pass.
-///
-/// An exhausted or unknown pool pauses all its workers. A pool projected to run out pauses its lowest-priority workers (never managers) until the remaining ones fit, assuming each burns equally. Workers paused last pass that now have room come back by priority, `max_resumes` per pass.
-pub fn pauses(
-    pools: &BTreeMap<String, Pool>,
-    workers: &[Worker],
-    prev_paused: &BTreeSet<String>,
-    max_resumes: usize,
-) -> Pauses {
-    let mut out = Pauses::default();
-    for pool in POOLS {
-        let mut mine: Vec<&Worker> = workers
-            .iter()
-            .filter(|w| w.pool.as_deref() == Some(pool))
-            .collect();
-        mine.sort_by_key(|w| std::cmp::Reverse(w.priority));
-        let state = pools.get(pool).map_or(Status::Unknown, |p| p.state);
-        let Some(info) = pools.get(pool).filter(|_| state == Status::Available) else {
-            // Unknown never invents quota: no resumes. But a worker that was running keeps running; only exhaustion stops it.
-            let waiting =
-                |w: &&&Worker| state == Status::Exhausted || prev_paused.contains(&w.address);
-            out.paused.extend(mine.iter().filter(waiting).map(|w| {
-                (
-                    w.address.clone(),
-                    format!("{pool} quota is {}", state.name()),
-                )
-            }));
-            continue;
-        };
-        let running = mine
-            .iter()
-            .filter(|w| !prev_paused.contains(&w.address))
-            .count()
-            .max(1) as f64;
-        let cap = match &info.estimate {
-            Some(e) if e.burn_pct_per_h > 0.0 && e.hours_to_reset > 0.0 => {
-                let per_worker = e.burn_pct_per_h / running;
-                (e.remaining_pct / (per_worker * e.hours_to_reset))
-                    .floor()
-                    .max(0.0) as usize
-            }
-            _ => usize::MAX,
-        };
-        let mut kept = 0;
-        let mut resumes = 0;
-        for w in mine {
-            let was_paused = prev_paused.contains(&w.address);
-            if w.is_manager {
-                kept += 1;
-            } else if kept >= cap {
-                out.paused.insert(
-                    w.address.clone(),
-                    format!("{pool} quota is projected to run out before its reset"),
-                );
-                continue;
-            } else {
-                kept += 1;
-            }
-            if was_paused {
-                if resumes >= max_resumes {
-                    out.paused
-                        .insert(w.address.clone(), "waiting its turn to resume".to_owned());
-                } else {
-                    resumes += 1;
-                    out.resumed.push(w.address.clone());
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Where a new task goes: the default pool, else the other if the default is closed.
-///
-/// A pool is closed when it is not available, or projected to run out and the new task would not outrank its lowest-priority running worker.
-pub fn choose_tool<'a>(
-    default: &'a str,
-    priority: i64,
-    pools: &BTreeMap<String, Pool>,
-    lowest_running: &BTreeMap<String, i64>,
-) -> Result<&'a str, String> {
-    let open = |pool: &str| {
-        pools.get(pool).is_some_and(|p| {
-            p.state == Status::Available
-                && (p.verdict() != Verdict::RunOut
-                    || lowest_running.get(pool).is_none_or(|low| priority > *low))
-        })
-    };
-    if !POOLS.contains(&default) || open(default) {
-        return Ok(default);
-    }
-    match POOLS.iter().find(|p| **p != default && open(p)) {
-        Some(other) => Ok(other),
-        None => Err(format!(
-            "no open quota pool: {default} is closed and so is the other"
-        )),
-    }
-}
-
 impl Bucket {
     pub fn to_json(&self) -> Value {
         let windows: Vec<Value> = self
@@ -800,7 +585,7 @@ impl Bucket {
             .collect();
         json!({"principal": self.principal, "pool": self.pool, "creds": self.creds, "windows": windows,
             "observed_at": self.observed_at, "status": self.status.name(), "since": self.since, "streak": self.streak,
-            "next_reset": self.next_reset, "history": self.history})
+            "next_reset": self.next_reset})
     }
 
     pub fn from_json(v: &Value) -> Option<Self> {
@@ -836,44 +621,20 @@ impl Bucket {
             since: v["since"].as_i64().unwrap_or_default(),
             streak: v["streak"].as_u64().unwrap_or_default() as u32,
             next_reset: v["next_reset"].as_i64(),
-            history: v["history"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|p| Some((p[0].as_i64()?, p[1].as_f64()?)))
-                .collect(),
         })
     }
 }
 
 impl Pool {
     pub fn to_json(&self) -> Value {
-        let estimate = self.estimate.as_ref().map(|e| {
-            json!({"remaining_pct": e.remaining_pct, "burn_pct_per_h": e.burn_pct_per_h,
-                "hours_to_reset": e.hours_to_reset, "projected_pct": e.projected_pct})
-        });
-        let verdict = match self.verdict() {
-            Verdict::RunOut => "run_out",
-            Verdict::Fits => "fits",
-            Verdict::Waste => "waste",
-        };
-        json!({"state": self.state.name(), "since": self.since, "next_reset": self.next_reset, "n_buckets": self.n_buckets,
-            "estimate": estimate, "verdict": verdict})
+        json!({"state": self.state.name(), "since": self.since, "next_reset": self.next_reset})
     }
 
     pub fn from_json(v: &Value) -> Self {
-        let estimate = v["estimate"].is_object().then(|| Estimate {
-            remaining_pct: v["estimate"]["remaining_pct"].as_f64().unwrap_or_default(),
-            burn_pct_per_h: v["estimate"]["burn_pct_per_h"].as_f64().unwrap_or_default(),
-            hours_to_reset: v["estimate"]["hours_to_reset"].as_f64().unwrap_or_default(),
-            projected_pct: v["estimate"]["projected_pct"].as_f64().unwrap_or_default(),
-        });
         Self {
             state: Status::parse(v["state"].as_str().unwrap_or_default()),
             since: v["since"].as_i64().unwrap_or_default(),
             next_reset: v["next_reset"].as_i64(),
-            n_buckets: v["n_buckets"].as_u64().unwrap_or_default() as usize,
-            estimate,
         }
     }
 }
@@ -948,8 +709,6 @@ impl Snapshot {
             state: Status::Unknown,
             since: self.generated_at,
             next_reset: None,
-            n_buckets: 0,
-            estimate: None,
         };
         POOLS
             .iter()
@@ -1195,7 +954,6 @@ mod tests {
             since: NOW,
             streak: 2,
             next_reset: d7_reset,
-            history: vec![],
         }
     }
 
@@ -1298,181 +1056,6 @@ mod tests {
         );
     }
 
-    fn pool(state: Status, estimate: Option<Estimate>) -> Pool {
-        Pool {
-            state,
-            since: NOW,
-            next_reset: Some(NOW + 3600),
-            n_buckets: 1,
-            estimate,
-        }
-    }
-
-    fn est(remaining: f64, burn: f64, hours: f64) -> Estimate {
-        Estimate {
-            remaining_pct: remaining,
-            burn_pct_per_h: burn,
-            hours_to_reset: hours,
-            projected_pct: remaining - burn * hours,
-        }
-    }
-
-    #[test]
-    fn burn_ignores_resets_and_short_history() {
-        assert_eq!(burn_pct_per_h(&[(0, 10.0), (300, 12.0)]), 0.0);
-        let h = [(0, 10.0), (1200, 20.0), (2400, 5.0), (3600, 15.0)];
-        assert!((burn_pct_per_h(&h) - 20.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn estimator_verdicts() {
-        let at = |e| pool(Status::Available, Some(e)).verdict();
-        assert_eq!(at(est(50.0, 10.0, 6.0)), Verdict::RunOut);
-        assert_eq!(at(est(50.0, 1.0, 10.0)), Verdict::Waste);
-        assert_eq!(at(est(50.0, 6.0, 8.0)), Verdict::Fits);
-    }
-
-    fn w(address: &str, pool: &str, priority: i64) -> Worker {
-        Worker {
-            address: address.into(),
-            pool: Some(pool.into()),
-            priority,
-            is_manager: false,
-        }
-    }
-
-    #[test]
-    fn exhausted_pool_pauses_its_workers_and_unknown_only_keeps_the_waiting_ones_waiting() {
-        let pools = BTreeMap::from([
-            ("codex".to_owned(), pool(Status::Exhausted, None)),
-            ("claude".to_owned(), pool(Status::Available, None)),
-        ]);
-        let ws = [
-            w("a", "codex", 1),
-            w("b", "claude", 1),
-            Worker {
-                pool: None,
-                ..w("c", "x", 1)
-            },
-        ];
-        let g = pauses(&pools, &ws, &BTreeSet::new(), 2);
-        assert_eq!(g.paused.keys().collect::<Vec<_>>(), vec!["a"]);
-        let ws = [w("b", "claude", 1), w("n", "claude", 1)];
-        let waiting = BTreeSet::from(["b".to_owned()]);
-        let g = pauses(&BTreeMap::new(), &ws, &waiting, 2);
-        assert_eq!(
-            g.paused.keys().collect::<Vec<_>>(),
-            vec!["b"],
-            "unknown: no resume, and running workers keep running"
-        );
-        assert!(g.resumed.is_empty());
-    }
-
-    #[test]
-    fn run_out_sheds_lowest_priority_workers_but_not_managers() {
-        // 5 sessions burn 8 %/h together, 10 % left, 2 h to reset: only 3 sessions fit, so the lowest-priority worker waits.
-        let pools = BTreeMap::from([(
-            "codex".to_owned(),
-            pool(Status::Available, Some(est(10.0, 8.0, 2.0))),
-        )]);
-        let mut ws = vec![
-            w("p1", "codex", 1),
-            w("p5", "codex", 5),
-            w("p3", "codex", 3),
-            w("p9", "codex", 9),
-        ];
-        ws.push(Worker {
-            is_manager: true,
-            ..w("m", "codex", -100)
-        });
-        let g = pauses(&pools, &ws, &BTreeSet::new(), 2);
-        assert!(!g.paused.contains_key("m"));
-        assert_eq!(g.paused.keys().collect::<Vec<_>>(), vec!["p1"]);
-    }
-
-    #[test]
-    fn resume_is_by_priority_two_per_pass_and_unpaused_workers_are_never_nudged() {
-        let pools = BTreeMap::from([("claude".to_owned(), pool(Status::Available, None))]);
-        let ws = vec![
-            w("a", "claude", 1),
-            w("b", "claude", 9),
-            w("c", "claude", 5),
-            w("fresh", "claude", 0),
-        ];
-        let prev: BTreeSet<String> = ["a", "b", "c"].map(String::from).into();
-        let g = pauses(&pools, &ws, &prev, 2);
-        assert_eq!(g.resumed, vec!["b", "c"]);
-        assert_eq!(g.paused.keys().collect::<Vec<_>>(), vec!["a"]);
-        let g2 = pauses(&pools, &ws, &g.paused.keys().cloned().collect(), 2);
-        assert_eq!(g2.resumed, vec!["a"]);
-        assert!(g2.paused.is_empty());
-    }
-
-    #[test]
-    fn claude_bucket_resets_then_paused_workers_resume_once() {
-        let (b, _) = run(&[], vec![claude_file("a", Some("1.0"), "0.2", 10)], NOW);
-        let ws = vec![w("s1", "claude", 1)];
-        let g = pauses(&pools(&b, NOW), &ws, &BTreeSet::new(), 2);
-        let prev: BTreeSet<String> = g.paused.keys().cloned().collect();
-        assert_eq!(prev.len(), 1);
-        let ok = |at: i64| claude_file("a", Some("0.1"), "0.2", -at);
-        let (b, _) = run(&b, vec![ok(1)], NOW + 1);
-        let (b, e) = run(&b, vec![ok(2)], NOW + 2);
-        assert_eq!(e[0].kind, "quota_appeared");
-        let g = pauses(&pools(&b, NOW + 2), &ws, &prev, 2);
-        assert_eq!(g.resumed, vec!["s1"]);
-        let g = pauses(&pools(&b, NOW + 3), &ws, &BTreeSet::new(), 2);
-        assert!(
-            g.resumed.is_empty() && g.paused.is_empty(),
-            "nudged once only"
-        );
-    }
-
-    #[test]
-    fn tool_choice_follows_the_default_unless_closed() {
-        let open = pool(Status::Available, None);
-        let shut = pool(Status::Exhausted, None);
-        let run_out = pool(Status::Available, Some(est(5.0, 5.0, 5.0)));
-        let ps = |c: &Pool, x: &Pool| {
-            BTreeMap::from([
-                ("codex".to_owned(), c.clone()),
-                ("claude".to_owned(), x.clone()),
-            ])
-        };
-        let low = BTreeMap::new();
-        assert_eq!(
-            choose_tool("codex", 0, &ps(&open, &open), &low),
-            Ok("codex")
-        );
-        assert_eq!(
-            choose_tool("codex", 0, &ps(&shut, &open), &low),
-            Ok("claude")
-        );
-        assert!(choose_tool("codex", 0, &ps(&shut, &shut), &low).is_err());
-        assert_eq!(
-            choose_tool(
-                "codex",
-                0,
-                &ps(&run_out, &open),
-                &BTreeMap::from([("codex".to_owned(), 3)])
-            ),
-            Ok("claude")
-        );
-        assert_eq!(
-            choose_tool(
-                "codex",
-                9,
-                &ps(&run_out, &open),
-                &BTreeMap::from([("codex".to_owned(), 3)])
-            ),
-            Ok("codex")
-        );
-        assert_eq!(
-            choose_tool("cursor", 0, &ps(&shut, &shut), &low),
-            Ok("cursor")
-        );
-    }
-
     fn entry(ep: &str, step: &str) -> Value {
         json!({"episode": ep, "step": step, "t": NOW})
     }
@@ -1528,7 +1111,7 @@ mod tests {
     }
 
     #[test]
-    fn random_inputs_never_make_unknown_available_or_pause_a_foreign_tool() {
+    fn random_inputs_never_make_unknown_available() {
         let mut seed = 12345u64;
         let mut next = move |n: u64| {
             seed = seed
@@ -1554,12 +1137,6 @@ mod tests {
             );
             buckets = b;
         }
-        let pools = BTreeMap::new();
-        let ws = vec![Worker {
-            pool: None,
-            ..w("cursor", "x", 0)
-        }];
-        assert!(pauses(&pools, &ws, &BTreeSet::new(), 2).paused.is_empty());
     }
 
     #[test]

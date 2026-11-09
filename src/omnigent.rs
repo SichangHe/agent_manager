@@ -357,11 +357,6 @@ fn send_checked(
     if let Some(why) = held(address) {
         return Err(format!("{address} is held ({why}); keep requests pending"));
     }
-    if let Some(why) = crate::quota_pause::paused(address) {
-        return Err(format!(
-            "{address} is waiting for quota ({why}); keep requests pending"
-        ));
-    }
     let current = api(
         settings,
         "GET",
@@ -529,9 +524,6 @@ pub fn classify(session: &Value) -> (&'static str, String) {
 pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
     if let Some(why) = held(address) {
         return ("paused", format!("held: {why}"));
-    }
-    if let Some(why) = crate::quota_pause::paused(address) {
-        return ("paused", format!("waiting for quota: {why}"));
     }
     if let Some(known) =
         SCAN.with_borrow(|scan| scan.as_ref().and_then(|known| known.get(address).cloned()))
