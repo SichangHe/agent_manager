@@ -1308,8 +1308,7 @@ fn notify_manager(
         return Ok(());
     }
     if !token.is_empty() {
-        let manager = store.load(settings::get(settings, "main_manager"))?;
-        omnigent::send(settings, manager.address(), notice)?;
+        omnigent::send(settings, settings::get(settings, "main_manager"), notice)?;
         log(&format!("told the main manager: {notice}"));
     }
     store.set_record(key, token)
