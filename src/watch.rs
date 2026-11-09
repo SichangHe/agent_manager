@@ -1454,13 +1454,15 @@ pub fn run() -> u8 {
         if let Err(error) = request_effects {
             log(&format!("request effects failed: {error}"));
         }
+        log_elapsed("request state updates", phase);
+        let phase = Instant::now();
+        let scanned = watcher.deliver_pending(&settings, &store);
+        log_elapsed("message delivery", phase);
+        let phase = Instant::now();
         if let Err(error) = crate::actions::deliver_requests(&settings, &store) {
             log(&format!("request notifications failed: {error}"));
         }
         log_elapsed("request notifications", phase);
-        let phase = Instant::now();
-        let scanned = watcher.deliver_pending(&settings, &store);
-        log_elapsed("message delivery", phase);
         if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
             let phase = Instant::now();
             last_compress = Some(Instant::now());

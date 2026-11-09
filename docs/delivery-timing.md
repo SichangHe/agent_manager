@@ -37,6 +37,9 @@ correlation
     - measured serial intake took 25.5 seconds before Zulip pickup
     - existing receipt locks, deduplication, retries and database wakeups are retained
     - only the main watcher delivers queued messages
+- queued messages are delivered after request-state updates and before request notifications
+    - a live pickup waited 5.14 seconds behind a 5.05-second notification phase
+    - notification retries retain the same durable queue and delivery checks
 
 verification
 - loopback HTTP test checks request header, response correlation and content exclusion
