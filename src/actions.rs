@@ -681,7 +681,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
                             .unwrap_or_default()
                     ),
                 );
-                if wanted.is_empty() && exception.is_empty() {
+                // 🧑 (via the manager) "Pin the allowlist by task file, not session, so restarts don't break it": `human.writer_tasks.TAG = "TOOL:MODEL"`.
+                let by_task = settings::get(&settings, &format!("human.writer_tasks.{}", task.tag()));
+                if wanted.is_empty() && exception.is_empty() && by_task.is_empty() {
                     return Ok(false);
                 }
                 let Some(id) = task.address().strip_prefix(omnigent::PREFIX) else {
@@ -695,7 +697,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 let model = session["model_override"].as_str().unwrap_or_default();
                 Ok(wanted.iter().any(|part| model.contains(part))
                     // 🧑 "Try 6 Sol" for this direct-human writing role.
-                    || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag())))
+                    || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag()))
+                    || (!model.is_empty() && by_task == format!("{tool}:{model}")))
             };
             if !settings::allows(&settings, "human.writers", tool) && !model_allowed()? {
                 return Err(format!(
