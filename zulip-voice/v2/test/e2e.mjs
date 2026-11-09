@@ -1129,7 +1129,8 @@ scenarios.voiceSwitchRules = async ({srv}) => {
     const before = await ttsCalls();
     await p.locator('#find').tap(); await p.locator('#topics li', {hasText: 'uiclient_steer'}).tap();
     await L.waitFor(p, 'switched', () => window.__voice.current() === 'uiclient_steer', 10000);
-    await L.waitFor(p, 'announcement requested', n => (window.__voice.log.text().match(/relay\s+tts /g) || []).length > n, 10000, before);
+    await L.sleep(4000);
+    assert.equal(await ttsCalls(), before, 'silent switch with voice control off');
   } finally { await c.close(); }
 };
 

@@ -514,6 +514,7 @@ function switchTopic(topic) {
 let announcingUntil = 0;
 /** Earcon plus "Now on <agent>", so a switch to an agent with nothing to play is still noticeable; unread messages play afterwards. */
 function announceSwitch(topic) {
+  if (!voiceControl) return;   // silent (visual only) unless voice control is on
   recorder.beep('switch');
   announcingUntil = Date.now() + 4000;
   recorder.muteFor(3500);
