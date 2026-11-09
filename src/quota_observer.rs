@@ -420,7 +420,7 @@ pub fn cycle(
     unclassified.retain(|n| names.contains(n) && !allow.contains(n) && !deny.contains(n));
     let denied: BTreeSet<String> = deny.union(&unclassified).cloned().collect();
     let mut ours: BTreeSet<String> = prev.ours.intersection(&names).cloned().collect();
-    let acts = core::proxy_actions(&buckets, &readings, &denied, &ours);
+    let acts = core::proxy_actions(&buckets, &readings, &denied, &ours, now);
     let intended: BTreeSet<String> = acts.iter().map(|a| format!("{a:?}")).collect();
     for act in &acts {
         let key = format!("{act:?}");

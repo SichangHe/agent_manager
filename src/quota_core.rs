@@ -392,7 +392,13 @@ pub fn step(prev: &[Bucket], readings: &[Reading], now: i64) -> (Vec<Bucket>, Ve
         let old_status = old.map_or(Status::Unknown, |b| b.status);
         let (status, streak, next_reset) = match raw {
             Raw::Exhausted(at) => (Status::Exhausted, 0, at),
-            Raw::Unknown => (Status::Unknown, 0, None),
+            // An exhausted bucket gone stale keeps its reset hint, so a disabled credential can be probed once the hint has passed.
+            Raw::Unknown => (
+                Status::Unknown,
+                0,
+                old.filter(|b| b.status == Status::Exhausted || b.status == Status::Unknown)
+                    .and_then(|b| b.next_reset),
+            ),
             Raw::Borderline => (old_status, 0, None),
             Raw::Ok => {
                 let streak = old.map_or(0, |b| b.streak) + 1;
@@ -563,20 +569,21 @@ pub enum Act {
 
 /// What the proxy must change so its routing matches the buckets; the observer is the sole writer of `disabled` and `priority`.
 ///
-/// Denied and unclassified credentials stay disabled; exhausted ones get disabled; available ones that we disabled get enabled again; a credential disabled by anyone else is left alone; unknown buckets change nothing.
+/// Denied and unclassified credentials stay disabled; exhausted ones get disabled; available ones that we disabled get enabled again; a credential disabled by anyone else is left alone.
+///
+/// A disabled credential gets no traffic, so its signals may never refresh. Hence one we disabled whose bucket has gone unknown is enabled again once its reset hint has passed: traffic then refreshes the reading, and an exhausted bucket gets disabled again.
 pub fn proxy_actions(
     buckets: &[Bucket],
     readings: &[Reading],
     denied: &BTreeSet<String>,
     ours: &BTreeSet<String>,
+    now: i64,
 ) -> Vec<Act> {
     let ranks = priorities(buckets);
     let mut acts = Vec::new();
     for r in readings {
-        let status = buckets
-            .iter()
-            .find(|b| b.principal == r.principal)
-            .map(|b| b.status);
+        let bucket = buckets.iter().find(|b| b.principal == r.principal);
+        let status = bucket.map(|b| b.status);
         if denied.contains(&r.name) {
             if !r.disabled {
                 acts.push(Act::Disable(r.name.clone()));
@@ -594,6 +601,14 @@ pub fn proxy_actions(
                 }
                 if let Some(rank) = ranks.get(&r.name).filter(|rank| r.priority != Some(**rank)) {
                     acts.push(Act::Priority(r.name.clone(), *rank));
+                }
+            }
+            Some(Status::Unknown) if r.disabled && ours.contains(&r.name) => {
+                if bucket
+                    .and_then(|b| b.next_reset)
+                    .is_some_and(|at| at <= now)
+                {
+                    acts.push(Act::Enable(r.name.clone()));
                 }
             }
             _ => {}
@@ -1230,7 +1245,7 @@ mod tests {
         ];
         let denied = BTreeSet::from(["new".to_owned()]);
         let ours = BTreeSet::from(["back".to_owned()]);
-        let acts = proxy_actions(&buckets, &readings, &denied, &ours);
+        let acts = proxy_actions(&buckets, &readings, &denied, &ours, NOW);
         assert!(acts.contains(&Act::Disable("out".into())));
         assert!(acts.contains(&Act::Enable("back".into())));
         assert!(acts.contains(&Act::Disable("new".into())));
@@ -1264,7 +1279,9 @@ mod tests {
         )];
         let ranks = priorities(&buckets);
         let readings = [reading("a", "claude:a", false, Some(ranks["a"]))];
-        assert!(proxy_actions(&buckets, &readings, &BTreeSet::new(), &BTreeSet::new()).is_empty());
+        assert!(
+            proxy_actions(&buckets, &readings, &BTreeSet::new(), &BTreeSet::new(), NOW).is_empty()
+        );
     }
 
     fn pool(state: Status, estimate: Option<Estimate>) -> Pool {
@@ -1571,25 +1588,42 @@ mod tests {
         let out = |at: i64| claude_file("midas", None, "1.0", -at);
         let (b, _) = run(&[], vec![out(0)], NOW);
         let r = read(vec![out(0)]);
-        let acts = proxy_actions(&b, &r, &BTreeSet::new(), &BTreeSet::new());
+        let acts = proxy_actions(&b, &r, &BTreeSet::new(), &BTreeSet::new(), NOW);
         assert_eq!(acts, vec![Act::Disable("midas".into())]);
         let ours = BTreeSet::from(["midas".to_owned()]);
         let mut disabled = read(vec![out(0)]);
         disabled[0].disabled = true;
         assert!(
-            proxy_actions(&b, &disabled, &BTreeSet::new(), &ours).is_empty(),
+            proxy_actions(&b, &disabled, &BTreeSet::new(), &ours, NOW).is_empty(),
             "still out: stays disabled"
         );
         let back = |at: i64| claude_file("midas", None, "0.0", -at);
         let (b, _) = run(&b, vec![back(1)], NOW + 1);
         assert!(
-            proxy_actions(&b, &disabled, &BTreeSet::new(), &ours).is_empty(),
+            proxy_actions(&b, &disabled, &BTreeSet::new(), &ours, NOW).is_empty(),
             "one reading is not enough"
         );
         let (b, e) = run(&b, vec![back(2)], NOW + 2);
         assert_eq!(e[0].kind, "quota_appeared");
-        let acts = proxy_actions(&b, &disabled, &BTreeSet::new(), &ours);
+        let acts = proxy_actions(&b, &disabled, &BTreeSet::new(), &ours, NOW);
         assert!(acts.contains(&Act::Enable("midas".into())));
+    }
+
+    #[test]
+    fn a_disabled_stale_bucket_is_probed_after_its_reset_hint_so_it_cannot_stay_off_forever() {
+        let (b, _) = run(&[], vec![claude_file("a", Some("1.0"), "0.2", 10)], NOW);
+        let hint = b[0].next_reset.unwrap_or_default();
+        let mut r = read(vec![claude_file("a", Some("1.0"), "0.2", 10)]);
+        r[0].disabled = true;
+        let ours = BTreeSet::from(["a".to_owned()]);
+        let later = hint + TTL_S + 1;
+        let (b, _) = step(&b, &r, later);
+        assert_eq!(b[0].status, Status::Unknown);
+        assert!(proxy_actions(&b, &r, &BTreeSet::new(), &ours, hint - 1).is_empty());
+        assert_eq!(
+            proxy_actions(&b, &r, &BTreeSet::new(), &ours, later),
+            vec![Act::Enable("a".into())]
+        );
     }
 
     #[test]
