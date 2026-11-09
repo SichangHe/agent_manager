@@ -63,7 +63,7 @@ function resampleToWav(frames, fromHz) {
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [660, 440]};
 
-export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon}) {
+export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio}) {
   /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
   const setSession = type => { try { if (navigator.audioSession.type !== type) { navigator.audioSession.type = type; log('route', `audioSession.type -> ${type}`); } } catch { /* unsupported */ } };
   let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
@@ -79,8 +79,16 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     frames = []; speechMs = 0; silentMs = 0; clipMs = 0;
   }
 
+  /** 16 kHz copy of `frame` by box averaging, for the in-browser keyword spotter. */
+  function toKwsRate(frame) {
+    const ratio = ctx.sampleRate / 16000, n = Math.floor(frame.length / ratio), out = new Float32Array(n);
+    for (let i = 0; i < n; i++) { const from = Math.floor(i * ratio), to = Math.max(from + 1, Math.floor((i + 1) * ratio)); let sum = 0; for (let j = from; j < to; j++) sum += frame[j]; out[i] = sum / (to - from); }
+    return out;
+  }
+
   function onFrame(frame) {
     if (!ctx || (!capturing && !listening)) return;   // frames after stop(), or while idle in the grace period
+    if (listening && !capturing && onKwsAudio && performance.now() >= earconUntilMs) onKwsAudio(toKwsRate(frame));
     const ms = frame.length / ctx.sampleRate * 1000;
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];

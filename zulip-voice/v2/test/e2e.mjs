@@ -1426,6 +1426,32 @@ scenarios.loudVariant = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.onDeviceStartWord = async () => {
+  // With the opt-in on-device keyword spotter, "attention" pauses playback and opens the session without any upload; "kangaroo" ends a reply.
+  await L.wipeTasks();
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Attention.', 'Deploy it to staging.', 'Kangaroo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(10000), pcm(ws[0]), gap(3500), pcm(ws[1]), gap(1200), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__od.wav': Buffer.concat([head, data])});
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 12}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const c = await L.openClient({url: srv2.url, mic: '/__od.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': false, 'voice2-kws': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await p.locator('#listen').tap();
+    await L.waitFor(p, 'kws ready', () => /kws +ready/.test(window.__voice.log.text()), 30000);
+    await L.waitFor(p, 'local start word', () => /on-device keyword: ATTENTION/.test(window.__voice.log.text()), 60000);
+    const log = await p.evaluate(() => window.__voice.log.text());
+    assert.match(log, /lat +startword total=\d+ms kws-local=/, 'local span logged');
+    assert.equal(await p.evaluate(() => window.__voice.player.snapshot().status), 'paused', 'paused locally');
+    await L.waitFor(p, 'reply finished by the on-device end word', () => /resume phrase \+ silence/.test(window.__voice.log.text()), 40000);
+    let sent = [];
+    for (let i = 0; i < 10 && !sent.length; i++) { sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content); if (!sent.length) await L.sleep(1000); }
+    assert.equal(sent.length, 1, JSON.stringify(sent)); assert.match(sent[0], /deploy it to staging/i); assert.doesNotMatch(sent[0], /kangaroo|attention/i);
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

@@ -1,6 +1,7 @@
 /** Wires the model, Zulip events, voice service, player, recorder and DOM. Behavior is described in `../docs/v2/design.md`. */
 import {createLog} from './log.mjs';
 import {createLatency} from './latency.mjs';
+import {createKeywordSpotter} from './kws.mjs';
 import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
@@ -699,7 +700,23 @@ function maybeFinish() {
   if (finished.wasPlaying) resumeAfterPause(); else maybeAutoplay();
 }
 
-const recorder = createRecorder({log, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
+const kwsSpotter = createKeywordSpotter({log});
+let lastKwsHitMs = 0, sttInFlight = 0;
+/** The on-device keyword spotter heard a keyword: "attention" opens a reply session at once (pausing playback, no upload); "kangaroo" inside a reply ends it. */
+function onKwsHit(word) {
+  if (!voiceControl || !store.get('voice2-kws', false) || dict || Date.now() - lastKwsHitMs < 1500) return;
+  lastKwsHitMs = Date.now();
+  log('vc', `on-device keyword: ${word}`);
+  if (word === 'ATTENTION' && startWord() === 'attention' && !vc && !(pendingChoice && Date.now() < pendingChoice.until)) {
+    if (!lat.has('sw')) lat.begin('sw', 'startword');
+    lat.stage('sw', 'kws-local');
+    openSession('');
+  } else if (word === 'KANGAROO' && vc && normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT)) === 'kangaroo') {
+    clearTimeout(vc.timer);
+    vc.timer = setTimeout(function finishWhenQuiet() { if (!vc) return; if ((utterancePending || sttInFlight) && Date.now() - lastKwsHitMs < 6000) { vc.timer = setTimeout(finishWhenQuiet, 300); return; } finishVcReply(); }, RESUME_SILENCE_MS);
+  }
+}
+const recorder = createRecorder({log, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
 let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
 
 const RESUME_DEFAULT = 'kangaroo';   // chosen from the end-word study: 100% detection in every condition, 0 false accepts, never in agent text
@@ -796,7 +813,8 @@ async function handleCommandClip(blob, meta) {
   }
   const listening = !!vc || (!!pendingChoice && Date.now() < pendingChoice.until);
   // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
-  const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening);   // start-word clips also get keyword spotting on the server
+  sttInFlight++;
+  const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening).finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
   if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); resumeBarge(); vcIdle(); return; }
   const heard = r.text.trim();
   lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
@@ -831,7 +849,8 @@ async function handleCommandClip(blob, meta) {
     openSession(rest);
     return;
   }
-  const nav = navCommand(normalize(heard));   // inside an open reply, navigation words alone are a command, not reply text
+  const body = normalize(afterStartWord(heard) ?? heard);   // a clip that begins with the start word (the on-device spotter already opened the session) still holds the command after it
+  const nav = navCommand(body);   // inside an open reply, navigation words alone are a command, not reply text
   if (nav) {
     clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
     const keep = vc.text.trim();
@@ -842,9 +861,9 @@ async function handleCommandClip(blob, meta) {
     navigate(nav); vcIdle();
     return;
   }
-  if (SWITCH_BACK_RE.test(normalize(heard))) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; recorder.setReplyMode(false); bargePaused = false; switchBack(); vcIdle(); return; }
-  const sw = normalize(heard).match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
-  if (CANCEL_RE.test(normalize(heard))) { cancelSession(); return; }   // discards this reply and carries on
+  if (SWITCH_BACK_RE.test(body)) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; recorder.setReplyMode(false); bargePaused = false; switchBack(); vcIdle(); return; }
+  const sw = body.match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
+  if (CANCEL_RE.test(body)) { cancelSession(); return; }   // discards this reply and carries on
   if (sw) {
     clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
     log('vc', 'switch command inside an open session');
@@ -980,7 +999,8 @@ function finishVcReply() {
 async function setVoiceControl(on) {
   voiceControl = on; voiceListening = on; store.set('voice2-vc', on);
   $('set-voice').checked = on; if (on) vcIdle(); else setVcState('off', 'off');
-  if (!on) { recorder.listen(false); return; }
+  if (!on) { recorder.listen(false); kwsSpotter.unload(); return; }
+  if (store.get('voice2-kws', false)) kwsSpotter.load();   // opt-in beta, lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
   const r = await recorder.listen(true);
   if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
   if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
@@ -993,6 +1013,8 @@ $('set-start').value = store.get('voice2-start-word', START_DEFAULT);
 $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.trim().toLowerCase() || START_DEFAULT);
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
+$('set-kws').checked = store.get('voice2-kws', false);
+$('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) kwsSpotter.load(); else if (!e.target.checked) kwsSpotter.unload(); };
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
 $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "kangaroo"' : 'Voice control off'); };
 function drawLevel(level) {

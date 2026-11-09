@@ -110,3 +110,12 @@ reading state
 - scrolled-past messages (user-driven scroll only) become read
 
 dictation clips are 16 kHz 8-bit mu-law WAV (16 kB/s, half of 16-bit); send never goes out with a failed clip
+
+latency
+- spans: `latency.mjs` logs one `lat <event> total=.. stage=..` line per start word, send, playback and switch; the debug sheet shows median/p90
+- relay spans: results carry `timings {queueMs, workMs, eventLagMs}`; `service/probe.mjs` (timer every 5 min, test channels only) appends to `~/.local/state/zulip-voice/latency.jsonl`
+- start word on the device: `kws.mjs` runs sherpa-onnx (WebAssembly, zipformer int8, about 21 MB once) on the microphone only while voice control is on
+  - "attention" opens a reply session and pauses playback at once, no upload; "kangaroo" inside a reply ends it after 0.9 s of quiet and any pending transcripts
+  - the server keyword gate stays as the fallback when the model cannot load (the energy detector plus Whisper path)
+  - the npm wasm build targets Node: `build.mjs` patches two lines (no raw-fs guard) and `kws-shim.js` supplies `require("path")`; assets go to `kws-<hash>/`
+  - build inputs: `npm install` in `v2/`, and the model files in `research-kws/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/`

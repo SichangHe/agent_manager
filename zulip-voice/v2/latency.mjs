@@ -18,6 +18,7 @@ export function createLatency(log) {
       log('lat', `${e.label} total=${total}ms ${e.stages.join(' ')}`);
     },
     drop(key) { open.delete(key); },
+    has: key => open.has(key),
     /** Lines like `startword n=8 median=2100ms p90=2900ms`. */
     summary() { return [...ring].map(([label, xs]) => `${label.padEnd(10)} n=${String(xs.length).padStart(2)} median=${quantile(xs, 0.5)}ms p90=${quantile(xs, 0.9)}ms`); },
   };
