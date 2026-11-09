@@ -14,13 +14,13 @@ use crate::{agents, omnigent, settings, work};
 
 type Settings = BTreeMap<String, String>;
 
-/// The watcher rewrites the gate every pass; a gate older than this is from a dead watcher and ignored.
-const GATE_TTL_S: i64 = 600;
+/// The watcher rewrites the pause every pass; a pause older than this is from a dead watcher and ignored.
+const PAUSE_TTL_S: i64 = 600;
 /// Matches the machine-wide start limit of 2 per minute.
 const MAX_RESUMES_PER_PASS: usize = 2;
 /// A pool unknown this long, with work waiting on it, is told to the human.
 const UNKNOWN_NOTICE_S: i64 = 3600;
-const GATE_FILE: &str = "quota-gate.json";
+const PAUSE_FILE: &str = "quota-pause.json";
 const NOTICES_FILE: &str = "quota-notices.json";
 const APPEARED_RECORD: &str = "amh-quota-appeared.txt";
 const RESUME_TEXT: &str =
@@ -34,21 +34,21 @@ fn enforced(settings: &Settings) -> bool {
     settings::get(settings, "quota.enforce") == "true"
 }
 
-fn read_gate(state_dir: &Path) -> Value {
-    fs::read_to_string(state_dir.join(GATE_FILE))
+fn read_pause(state_dir: &Path) -> Value {
+    fs::read_to_string(state_dir.join(PAUSE_FILE))
         .ok()
         .and_then(|t| serde_json::from_str(&t).ok())
         .unwrap_or(Value::Null)
 }
 
-/// Why the agent at `address` waits for quota, if the watcher's last pass gated it.
-pub fn gated(address: &str) -> Option<String> {
-    let gate = read_gate(&settings::state_dir());
-    let fresh = gate["generated_at"]
+/// Why the agent at `address` waits for quota, if the watcher's last pass paused it.
+pub fn paused(address: &str) -> Option<String> {
+    let pause = read_pause(&settings::state_dir());
+    let fresh = pause["generated_at"]
         .as_i64()
-        .is_some_and(|at| (0..=GATE_TTL_S).contains(&(now_s() - at)));
-    (gate["enforced"] == true && fresh)
-        .then(|| gate["gated"][address].as_str().map(str::to_owned))?
+        .is_some_and(|at| (0..=PAUSE_TTL_S).contains(&(now_s() - at)));
+    (pause["enforced"] == true && fresh)
+        .then(|| pause["paused"][address].as_str().map(str::to_owned))?
 }
 
 /// Tell once per `key`: the notices file remembers what was sent, and a failed send is tried again next time.
@@ -103,8 +103,8 @@ fn workers(store: &Store) -> Result<Vec<Worker>, String> {
         .collect())
 }
 
-fn addresses(gate: &Value, key: &str) -> BTreeSet<String> {
-    gate[key]
+fn addresses(pause: &Value, key: &str) -> BTreeSet<String> {
+    pause[key]
         .as_object()
         .into_iter()
         .flatten()
@@ -112,23 +112,23 @@ fn addresses(gate: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
-fn write_gate(
+fn write_pause(
     store: &Store,
     now: i64,
     enforce: bool,
-    gated: &BTreeMap<String, String>,
+    paused: &BTreeMap<String, String>,
 ) -> Result<(), String> {
     let shadow: serde_json::Map<String, Value> =
-        gated.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+        paused.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
     let written = json!({"generated_at": now, "enforced": enforce,
-        "gated": if enforce { Value::Object(shadow.clone()) } else { json!({}) }, "shadow": shadow});
-    crate::taskfile::write(&store.state_dir.join(GATE_FILE), &written.to_string())
-        .map_err(|e| format!("quota gate: cannot write {GATE_FILE}: {e}"))
+        "paused": if enforce { Value::Object(shadow.clone()) } else { json!({}) }, "shadow": shadow});
+    crate::taskfile::write(&store.state_dir.join(PAUSE_FILE), &written.to_string())
+        .map_err(|e| format!("quota pause: cannot write {PAUSE_FILE}: {e}"))
 }
 
-/// The watcher's quota pass: recompute the gate from the snapshot and the tasks, nudge the workers that may resume, clear session evidence on `quota_appeared`, and send the deduplicated notices. Returns log lines.
+/// The watcher's quota pass: recompute the pause from the snapshot and the tasks, nudge the workers that may resume, clear session evidence on `quota_appeared`, and send the deduplicated notices. Returns log lines.
 ///
-/// Without `quota.enforce = "true"` nothing is gated: the pass only records and logs what it would do.
+/// Without `quota.enforce = "true"` nothing is paused: the pass only records and logs what it would do.
 pub fn pass(settings: &Settings, store: &Store) -> Vec<String> {
     let now = now_s();
     let enforce = enforced(settings);
@@ -150,35 +150,35 @@ pub fn pass(settings: &Settings, store: &Store) -> Vec<String> {
     let pools = snapshot.pools_at(now);
     let workers = match workers(store) {
         Ok(w) => w,
-        Err(e) => return vec![format!("quota gate: cannot list tasks: {e}")],
+        Err(e) => return vec![format!("quota pause: cannot list tasks: {e}")],
     };
-    let old = read_gate(&store.state_dir);
-    let prev = addresses(&old, if enforce { "gated" } else { "shadow" });
-    let mut gate = core::gate(&pools, &workers, &prev, MAX_RESUMES_PER_PASS);
-    let held: BTreeSet<String> = gate.gated.keys().cloned().collect();
+    let old = read_pause(&store.state_dir);
+    let prev = addresses(&old, if enforce { "paused" } else { "shadow" });
+    let mut pause = core::pauses(&pools, &workers, &prev, MAX_RESUMES_PER_PASS);
+    let held: BTreeSet<String> = pause.paused.keys().cloned().collect();
     // The file goes first and without the resumed workers: the nudge below is refused while they are still in it.
-    if let Err(e) = write_gate(store, now, enforce, &gate.gated) {
+    if let Err(e) = write_pause(store, now, enforce, &pause.paused) {
         lines.push(e);
     }
     let mode = if enforce { "" } else { "shadow: would " };
     for address in held.difference(&prev) {
         lines.push(format!(
-            "quota gate {mode}hold {address}: {}",
-            gate.gated[address]
+            "quota pause {mode}hold {address}: {}",
+            pause.paused[address]
         ));
     }
     let mut unsent = false;
-    for address in &gate.resumed {
-        lines.push(format!("quota gate {mode}resume {address}"));
+    for address in &pause.resumed {
+        lines.push(format!("quota pause {mode}resume {address}"));
         if enforce && let Err(e) = omnigent::send(settings, address, RESUME_TEXT) {
             lines.push(format!("quota resume nudge to {address} failed: {e}"));
             // Still waiting, so the next pass resumes it again.
-            gate.gated
+            pause.paused
                 .insert(address.clone(), "resume nudge pending".to_owned());
             unsent = true;
         }
     }
-    if unsent && let Err(e) = write_gate(store, now, enforce, &gate.gated) {
+    if unsent && let Err(e) = write_pause(store, now, enforce, &pause.paused) {
         lines.push(e);
     }
     let last = store.record(APPEARED_RECORD).unwrap_or_default();
@@ -258,10 +258,10 @@ pub fn admit(
         .unwrap_or_default()
         .pools_at(now_s());
     let mut lowest: BTreeMap<String, i64> = BTreeMap::new();
-    let gate = read_gate(&store.state_dir);
+    let pause = read_pause(&store.state_dir);
     for w in workers(store)?
         .iter()
-        .filter(|w| !w.is_manager && gate["gated"][&w.address].is_null())
+        .filter(|w| !w.is_manager && pause["paused"][&w.address].is_null())
     {
         if let Some(pool) = &w.pool {
             let low = lowest.entry(pool.clone()).or_insert(w.priority);
@@ -294,7 +294,7 @@ mod tests {
     }
 
     fn setup(name: &str, tasks: &[(&str, &str, &str, &str)]) -> (Store, Settings) {
-        let dir = std::env::temp_dir().join(format!("amh-gate-{name}-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("amh-pause-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("logs")).expect("dir");
         for (file, address, tool, extra) in tasks {
@@ -326,9 +326,9 @@ mod tests {
     }
 
     #[test]
-    fn the_gate_holds_the_exhausted_pools_workers_and_admission_moves_to_the_open_pool() {
+    fn the_pause_holds_the_exhausted_pools_workers_and_admission_moves_to_the_open_pool() {
         let (store, settings) = setup(
-            "gate",
+            "pause",
             &[
                 ("a.md", "omnigent://a", "codex", "priority: 1\n"),
                 ("b.md", "omnigent://b", "claude", ""),
@@ -341,9 +341,9 @@ mod tests {
             lines.iter().any(|l| l.contains("omnigent://a")),
             "{lines:?}"
         );
-        let gate = read_gate(&store.state_dir);
+        let pause = read_pause(&store.state_dir);
         assert_eq!(
-            addresses(&gate, "gated"),
+            addresses(&pause, "paused"),
             ["omnigent://a", "omnigent://m"].map(String::from).into()
         );
         assert_eq!(
@@ -364,16 +364,16 @@ mod tests {
     }
 
     #[test]
-    fn without_enforcement_the_gate_is_only_a_shadow() {
+    fn without_enforcement_the_pause_is_only_a_shadow() {
         let (store, _) = setup("shadow", &[("a.md", "omnigent://a", "codex", "")]);
         let lines = pass(&BTreeMap::new(), &store);
         assert!(
             lines.iter().any(|l| l.contains("shadow: would hold")),
             "{lines:?}"
         );
-        let gate = read_gate(&store.state_dir);
-        assert!(addresses(&gate, "gated").is_empty());
-        assert_eq!(addresses(&gate, "shadow").len(), 1);
+        let pause = read_pause(&store.state_dir);
+        assert!(addresses(&pause, "paused").is_empty());
+        assert_eq!(addresses(&pause, "shadow").len(), 1);
         fs::remove_dir_all(&store.state_dir).expect("cleanup");
     }
 }

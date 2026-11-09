@@ -5,9 +5,9 @@
 design and rationale: `docs/quota-manager-design.md` (v3, approved by the human)
 
 code
-- `src/quota_core.rs`: pure; parse, fold readings into buckets, pools, estimator, proxy actions, redemption rules, gate, tool choice, snapshot (de)serialization
+- `src/quota_core.rs`: pure; parse, fold readings into buckets, pools, estimator, proxy actions, redemption rules, pauses, tool choice, snapshot (de)serialization
 - `src/quota_observer.rs`: input/output of `amh quota serve` and `amh quota status`; proxy client, files, redemption
-- `src/quota_gate.rs`: amh side; the watcher's quota pass, the gate file, admission at `task start`, notices
+- `src/quota_pause.rs`: amh side; the watcher's quota pass, the pause file, admission at `task start`, notices
 - `src/quota.rs`: only a session's own limit evidence (Claude "session limit" text); cleared on `quota_appeared`
 - `amh-quota.service`: template user unit for the observer
 
@@ -23,7 +23,7 @@ observer (`amh quota serve`, `--live` to act)
     - `quota-snapshot.json`: atomic, read by amh; older than 15 min means a dead observer, so every pool is unknown
     - `quota-events.jsonl`: samples and events; rotated at 8 MB to `.1`
     - `quota-redeem.journal`: write-ahead log of redemptions
-    - `quota-gate.json`, `quota-notices.json`, `amh-quota-appeared.txt`: amh side
+    - `quota-pause.json`, `quota-notices.json`, `amh-quota-appeared.txt`: amh side
 
 model
 - credential: proxy auth file; principal: `codex:ACCOUNT_ID` or `claude:EMAIL`; bucket: one quota per principal
@@ -60,15 +60,15 @@ redemption
 
 amh side
 - priority: task field `priority` (integer, default 0); `amh task start --priority N`, `amh task priority TASK.md N`
-- the watcher's minute pass (`quota_gate::pass`) derives the gate from snapshot plus tasks; nothing accumulates
+- the watcher's minute pass (`quota_pause::pass`) derives the pause from snapshot plus tasks; nothing accumulates
     - exhausted pool: all its workers wait
     - unknown pool: nobody new waits and nobody resumes; a running worker keeps running
     - projected to run out (remaining minus burn x hours to the soonest 7d reset, burn = rise per hour over the last hour): lowest-priority workers wait until the rest fit, equal burn per worker assumed; managers never wait
     - waiting means `omnigent::status` is `paused` and `omnigent::send` refuses: no nudges, mail held
-    - workers waiting last pass with room now resume by priority, 2 per pass, one nudge each; the gate is keyed by address, so a migrated task gets no stale nudge
+    - workers waiting last pass with room now resume by priority, 2 per pass, one nudge each; the pause is keyed by address, so a migrated task gets no stale nudge
 - admission (workers only: managers are never held back; a pinned model counts as a named tool): `task start` without `--tool` goes to the default pool, else the other if the default is closed; a named tool is never swapped, a closed pool refuses it
     - closed: not available, or projected to run out and the new priority does not exceed the lowest running worker's
-- `quota.enforce = "true"` turns gating and admission on; otherwise the pass only logs `shadow: would ...`
+- `quota.enforce = "true"` turns pausing and admission on; otherwise the pass only logs `shadow: would ...`
 - notices (the unknown-pool and waste ones only with `quota.enforce`) once per key via `quota-notices.json`, to `quota.notify_task` (default `quota_support.md`)
     - new credential, observer dead, proxy unreadable twice, actuator failed twice, pool unknown over 1 h with work waiting, uncertain or rejected redemption
     - predicted waste with nothing waiting goes to the main manager
@@ -80,4 +80,4 @@ settings (dotted keys, `env.toml` or `config.toml`)
 - `quota.notify_task`
 
 tests: `cargo test quota`
-- pure tables and random-input properties in `quota_core`; fake proxy on a real socket for full cycles, crash, timeout, shadow, new credential in `quota_observer`; gate and admission over task files in `quota_gate`
+- pure tables and random-input properties in `quota_core`; fake proxy on a real socket for full cycles, crash, timeout, shadow, new credential in `quota_observer`; pauses and admission over task files in `quota_pause`

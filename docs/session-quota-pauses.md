@@ -21,7 +21,7 @@
 
 start rate
 - 🤖 the main manager: "make amh enforce the safe rate itself ... so the whole machine starts at most 2 agents per minute, whoever asks"
-- `omnigent::start_slot` gates `launch` and any `send` to a session whose runner is offline (that send restarts the runner)
+- `omnigent::start_slot` holds `launch` and any `send` to a session whose runner is offline (that send restarts the runner)
     - start times of the last minute in `amh-starts.json` in the state folder, under `amh-starts.lock`; a caller over the limit sleeps until a slot frees, giving up after 30 min
     - the watcher never waits (`NO_WAIT`): its send over the limit fails and is retried on a later poll
     - except the delivery of the human's messages and typed blocks (`send_now`), which never waits

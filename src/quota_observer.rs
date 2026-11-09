@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 use crate::quota_core::{self as core, Act, Bucket, Reading, Snapshot, Status, Verdict};
-use crate::quota_gate;
+use crate::quota_pause;
 use crate::settings;
 use crate::store::Store;
 
@@ -331,7 +331,7 @@ fn redeem(
     ) {
         Err(CallError::Rejected(why)) => {
             files.step(now, &episode, "rejected", json!({"why": why}));
-            quota_gate::notice(
+            quota_pause::notice(
                 settings,
                 store,
                 &format!("rejected:{episode}"),
@@ -344,7 +344,7 @@ fn redeem(
         Err(CallError::Uncertain(why)) => {
             files.step(now, &episode, "uncertain", json!({"why": why}));
             if !reconcile(proxy, files, now, &episode, reading) {
-                quota_gate::notice(
+                quota_pause::notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),
@@ -358,7 +358,7 @@ fn redeem(
         Ok(_) => {
             files.step(now, &episode, "called", json!({}));
             if !reconcile(proxy, files, now, &episode, reading) {
-                quota_gate::notice(
+                quota_pause::notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),
@@ -390,7 +390,7 @@ pub fn cycle(
         Err(e) => {
             memory.proxy_failures += 1;
             if memory.proxy_failures >= NOTICE_AFTER_FAILURES && live {
-                quota_gate::notice(
+                quota_pause::notice(
                     settings,
                     store,
                     &format!("proxy_down:{}", now / 3600),
@@ -424,7 +424,7 @@ pub fn cycle(
             if !allow.contains(name) && !deny.contains(name) {
                 unclassified.insert(name.clone());
                 if live {
-                    quota_gate::notice(
+                    quota_pause::notice(
                         settings,
                         store,
                         &format!("added:{name}"),
@@ -473,7 +473,7 @@ pub fn cycle(
                 *n += 1;
                 files.event(now, "action_failed", &key, json!({"error": e}));
                 if *n == NOTICE_AFTER_FAILURES {
-                    quota_gate::notice(
+                    quota_pause::notice(
                         settings,
                         store,
                         &format!("actuator:{key}:{}", now / 86400),
@@ -522,7 +522,7 @@ pub fn cycle(
                 .iter()
                 .find(|r| Some(&r.name) == credit_cred.as_ref());
             if !reading.is_some_and(|r| reconcile(proxy, files, now, &episode, r)) {
-                quota_gate::notice(
+                quota_pause::notice(
                     settings,
                     store,
                     &format!("uncertain:{episode}"),

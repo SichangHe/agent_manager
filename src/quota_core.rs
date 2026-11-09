@@ -678,23 +678,23 @@ pub struct Worker {
 }
 
 #[derive(Debug, Default, PartialEq)]
-pub struct Gate {
+pub struct Pauses {
     /// Address to the reason it gets no nudges and no mail.
-    pub gated: BTreeMap<String, String>,
+    pub paused: BTreeMap<String, String>,
     /// Addresses released this pass, highest priority first; each gets one nudge.
     pub resumed: Vec<String>,
 }
 
 /// Which workers wait, derived afresh from the pools on every watcher pass.
 ///
-/// An exhausted or unknown pool gates all its workers. A pool projected to run out gates its lowest-priority workers (never managers) until the remaining ones fit, assuming each burns equally. Workers gated last pass that now have room come back by priority, `max_resumes` per pass.
-pub fn gate(
+/// An exhausted or unknown pool pauses all its workers. A pool projected to run out pauses its lowest-priority workers (never managers) until the remaining ones fit, assuming each burns equally. Workers paused last pass that now have room come back by priority, `max_resumes` per pass.
+pub fn pauses(
     pools: &BTreeMap<String, Pool>,
     workers: &[Worker],
-    prev_gated: &BTreeSet<String>,
+    prev_paused: &BTreeSet<String>,
     max_resumes: usize,
-) -> Gate {
-    let mut out = Gate::default();
+) -> Pauses {
+    let mut out = Pauses::default();
     for pool in POOLS {
         let mut mine: Vec<&Worker> = workers
             .iter()
@@ -705,8 +705,8 @@ pub fn gate(
         let Some(info) = pools.get(pool).filter(|_| state == Status::Available) else {
             // Unknown never invents quota: no resumes. But a worker that was running keeps running; only exhaustion stops it.
             let waiting =
-                |w: &&&Worker| state == Status::Exhausted || prev_gated.contains(&w.address);
-            out.gated.extend(mine.iter().filter(waiting).map(|w| {
+                |w: &&&Worker| state == Status::Exhausted || prev_paused.contains(&w.address);
+            out.paused.extend(mine.iter().filter(waiting).map(|w| {
                 (
                     w.address.clone(),
                     format!("{pool} quota is {}", state.name()),
@@ -716,7 +716,7 @@ pub fn gate(
         };
         let running = mine
             .iter()
-            .filter(|w| !prev_gated.contains(&w.address))
+            .filter(|w| !prev_paused.contains(&w.address))
             .count()
             .max(1) as f64;
         let cap = match &info.estimate {
@@ -731,11 +731,11 @@ pub fn gate(
         let mut kept = 0;
         let mut resumes = 0;
         for w in mine {
-            let was_gated = prev_gated.contains(&w.address);
+            let was_paused = prev_paused.contains(&w.address);
             if w.is_manager {
                 kept += 1;
             } else if kept >= cap {
-                out.gated.insert(
+                out.paused.insert(
                     w.address.clone(),
                     format!("{pool} quota is projected to run out before its reset"),
                 );
@@ -743,9 +743,9 @@ pub fn gate(
             } else {
                 kept += 1;
             }
-            if was_gated {
+            if was_paused {
                 if resumes >= max_resumes {
-                    out.gated
+                    out.paused
                         .insert(w.address.clone(), "waiting its turn to resume".to_owned());
                 } else {
                     resumes += 1;
@@ -1342,7 +1342,7 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_pool_gates_its_workers_and_unknown_only_keeps_the_waiting_ones_waiting() {
+    fn exhausted_pool_pauses_its_workers_and_unknown_only_keeps_the_waiting_ones_waiting() {
         let pools = BTreeMap::from([
             ("codex".to_owned(), pool(Status::Exhausted, None)),
             ("claude".to_owned(), pool(Status::Available, None)),
@@ -1355,13 +1355,13 @@ mod tests {
                 ..w("c", "x", 1)
             },
         ];
-        let g = gate(&pools, &ws, &BTreeSet::new(), 2);
-        assert_eq!(g.gated.keys().collect::<Vec<_>>(), vec!["a"]);
+        let g = pauses(&pools, &ws, &BTreeSet::new(), 2);
+        assert_eq!(g.paused.keys().collect::<Vec<_>>(), vec!["a"]);
         let ws = [w("b", "claude", 1), w("n", "claude", 1)];
         let waiting = BTreeSet::from(["b".to_owned()]);
-        let g = gate(&BTreeMap::new(), &ws, &waiting, 2);
+        let g = pauses(&BTreeMap::new(), &ws, &waiting, 2);
         assert_eq!(
-            g.gated.keys().collect::<Vec<_>>(),
+            g.paused.keys().collect::<Vec<_>>(),
             vec!["b"],
             "unknown: no resume, and running workers keep running"
         );
@@ -1385,13 +1385,13 @@ mod tests {
             is_manager: true,
             ..w("m", "codex", -100)
         });
-        let g = gate(&pools, &ws, &BTreeSet::new(), 2);
-        assert!(!g.gated.contains_key("m"));
-        assert_eq!(g.gated.keys().collect::<Vec<_>>(), vec!["p1"]);
+        let g = pauses(&pools, &ws, &BTreeSet::new(), 2);
+        assert!(!g.paused.contains_key("m"));
+        assert_eq!(g.paused.keys().collect::<Vec<_>>(), vec!["p1"]);
     }
 
     #[test]
-    fn resume_is_by_priority_two_per_pass_and_ungated_workers_are_never_nudged() {
+    fn resume_is_by_priority_two_per_pass_and_unpaused_workers_are_never_nudged() {
         let pools = BTreeMap::from([("claude".to_owned(), pool(Status::Available, None))]);
         let ws = vec![
             w("a", "claude", 1),
@@ -1400,30 +1400,30 @@ mod tests {
             w("fresh", "claude", 0),
         ];
         let prev: BTreeSet<String> = ["a", "b", "c"].map(String::from).into();
-        let g = gate(&pools, &ws, &prev, 2);
+        let g = pauses(&pools, &ws, &prev, 2);
         assert_eq!(g.resumed, vec!["b", "c"]);
-        assert_eq!(g.gated.keys().collect::<Vec<_>>(), vec!["a"]);
-        let g2 = gate(&pools, &ws, &g.gated.keys().cloned().collect(), 2);
+        assert_eq!(g.paused.keys().collect::<Vec<_>>(), vec!["a"]);
+        let g2 = pauses(&pools, &ws, &g.paused.keys().cloned().collect(), 2);
         assert_eq!(g2.resumed, vec!["a"]);
-        assert!(g2.gated.is_empty());
+        assert!(g2.paused.is_empty());
     }
 
     #[test]
     fn claude_bucket_resets_then_paused_workers_resume_once() {
         let (b, _) = run(&[], vec![claude_file("a", Some("1.0"), "0.2", 10)], NOW);
         let ws = vec![w("s1", "claude", 1)];
-        let g = gate(&pools(&b, NOW), &ws, &BTreeSet::new(), 2);
-        let prev: BTreeSet<String> = g.gated.keys().cloned().collect();
+        let g = pauses(&pools(&b, NOW), &ws, &BTreeSet::new(), 2);
+        let prev: BTreeSet<String> = g.paused.keys().cloned().collect();
         assert_eq!(prev.len(), 1);
         let ok = |at: i64| claude_file("a", Some("0.1"), "0.2", -at);
         let (b, _) = run(&b, vec![ok(1)], NOW + 1);
         let (b, e) = run(&b, vec![ok(2)], NOW + 2);
         assert_eq!(e[0].kind, "quota_appeared");
-        let g = gate(&pools(&b, NOW + 2), &ws, &prev, 2);
+        let g = pauses(&pools(&b, NOW + 2), &ws, &prev, 2);
         assert_eq!(g.resumed, vec!["s1"]);
-        let g = gate(&pools(&b, NOW + 3), &ws, &BTreeSet::new(), 2);
+        let g = pauses(&pools(&b, NOW + 3), &ws, &BTreeSet::new(), 2);
         assert!(
-            g.resumed.is_empty() && g.gated.is_empty(),
+            g.resumed.is_empty() && g.paused.is_empty(),
             "nudged once only"
         );
     }
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn random_inputs_never_make_unknown_available_or_gate_a_foreign_tool() {
+    fn random_inputs_never_make_unknown_available_or_pause_a_foreign_tool() {
         let mut seed = 12345u64;
         let mut next = move |n: u64| {
             seed = seed
@@ -1559,7 +1559,7 @@ mod tests {
             pool: None,
             ..w("cursor", "x", 0)
         }];
-        assert!(gate(&pools, &ws, &BTreeSet::new(), 2).gated.is_empty());
+        assert!(pauses(&pools, &ws, &BTreeSet::new(), 2).paused.is_empty());
     }
 
     #[test]

@@ -292,7 +292,7 @@ pub fn retire(settings: &Settings, address: &str) -> Result<(), String> {
 }
 
 pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
-    send_gated(settings, address, text, true, None)
+    send_checked(settings, address, text, true, None)
 }
 
 /// `send` without waiting for a start slot, for the human's own messages.
@@ -341,14 +341,14 @@ pub fn send_now_traced(
     text: &str,
     trace: Option<&DeliveryTrace<'_>>,
 ) -> Result<(), String> {
-    send_gated(settings, address, text, false, trace)
+    send_checked(settings, address, text, false, trace)
 }
 
-fn send_gated(
+fn send_checked(
     settings: &Settings,
     address: &str,
     text: &str,
-    gated: bool,
+    slot_checked: bool,
     trace: Option<&DeliveryTrace<'_>>,
 ) -> Result<(), String> {
     // A message to a session that moved goes to where the agent lives now; the watcher updates the task file soon after.
@@ -357,7 +357,7 @@ fn send_gated(
     if let Some(why) = held(address) {
         return Err(format!("{address} is held ({why}); keep requests pending"));
     }
-    if let Some(why) = crate::quota_gate::gated(address) {
+    if let Some(why) = crate::quota_pause::paused(address) {
         return Err(format!(
             "{address} is waiting for quota ({why}); keep requests pending"
         ));
@@ -377,7 +377,7 @@ fn send_gated(
         ));
     }
     // A message to a session whose runner is offline starts that runner again.
-    if gated && current["runner_online"] != true {
+    if slot_checked && current["runner_online"] != true {
         start_slot()?;
     }
     let claude = current["harness"]
@@ -530,7 +530,7 @@ pub fn status(settings: &Settings, address: &str) -> (&'static str, String) {
     if let Some(why) = held(address) {
         return ("paused", format!("held: {why}"));
     }
-    if let Some(why) = crate::quota_gate::gated(address) {
+    if let Some(why) = crate::quota_pause::paused(address) {
         return ("paused", format!("waiting for quota: {why}"));
     }
     if let Some(known) =

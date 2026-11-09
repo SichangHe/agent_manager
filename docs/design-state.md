@@ -106,7 +106,7 @@ order of building, each step in production before the next
     - done: the watcher's records (awaiting answers, told human, asked human, problem notices, compress notice) are rows of the `records` table, text as it was in the `amh-*.txt` files; a left-over file is taken over on first use
     - done: scheduled-job attempt times use the `records` table; legacy `amh-jobs.txt` is imported on first use
     - done: sent-message records and Zulip intake/read cursors use the `records` table; legacy files import on first use
-    - done: committed events wake the watcher through a local datagram socket; event sequences gate internal dependency and message scans
+    - done: committed events wake the watcher through a local datagram socket; event sequences limit internal dependency and message scans
     - done: typed/guest `(pending)` blocks become message rows atomically with removal of their markers; history stays in Markdown
     - external connector intake, failed-delivery retries and manually typed file input retain periodic checks; a lost wakeup falls back to those checks
 1. event table, written by today's actions next to the markdown (no behaviour change)

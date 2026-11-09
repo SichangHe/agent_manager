@@ -525,7 +525,7 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     let tool = &if new.as_manager {
         tool.to_owned()
     } else {
-        crate::quota_gate::admit(
+        crate::quota_pause::admit(
             settings,
             store,
             tool,
