@@ -462,12 +462,10 @@ fn redeem(
     files.step(now, episode, "intent", json!({"cred": reading.name, "credit_id": credit_id, "expires": expires, "before": credits.len(), "request_id": request_id, "used": core::max_used(&bucket.windows), "window_end": core::usage(&bucket.windows).1}));
     // 🧑 "Try to use as much quota of team1@trymidas.ai as possible before the reset expiry in 3 days and use that reset before it expires"
     let left = core::parse_expiry(&expires).map(|at| at - now);
-    let near = left.is_some_and(|l| l < 6 * 3600);
-    let retry_note = "It will be retried with backoff until the credit expires.";
+    let last_chance = left.is_some_and(core::final_attempt);
+    let retry_note = "It is retried until the credit expires.";
     let failed = |why: &str, what: &str| {
-        let hours = left.map_or("an unknown time".to_owned(), |l| {
-            format!("{:.1}h", l as f64 / 3600.0)
-        });
+        let hours = left.map_or("an unknown time".to_owned(), span);
         notice(
             settings,
             store,
@@ -477,13 +475,13 @@ fn redeem(
                 reading.name
             ),
         );
-        if near {
+        if last_chance {
             notice(
                 settings,
                 store,
                 &format!("deadline_failing:{credit_id}"),
                 &format!(
-                    "URGENT: reset credit {credit_id} of {} expires in {hours} and redemption keeps failing ({why}). Redeem it by hand if this goes on.",
+                    "URGENT: reset credit {credit_id} of {} expires in {hours} and the final redemption attempt failed ({why}). Redeem it by hand now.",
                     reading.name
                 ),
             );
@@ -669,7 +667,13 @@ pub fn cycle(
         memory
             .credits
             .get(principal)
-            .is_none_or(|(at, _)| now - at >= CREDIT_POLL_S)
+            .is_none_or(|(checked, list)| {
+                now - checked >= CREDIT_POLL_S
+                    // Read the list again when a credit enters its deadline margin.
+                    || list.iter().any(|(_, at)| {
+                        *checked < at - core::DEADLINE_MARGIN_S && now >= at - core::DEADLINE_MARGIN_S && now < *at
+                    })
+            })
     };
     for bucket in &buckets {
         let journal = files.journal()?;
@@ -755,6 +759,24 @@ pub fn cycle(
         }
         // The deadline fallback: whatever the usage, a credit is redeemed before it expires.
         // 🧑 "Of course you should use the reset regardless of the usage. The 99% usage is a target to achieve not a restricting factor for whether to use the reset."
+        for (id, at) in memory
+            .credits
+            .get(&bucket.principal)
+            .map(|(_, c)| c.clone())
+            .unwrap_or_default()
+        {
+            if core::expired_after_failure(&journal, &bucket.principal, &id, at, now) {
+                notice(
+                    settings,
+                    store,
+                    &format!("expired_unredeemed:{id}"),
+                    &format!(
+                        "URGENT: Codex reset credit {id} of {} expired unredeemed: every deadline attempt failed.",
+                        bucket.principal
+                    ),
+                );
+            }
+        }
         if credit_poll_due(memory, &bucket.principal) {
             match proxy.credits(reading) {
                 Ok(list) => {
@@ -793,15 +815,15 @@ pub fn cycle(
             .unwrap_or_default();
         if !authorized {
             for (id, at) in &known {
-                if now < *at && now >= at - core::DEADLINE_MARGIN_S {
+                if now < *at && now >= at - core::AT_RISK_S {
                     notice(
                         settings,
                         store,
                         &format!("at_risk:{id}"),
                         &format!(
-                            "Codex reset credit {id} of {} expires in {:.1}h and automatic redemption is off (`quota.redeem` is not true): redeem it by hand.",
+                            "Codex reset credit {id} of {} expires in {} and automatic redemption is off (`quota.redeem` is not true): redeem it by hand.",
                             bucket.principal,
-                            (*at - now) as f64 / 3600.0
+                            span(*at - now)
                         ),
                     );
                 }
@@ -890,7 +912,17 @@ pub fn serve(live: bool) -> u8 {
         let wait_s = match Proxy::new(&settings)
             .and_then(|proxy| cycle(&settings, &store, &proxy, &files, &mut memory, live, now))
         {
-            Ok(snapshot) => wake_in_s(&snapshot, now),
+            Ok(snapshot) => {
+                // 🧑 "Redeem the account 2 reset 2 min before expiry, not 15": wake exactly at each credit's deadline.
+                let journal = files.journal().unwrap_or_default();
+                let deadline = memory
+                    .credits
+                    .iter()
+                    .filter_map(|(p, (_, c))| core::deadline_wake_s(&journal, p, c, now))
+                    .min()
+                    .map_or(u64::MAX, |s| s.max(1) as u64);
+                wake_in_s(&snapshot, now).min(deadline)
+            }
             Err(e) => {
                 log(&e);
                 INTERVAL_S.min(60)
@@ -1277,8 +1309,19 @@ mod tests {
         let p = Proxy::new(&settings).expect("proxy");
         cycle(&settings, &store, &p, &files, &mut memory, true, now).expect("cycle");
         assert_eq!(consumes(&proxy), 0, "three days left: not yet");
-        // Two days later the credit has 10h left; the usage is still 10%.
-        let later = now + 3 * 86400 - 10 * 3600;
+        // Just inside the 2-minute margin the usage is still 10%.
+        let early = now + 3 * 86400 - 600;
+        *proxy.files.lock().expect("files") = json!({"files": [codex("a", "10", early, false)]});
+        cycle(&settings, &store, &p, &files, &mut memory, true, early).expect("cycle");
+        assert_eq!(consumes(&proxy), 0, "10 minutes left: still not");
+        let wake = core::deadline_wake_s(
+            &files.journal().expect("journal"),
+            "codex:acct-a",
+            &memory.credits["codex:acct-a"].1,
+            early,
+        );
+        assert_eq!(wake, Some(480), "precise wake at expiry minus 2 minutes");
+        let later = now + 3 * 86400 - 120;
         *proxy.files.lock().expect("files") = json!({"files": [codex("a", "10", later, false)]});
         cycle(&settings, &store, &p, &files, &mut memory, true, later).expect("cycle");
         assert_eq!(consumes(&proxy), 1);
@@ -1292,7 +1335,7 @@ mod tests {
         let now = 1_794_000_000;
         let proxy = fake_proxy(
             json!({"files": [codex("a", "10", now, false)]}),
-            vec![expiring(now, 3600)],
+            vec![expiring(now, 100)],
             403,
         );
         let settings = settings_for(&proxy, &dir, &[("quota.redeem", "true")]);
@@ -1302,19 +1345,15 @@ mod tests {
             Memory::default(),
         );
         let p = Proxy::new(&settings).expect("proxy");
-        for t in 0..3 {
-            cycle(
-                &settings,
-                &store,
-                &p,
-                &files,
-                &mut memory,
-                true,
-                now + t * 300,
-            )
-            .expect("cycle");
+        // 🧑 "Redeem the account 2 reset 2 min before expiry, not 15": first attempt at the margin, then every 15 s until expiry.
+        for t in [0, 5, 15, 30, 45, 60, 99, 100, 130] {
+            cycle(&settings, &store, &p, &files, &mut memory, true, now + t).expect("cycle");
         }
-        assert_eq!(consumes(&proxy), 3, "rejections are retried");
+        assert_eq!(
+            consumes(&proxy),
+            6,
+            "attempts at 0, 15, 30, 45, 60, 99; none after expiry"
+        );
         assert!(
             steps_of(&files)
                 .iter()
@@ -1329,7 +1368,7 @@ mod tests {
         let now = 1_794_000_000;
         let proxy = fake_proxy(
             json!({"files": [codex("a", "10", now, false)]}),
-            vec![expiring(now, 3600)],
+            vec![expiring(now, 100)],
             201,
         );
         let settings = settings_for(&proxy, &dir, &[("quota.redeem", "true")]);

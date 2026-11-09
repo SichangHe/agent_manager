@@ -682,7 +682,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     ),
                 );
                 // 🧑 (via the manager) "Pin the allowlist by task file, not session, so restarts don't break it": `human.writer_tasks.TAG = "TOOL:MODEL"`.
-                let by_task = settings::get(&settings, &format!("human.writer_tasks.{}", task.tag()));
+                let by_task =
+                    settings::get(&settings, &format!("human.writer_tasks.{}", task.tag()));
                 if wanted.is_empty() && exception.is_empty() && by_task.is_empty() {
                     return Ok(false);
                 }

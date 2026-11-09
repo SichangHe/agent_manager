@@ -541,11 +541,19 @@ pub fn should_redeem(journal: &[Value], b: &Bucket, authorized: bool, now: i64) 
         && episode(b).is_some_and(|ep| journal_steps(journal, &ep).is_empty())
 }
 
-/// A credit is redeemed this long before it expires at the latest, whatever the usage.
+/// A credit is redeemed this long before it expires, whatever the usage.
 // 🧑 "Of course you should use the reset regardless of the usage. The 99% usage is a target to achieve not a restricting factor for whether to use the reset."
 // 🧑 "Using resets earlier in the reset cycle is better because it utilizes the natural reset timing"
-// The exhaustion trigger still fires earlier when it comes first; this margin leaves a day of retries before expiry.
-pub const DEADLINE_MARGIN_S: i64 = 24 * 3600;
+// 🧑 "Use the ChatGPT account with the expiring reset on productive work, then use the reset right before it expires"
+// 🧑 "Redeem the account 2 reset 2 min before expiry, not 15"
+// The exhaustion trigger still fires earlier when it comes first.
+pub const DEADLINE_MARGIN_S: i64 = 120;
+/// Between the deadline and the expiry a failed attempt is retried this often.
+pub const DEADLINE_RETRY_S: i64 = 15;
+/// Deadline attempts per credit; 2 minutes at 15 s is 8, the rest is slack.
+pub const DEADLINE_MAX_ATTEMPTS: usize = 20;
+/// With automatic redemption off, a credit this close to expiry is reported as at risk.
+pub const AT_RISK_S: i64 = 6 * 3600;
 /// A rejected or uncertain redemption is retried at most this many times per episode.
 pub const MAX_ATTEMPTS: usize = 48;
 /// A quota counts as reset when its highest active window fell by this many points.
@@ -591,21 +599,32 @@ pub fn quota_reset(before: Usage, now: Usage) -> bool {
     before.0 - now.0 >= RESET_DROP_PCT || (now.0 < before.0 && moved)
 }
 
-/// Whether a failed episode may try again: its last step is `rejected` or `uncertain`, attempts remain, and the backoff has passed.
-pub fn retry_due(journal: &[Value], episode: &str, now: i64) -> bool {
+/// Whether a failed episode may try again: its last step is `rejected` or `uncertain`, attempts remain, and `backoff(attempts)` seconds have passed.
+fn retry_after(
+    journal: &[Value],
+    episode: &str,
+    now: i64,
+    max: usize,
+    backoff: impl Fn(usize) -> i64,
+) -> bool {
     let mine: Vec<&Value> = journal.iter().filter(|e| e["episode"] == episode).collect();
     let attempts = mine.iter().filter(|e| e["step"] == "intent").count();
     let Some(last) = mine.last() else {
         return false;
     };
     matches!(last["step"].as_str(), Some("rejected" | "uncertain"))
-        && attempts < MAX_ATTEMPTS
+        && attempts < max
         && last["t"]
             .as_i64()
-            .is_none_or(|t| now >= t + retry_backoff_s(attempts))
+            .is_none_or(|t| now >= t + backoff(attempts))
 }
 
-/// The credit to redeem now for its deadline: the earliest-expiring one inside its margin (and not yet expired) whose episode is fresh or due for a retry.
+/// Retry of an exhaustion episode: minutes of backoff.
+pub fn retry_due(journal: &[Value], episode: &str, now: i64) -> bool {
+    retry_after(journal, episode, now, MAX_ATTEMPTS, retry_backoff_s)
+}
+
+/// The credit to redeem now for its deadline: the earliest-expiring one within `DEADLINE_MARGIN_S` of expiry (and not yet expired) whose episode is fresh or due for a quick retry.
 pub fn deadline_pick(
     journal: &[Value],
     principal: &str,
@@ -619,9 +638,53 @@ pub fn deadline_pick(
     open.sort_by_key(|(_, at)| *at);
     open.into_iter().find_map(|(id, _)| {
         let ep = deadline_episode(principal, id);
-        (journal_steps(journal, &ep).is_empty() || retry_due(journal, &ep, now))
-            .then(|| (ep, id.clone()))
+        (journal_steps(journal, &ep).is_empty()
+            || retry_after(journal, &ep, now, DEADLINE_MAX_ATTEMPTS, |_| {
+                DEADLINE_RETRY_S
+            }))
+        .then(|| (ep, id.clone()))
     })
+}
+
+/// Seconds until the observer must look again for the deadlines of these credits: the moment each enters its margin, then every retry interval until it is confirmed or expired.
+pub fn deadline_wake_s(
+    journal: &[Value],
+    principal: &str,
+    credits: &[(String, i64)],
+    now: i64,
+) -> Option<i64> {
+    credits
+        .iter()
+        .filter(|(_, at)| now < *at)
+        .filter(|(id, _)| {
+            !journal_steps(journal, &deadline_episode(principal, id)).contains(&"confirmed")
+        })
+        .map(|(_, at)| {
+            let start = at - DEADLINE_MARGIN_S;
+            if now < start {
+                start - now
+            } else {
+                DEADLINE_RETRY_S
+            }
+        })
+        .min()
+}
+
+/// Whether a failed attempt now is the last one that can still fit before the expiry.
+pub fn final_attempt(left_s: i64) -> bool {
+    left_s < 2 * DEADLINE_RETRY_S
+}
+
+/// Whether a credit whose deadline attempts failed has now expired unredeemed.
+pub fn expired_after_failure(
+    journal: &[Value],
+    principal: &str,
+    id: &str,
+    at: i64,
+    now: i64,
+) -> bool {
+    let steps = journal_steps(journal, &deadline_episode(principal, id));
+    now >= at && steps.contains(&"intent") && !steps.contains(&"confirmed")
 }
 
 /// Credits that left the provider's list with no redemption attempt of ours on record: expired unused, or used elsewhere.
@@ -1228,15 +1291,16 @@ mod tests {
 
     #[test]
     fn deadline_fires_inside_the_margin_regardless_of_usage() {
-        let exp = NOW + 10 * 3600;
+        let exp = NOW + 100;
         let credits = [("c1".to_owned(), exp)];
         assert_eq!(
             deadline_pick(&[], "x", &credits, NOW),
             Some(("x!c1".to_owned(), "c1".to_owned()))
         );
         assert_eq!(
-            deadline_pick(&[], "x", &[("c1".into(), NOW + 3 * 86400)], NOW),
-            None
+            deadline_pick(&[], "x", &[("c1".into(), NOW + 121)], NOW),
+            None,
+            "more than 2 minutes left: not yet"
         );
         assert_eq!(
             deadline_pick(&[], "x", &[("c1".into(), NOW - 1)], NOW),
@@ -1248,8 +1312,8 @@ mod tests {
     #[test]
     fn deadline_picks_earliest_and_skips_finished_episodes() {
         let credits = [
-            ("late".to_owned(), NOW + 7200),
-            ("soon".to_owned(), NOW + 3600),
+            ("late".to_owned(), NOW + 100),
+            ("soon".to_owned(), NOW + 60),
         ];
         assert_eq!(
             deadline_pick(&[], "x", &credits, NOW).map(|p| p.1),
@@ -1265,17 +1329,17 @@ mod tests {
     #[test]
     fn failed_redemptions_retry_with_bounded_backoff_until_expiry() {
         let ep = "x!c1";
-        let credits = [("c1".to_owned(), NOW + 3600)];
+        let credits = [("c1".to_owned(), NOW + 100)];
         let j = [at(ep, "intent", NOW), at(ep, "rejected", NOW)];
         assert!(
-            deadline_pick(&j, "x", &credits, NOW + 30).is_none(),
+            deadline_pick(&j, "x", &credits, NOW + 10).is_none(),
             "too soon"
         );
-        assert!(deadline_pick(&j, "x", &credits, NOW + 60).is_some());
+        assert!(deadline_pick(&j, "x", &credits, NOW + 15).is_some());
         let u = [at(ep, "intent", NOW), at(ep, "uncertain", NOW)];
-        assert!(deadline_pick(&u, "x", &credits, NOW + 61).is_some());
+        assert!(deadline_pick(&u, "x", &credits, NOW + 16).is_some());
         assert!(
-            deadline_pick(&u, "x", &credits, NOW + 3600).is_none(),
+            deadline_pick(&u, "x", &credits, NOW + 100).is_none(),
             "expired"
         );
         let inflight = [at(ep, "intent", NOW)];
@@ -1291,6 +1355,33 @@ mod tests {
             [1, 2, 3, 6, 7, 50].map(retry_backoff_s),
             [60, 120, 240, 1800, 1800, 1800]
         );
+    }
+
+    #[test]
+    fn wake_is_precise_for_the_deadline_then_quick_retries() {
+        let credits = [("c1".to_owned(), NOW + 3 * 86400)];
+        assert_eq!(
+            deadline_wake_s(&[], "x", &credits, NOW),
+            Some(3 * 86400 - DEADLINE_MARGIN_S)
+        );
+        let at_deadline = NOW + 3 * 86400 - DEADLINE_MARGIN_S;
+        assert_eq!(deadline_wake_s(&[], "x", &credits, at_deadline), Some(15));
+        let done = [at("x!c1", "intent", NOW), at("x!c1", "confirmed", NOW)];
+        assert_eq!(deadline_wake_s(&done, "x", &credits, NOW), None);
+        assert_eq!(
+            deadline_wake_s(&[], "x", &credits, NOW + 3 * 86400),
+            None,
+            "expired"
+        );
+    }
+
+    #[test]
+    fn final_attempt_and_expiry_after_failure_are_detected() {
+        assert!(final_attempt(20) && !final_attempt(60));
+        let j = [at("x!c1", "intent", NOW), at("x!c1", "rejected", NOW)];
+        assert!(expired_after_failure(&j, "x", "c1", NOW + 100, NOW + 100));
+        assert!(!expired_after_failure(&j, "x", "c1", NOW + 100, NOW + 99));
+        assert!(!expired_after_failure(&[], "x", "c1", NOW + 100, NOW + 100));
     }
 
     #[test]
