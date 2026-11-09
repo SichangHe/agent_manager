@@ -7,8 +7,8 @@ Type=simple
 WorkingDirectory=%h
 UMask=0077
 Environment=PATH=%h/.nix-profile/bin:%h/.config/bin:/usr/bin:/bin
-# Shadow mode: it only logs the actions it would take. Add `--live` to act.
-ExecStart=%h/.cargo/bin/amh quota serve
+# Without `--live` it is in shadow mode: it only logs the actions it would take.
+ExecStart=%h/.cargo/bin/amh quota serve --live
 StandardOutput=append:%h/.local/state/amh/amh-quota.log
 StandardError=append:%h/.local/state/amh/amh-quota.log
 Restart=always
