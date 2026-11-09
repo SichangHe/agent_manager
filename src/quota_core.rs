@@ -603,13 +603,14 @@ pub fn proxy_actions(
                     acts.push(Act::Priority(r.name.clone(), *rank));
                 }
             }
-            Some(Status::Unknown) if r.disabled && ours.contains(&r.name) => {
-                if bucket
-                    .and_then(|b| b.next_reset)
-                    .is_some_and(|at| at <= now)
-                {
-                    acts.push(Act::Enable(r.name.clone()));
-                }
+            Some(Status::Unknown)
+                if r.disabled
+                    && ours.contains(&r.name)
+                    && bucket
+                        .and_then(|b| b.next_reset)
+                        .is_some_and(|at| at <= now) =>
+            {
+                acts.push(Act::Enable(r.name.clone()));
             }
             _ => {}
         }
@@ -626,17 +627,27 @@ pub fn journal_steps<'a>(journal: &'a [Value], episode: &str) -> Vec<&'a str> {
         .collect()
 }
 
-/// A bucket's exhaustion, named by the reset that ends it.
+/// A bucket's exhaustion, named by when it began; unlike the reset hint, that does not change while it lasts.
 pub fn episode(b: &Bucket) -> Option<String> {
-    (b.status == Status::Exhausted)
-        .then(|| format!("{}@{}", b.principal, b.next_reset.unwrap_or_default()))
+    (b.status == Status::Exhausted).then(|| format!("{}@{}", b.principal, b.since))
 }
+
+/// Even a new episode of one principal waits this long after its last redemption attempt: a flicker through unknown must not redeem twice.
+const REDEEM_GAP_S: i64 = 6 * 3600;
 
 /// Whether to start redeeming for this bucket: authorized, Codex, exhausted, and nothing journaled for this episode, so no episode is ever redeemed twice.
 // 🧑 "Yes" (to redeeming Codex resets automatically as soon as an account runs out)
-pub fn should_redeem(journal: &[Value], b: &Bucket, authorized: bool) -> bool {
+pub fn should_redeem(journal: &[Value], b: &Bucket, authorized: bool, now: i64) -> bool {
+    let recent = journal.iter().any(|e| {
+        e["episode"]
+            .as_str()
+            .is_some_and(|ep| ep.starts_with(&format!("{}@", b.principal)))
+            && e["step"] != "no_credit"
+            && e["t"].as_i64().is_none_or(|t| now - t < REDEEM_GAP_S)
+    });
     authorized
         && b.pool == "codex"
+        && !recent
         && episode(b).is_some_and(|ep| journal_steps(journal, &ep).is_empty())
 }
 
@@ -690,12 +701,17 @@ pub fn gate(
             .filter(|w| w.pool.as_deref() == Some(pool))
             .collect();
         mine.sort_by_key(|w| std::cmp::Reverse(w.priority));
-        let Some(info) = pools.get(pool).filter(|p| p.state == Status::Available) else {
-            let why = pools.get(pool).map_or("unknown", |p| p.state.name());
-            out.gated.extend(
-                mine.iter()
-                    .map(|w| (w.address.clone(), format!("{pool} quota is {why}"))),
-            );
+        let state = pools.get(pool).map_or(Status::Unknown, |p| p.state);
+        let Some(info) = pools.get(pool).filter(|_| state == Status::Available) else {
+            // Unknown never invents quota: no resumes. But a worker that was running keeps running; only exhaustion stops it.
+            let waiting =
+                |w: &&&Worker| state == Status::Exhausted || prev_gated.contains(&w.address);
+            out.gated.extend(mine.iter().filter(waiting).map(|w| {
+                (
+                    w.address.clone(),
+                    format!("{pool} quota is {}", state.name()),
+                )
+            }));
             continue;
         };
         let running = mine
@@ -712,7 +728,6 @@ pub fn gate(
             }
             _ => usize::MAX,
         };
-        let mut shed = false;
         let mut kept = 0;
         let mut resumes = 0;
         for w in mine {
@@ -720,7 +735,6 @@ pub fn gate(
             if w.is_manager {
                 kept += 1;
             } else if kept >= cap {
-                shed = true;
                 out.gated.insert(
                     w.address.clone(),
                     format!("{pool} quota is projected to run out before its reset"),
@@ -729,7 +743,7 @@ pub fn gate(
             } else {
                 kept += 1;
             }
-            if was_gated && !shed {
+            if was_gated {
                 if resumes >= max_resumes {
                     out.gated
                         .insert(w.address.clone(), "waiting its turn to resume".to_owned());
@@ -1328,35 +1342,30 @@ mod tests {
     }
 
     #[test]
-    fn exhausted_or_unknown_pool_gates_all_its_workers_only() {
+    fn exhausted_pool_gates_its_workers_and_unknown_only_keeps_the_waiting_ones_waiting() {
         let pools = BTreeMap::from([
             ("codex".to_owned(), pool(Status::Exhausted, None)),
             ("claude".to_owned(), pool(Status::Available, None)),
         ]);
-        let g = gate(
-            &pools,
-            &[
-                w("a", "codex", 1),
-                w("b", "claude", 1),
-                Worker {
-                    pool: None,
-                    ..w("c", "x", 1)
-                },
-            ],
-            &BTreeSet::new(),
-            2,
-        );
+        let ws = [
+            w("a", "codex", 1),
+            w("b", "claude", 1),
+            Worker {
+                pool: None,
+                ..w("c", "x", 1)
+            },
+        ];
+        let g = gate(&pools, &ws, &BTreeSet::new(), 2);
         assert_eq!(g.gated.keys().collect::<Vec<_>>(), vec!["a"]);
-        let g = gate(
-            &BTreeMap::new(),
-            &[w("b", "claude", 1)],
-            &BTreeSet::new(),
-            2,
+        let ws = [w("b", "claude", 1), w("n", "claude", 1)];
+        let waiting = BTreeSet::from(["b".to_owned()]);
+        let g = gate(&BTreeMap::new(), &ws, &waiting, 2);
+        assert_eq!(
+            g.gated.keys().collect::<Vec<_>>(),
+            vec!["b"],
+            "unknown: no resume, and running workers keep running"
         );
-        assert!(
-            g.gated.contains_key("b"),
-            "a missing pool is unknown, never open"
-        );
+        assert!(g.resumed.is_empty());
     }
 
     #[test]
@@ -1465,31 +1474,39 @@ mod tests {
     }
 
     fn entry(ep: &str, step: &str) -> Value {
-        json!({"episode": ep, "step": step})
+        json!({"episode": ep, "step": step, "t": NOW})
     }
 
     #[test]
     fn redemption_requires_authorization_codex_and_a_fresh_episode() {
         let b = bucket("x", "codex", Status::Exhausted, 100.0, Some(NOW + 5));
         let ep = episode(&b).unwrap_or_default();
-        assert!(should_redeem(&[], &b, true));
-        assert!(!should_redeem(&[], &b, false));
+        assert!(should_redeem(&[], &b, true, NOW));
+        assert!(!should_redeem(&[], &b, false, NOW));
         assert!(!should_redeem(
             &[],
             &bucket("x", "claude", Status::Exhausted, 100.0, Some(NOW + 5)),
-            true
+            true,
+            NOW
         ));
         assert!(!should_redeem(
             &[],
             &bucket("x", "codex", Status::Available, 1.0, Some(NOW + 5)),
-            true
+            true,
+            NOW
         ));
         for step in ["intent", "called", "uncertain", "confirmed", "no_credit"] {
-            assert!(!should_redeem(&[entry(&ep, step)], &b, true), "{step}");
+            assert!(!should_redeem(&[entry(&ep, step)], &b, true, NOW), "{step}");
         }
-        let later = bucket("x", "codex", Status::Exhausted, 100.0, Some(NOW + 700_000));
+        let mut later = bucket("x", "codex", Status::Exhausted, 100.0, Some(NOW + 700_000));
+        later.since = NOW + 700_000;
+        let old = [entry(&ep, "confirmed")];
         assert!(
-            should_redeem(&[entry(&ep, "confirmed")], &later, true),
+            !should_redeem(&old, &later, true, NOW + 3600),
+            "a flicker through unknown within the gap is not a new exhaustion"
+        );
+        assert!(
+            should_redeem(&old, &later, true, NOW + 700_000),
             "a new episode may redeem"
         );
     }
@@ -1501,7 +1518,7 @@ mod tests {
         for path in [vec!["intent"], vec!["intent", "called"]] {
             let journal: Vec<Value> = path.iter().map(|s| entry(&ep, s)).collect();
             assert_eq!(unfinished(&journal), vec![ep.clone()]);
-            assert!(!should_redeem(&journal, &b, true));
+            assert!(!should_redeem(&journal, &b, true, NOW));
         }
         let done: Vec<Value> = ["intent", "called", "confirmed"]
             .iter()

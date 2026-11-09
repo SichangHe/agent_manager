@@ -33,6 +33,7 @@ model
     - available: fresh (at most 15 min) reading, all active windows below 99%, on 2 consecutive polls
     - unknown: stale, invalid, empty, 401, or a full window whose reset passed; never available
     - a reading older than the exhaustion cannot end it
+- only credentials the router may use form buckets: not denied, not unclassified, not disabled by someone else
 - pool: available if any bucket is; else unknown if any is; else exhausted
 - events by diffing: `quota_appeared`, `quota_ran_out`, `credential_added`, `predicted_waste`
 - 429, capacity errors, and 5xx never mark quota exhausted; codex-throttle, codex-rate-adapt, `fallback.rs` keep them
@@ -40,13 +41,18 @@ model
 proxy reconciliation
 - exhausted: disable and remember in `ours`; available and in `ours`: enable; unknown: no change
 - a credential disabled by anyone else is never enabled
+- a disabled credential gets no traffic, so its signals may never refresh: one we disabled whose bucket went unknown is enabled again once its reset hint passed, to probe it
+- an empty or corrupt proxy answer or snapshot ends the cycle with an error; `seen` and `ours` only grow
 - priority among available buckets: soonest 7d reset first; 5h above 90% last; unknown 7d after known; equal keys share a rank; higher number wins
 - denied (`quota.deny`) and unclassified new credentials stay disabled
     - the first run grandfathers all existing credentials; later ones need `quota.allow` or `quota.deny`
 
 redemption
 - authorized only with `quota.redeem = "true"` in live mode; Codex only
-- one episode per exhaustion, named `PRINCIPAL@RESET`; any journaled step blocks a second attempt
+- one episode per exhaustion, named `PRINCIPAL@SINCE` (when it began); any journaled step blocks a second attempt
+    - a principal also waits 6 h after its last attempt, so a flicker through unknown cannot redeem twice
+    - an unreadable journal ends the cycle; the journal is never rotated
+    - after `confirmed` the credential is enabled at once; unverified: the proxy may still hold its own `credential_quota` cooldown until the old reset time
 - steps: `intent` (credit id, request id, count before) then the call then `called` then `confirmed` (credit no longer available)
     - `no_credit`, `rejected` (provider 4xx), `uncertain` end an episode
     - transport failure or crash after `intent` is `uncertain`: re-read once, else tell the human; never retried
@@ -55,11 +61,12 @@ redemption
 amh side
 - priority: task field `priority` (integer, default 0); `amh task start --priority N`, `amh task priority TASK.md N`
 - the watcher's minute pass (`quota_gate::pass`) derives the gate from snapshot plus tasks; nothing accumulates
-    - exhausted or unknown pool: all its workers wait
+    - exhausted pool: all its workers wait
+    - unknown pool: nobody new waits and nobody resumes; a running worker keeps running
     - projected to run out (remaining minus burn x hours to the soonest 7d reset, burn = rise per hour over the last hour): lowest-priority workers wait until the rest fit, equal burn per worker assumed; managers never wait
     - waiting means `omnigent::status` is `paused` and `omnigent::send` refuses: no nudges, mail held
     - workers waiting last pass with room now resume by priority, 2 per pass, one nudge each; the gate is keyed by address, so a migrated task gets no stale nudge
-- admission: `task start` without `--tool` goes to the default pool, else the other if the default is closed; a named tool is never swapped, a closed pool refuses it
+- admission (workers only: managers are never held back; a pinned model counts as a named tool): `task start` without `--tool` goes to the default pool, else the other if the default is closed; a named tool is never swapped, a closed pool refuses it
     - closed: not available, or projected to run out and the new priority does not exceed the lowest running worker's
 - `quota.enforce = "true"` turns gating and admission on; otherwise the pass only logs `shadow: would ...`
 - notices once per key via `quota-notices.json`, to `quota.notify_task` (default `quota_support.md`)

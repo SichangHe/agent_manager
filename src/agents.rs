@@ -521,13 +521,18 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
         .then(|| store.load(new.name))
         .transpose()?
         .and_then(|old| old.field("priority").and_then(|p| p.parse().ok()));
-    let tool = &crate::quota_gate::admit(
-        settings,
-        store,
-        tool,
-        given(new.tool).is_some(),
-        new.priority.or(own_priority).unwrap_or_default(),
-    )?;
+    // Managers are never held back, and a tool the caller named or a pinned model cannot be swapped.
+    let tool = &if new.as_manager {
+        tool.to_owned()
+    } else {
+        crate::quota_gate::admit(
+            settings,
+            store,
+            tool,
+            given(new.tool).is_some() || pinned,
+            new.priority.or(own_priority).unwrap_or_default(),
+        )?
+    };
     let (model, effort) = omnigent::launch_default(settings, tool, new.as_manager)
         .map_err(|error| format!("amh: {error}"))?;
     let quoted = match given(new.email) {

@@ -128,6 +128,10 @@ pub fn paused(
 
 /// Forget every session's limit evidence: all of it is Claude's, and the pool just got quota back.
 pub fn clear(path: &Path) -> Result<(), String> {
+    let lock = std::fs::File::create(path.with_extension("lock"))
+        .map_err(|e| format!("cannot open quota lock: {e}"))?;
+    lock.lock()
+        .map_err(|e| format!("cannot lock quota state: {e}"))?;
     match std::fs::read_to_string(path) {
         Ok(_) => {
             crate::taskfile::write(path, "{}").map_err(|e| format!("cannot write quota state: {e}"))

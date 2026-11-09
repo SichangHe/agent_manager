@@ -23,6 +23,7 @@ const PROXY_TIMEOUT_S: u64 = 30;
 /// A failing proxy or actuator is told to the human after this many tries in a row.
 const NOTICE_AFTER_FAILURES: u32 = 2;
 const EVENTS_MAX_BYTES: u64 = 8 << 20;
+const EVENTS: &str = "quota-events.jsonl";
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
 
 fn log(text: &str) {
@@ -179,7 +180,7 @@ impl Proxy {
                 ))
             })
             .collect();
-        found.sort_by(|a, b| a.1.cmp(&b.1));
+        found.sort_by_key(|(_, expires)| (expires.is_empty(), expires.clone()));
         Ok(found)
     }
 }
@@ -208,17 +209,23 @@ pub struct Files {
 }
 
 impl Files {
-    fn journal(&self) -> Vec<Value> {
-        fs::read_to_string(self.dir.join("quota-redeem.journal"))
-            .unwrap_or_default()
-            .lines()
-            .filter_map(|l| serde_json::from_str(l).ok())
+    /// Every journal entry; an unreadable journal is an error, never an empty one, because empty would allow a second redemption.
+    fn journal(&self) -> Result<Vec<Value>, String> {
+        let text = match fs::read_to_string(self.dir.join("quota-redeem.journal")) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("cannot read the redemption journal: {e}")),
+        };
+        text.lines()
+            .map(|l| {
+                serde_json::from_str(l).map_err(|e| format!("corrupt redemption journal: {e}"))
+            })
             .collect()
     }
 
     fn append(&self, name: &str, entry: Value) {
         let path = self.dir.join(name);
-        if fs::metadata(&path).is_ok_and(|m| m.len() > EVENTS_MAX_BYTES) {
+        if name == EVENTS && fs::metadata(&path).is_ok_and(|m| m.len() > EVENTS_MAX_BYTES) {
             let _ = fs::rename(&path, path.with_extension("jsonl.1"));
         }
         let line = format!("{entry}\n");
@@ -226,7 +233,7 @@ impl Files {
             .create(true)
             .append(true)
             .open(&path)
-            .and_then(|mut f| f.write_all(line.as_bytes()));
+            .and_then(|mut f| f.write_all(line.as_bytes()).and_then(|()| f.sync_all()));
         if let Err(e) = written {
             log(&format!("cannot append to {name}: {e}"));
         }
@@ -234,7 +241,7 @@ impl Files {
 
     fn event(&self, now: i64, kind: &str, subject: &str, detail: Value) {
         self.append(
-            "quota-events.jsonl",
+            EVENTS,
             json!({"t": now, "event": kind, "subject": subject, "detail": detail}),
         );
     }
@@ -254,12 +261,15 @@ pub struct Memory {
     proxy_failures: u32,
     failures: BTreeMap<String, u32>,
     intended: BTreeSet<String>,
+    shadow_redeem: BTreeSet<String>,
     recovered: bool,
 }
 
 /// Compare the journal's credit with the provider's list: redeemed means it is no longer available.
 fn reconcile(proxy: &Proxy, files: &Files, now: i64, episode: &str, reading: &Reading) -> bool {
-    let journal = files.journal();
+    let Ok(journal) = files.journal() else {
+        return false;
+    };
     let Some(credit) = journal
         .iter()
         .rev()
@@ -390,9 +400,18 @@ pub fn cycle(
             return Err(e);
         }
     };
-    let prev = load_snapshot(&files.dir).unwrap_or_default();
+    let prev = match fs::read_to_string(snapshot_path(&files.dir)) {
+        Ok(text) => Snapshot::from_json(
+            &serde_json::from_str(&text).map_err(|e| format!("corrupt snapshot: {e}"))?,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Snapshot::default(),
+        Err(e) => return Err(format!("cannot read the snapshot: {e}")),
+    };
     let readings = core::parse_auth_files(&answer, now);
-    let (buckets, mut events) = core::step(&prev.buckets, &readings, now);
+    if readings.is_empty() {
+        return Err("the proxy listed no Claude or Codex credentials".to_owned());
+    }
+    let mut events = Vec::new();
     let names: BTreeSet<String> = readings.iter().map(|r| r.name.clone()).collect();
     let (allow, deny) = (list(settings, "quota.allow"), list(settings, "quota.deny"));
     let mut unclassified = prev.unclassified.clone();
@@ -417,9 +436,17 @@ pub fn cycle(
             }
         }
     }
-    unclassified.retain(|n| names.contains(n) && !allow.contains(n) && !deny.contains(n));
+    unclassified.retain(|n| !allow.contains(n) && !deny.contains(n));
     let denied: BTreeSet<String> = deny.union(&unclassified).cloned().collect();
-    let mut ours: BTreeSet<String> = prev.ours.intersection(&names).cloned().collect();
+    let mut ours = prev.ours.clone();
+    // Only credentials the router may use count towards a pool: not denied, unclassified, or disabled by someone else.
+    let eligible: Vec<Reading> = readings
+        .iter()
+        .filter(|r| !denied.contains(&r.name) && (!r.disabled || ours.contains(&r.name)))
+        .cloned()
+        .collect();
+    let (buckets, stepped) = core::step(&prev.buckets, &eligible, now);
+    events.extend(stepped);
     let acts = core::proxy_actions(&buckets, &readings, &denied, &ours, now);
     let intended: BTreeSet<String> = acts.iter().map(|a| format!("{a:?}")).collect();
     for act in &acts {
@@ -478,9 +505,9 @@ pub fn cycle(
     }
     let authorized = live && settings::get(settings, "quota.redeem") == "true";
     if live && !memory.recovered {
-        for episode in core::unfinished(&files.journal()) {
+        for episode in core::unfinished(&files.journal()?) {
             let credit_cred = files
-                .journal()
+                .journal()?
                 .iter()
                 .rev()
                 .find(|e| e["episode"] == episode.as_str() && e["step"] == "intent")
@@ -508,13 +535,18 @@ pub fn cycle(
         memory.recovered = true;
     }
     for bucket in &buckets {
-        if !core::should_redeem(&files.journal(), bucket, authorized) {
-            if bucket.pool == "codex" && bucket.status == Status::Exhausted && !live {
-                let key = format!("would_redeem {}", bucket.principal);
-                if !memory.intended.contains(&key) {
-                    memory.intended.insert(key.clone());
-                    files.event(now, "shadow_action", &key, json!({}));
-                }
+        if !core::should_redeem(&files.journal()?, bucket, authorized, now) {
+            if bucket.pool == "codex"
+                && bucket.status == Status::Exhausted
+                && !live
+                && memory.shadow_redeem.insert(bucket.principal.clone())
+            {
+                files.event(
+                    now,
+                    "shadow_action",
+                    &format!("would_redeem {}", bucket.principal),
+                    json!({}),
+                );
             }
             continue;
         }
@@ -525,6 +557,13 @@ pub fn cycle(
         };
         if let Some(reading) = pick(true).or_else(|| pick(false)) {
             redeem(settings, store, proxy, files, now, bucket, reading);
+            // The reset makes the credential usable now, and a disabled one gets no traffic to show it.
+            let episode = core::episode(bucket).unwrap_or_default();
+            if core::journal_steps(&files.journal()?, &episode).last() == Some(&"confirmed")
+                && proxy.apply(&Act::Enable(reading.name.clone())).is_ok()
+            {
+                ours.remove(&reading.name);
+            }
         }
     }
     let snapshot = Snapshot {
@@ -532,7 +571,7 @@ pub fn cycle(
         live,
         buckets,
         pools,
-        seen: names,
+        seen: prev.seen.union(&names).cloned().collect(),
         unclassified,
         ours,
         appeared_at,
@@ -544,7 +583,7 @@ pub fn cycle(
     for b in &snapshot.buckets {
         let mut sample = b.to_json();
         sample["history"] = Value::Null;
-        files.append("quota-events.jsonl", json!({"t": now, "sample": sample}));
+        files.append(EVENTS, json!({"t": now, "sample": sample}));
     }
     crate::taskfile::write(&snapshot_path(&files.dir), &snapshot.to_json().to_string())
         .map_err(|e| format!("cannot write the snapshot: {e}"))?;
@@ -837,6 +876,7 @@ mod tests {
         assert_eq!(calls.iter().filter(|c| *c == "consume").count(), 1);
         let steps: Vec<String> = files
             .journal()
+            .expect("journal")
             .iter()
             .filter_map(|e| e["step"].as_str().map(str::to_owned))
             .collect();
@@ -900,6 +940,7 @@ mod tests {
         }
         let steps: Vec<String> = files
             .journal()
+            .expect("journal")
             .iter()
             .filter_map(|e| e["step"].as_str().map(str::to_owned))
             .collect();
@@ -968,6 +1009,7 @@ mod tests {
         );
         let steps: Vec<String> = files
             .journal()
+            .expect("journal")
             .iter()
             .filter_map(|e| e["step"].as_str().map(str::to_owned))
             .collect();

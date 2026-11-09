@@ -112,6 +112,20 @@ fn addresses(gate: &Value, key: &str) -> BTreeSet<String> {
         .collect()
 }
 
+fn write_gate(
+    store: &Store,
+    now: i64,
+    enforce: bool,
+    gated: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let shadow: serde_json::Map<String, Value> =
+        gated.iter().map(|(k, v)| (k.clone(), json!(v))).collect();
+    let written = json!({"generated_at": now, "enforced": enforce,
+        "gated": if enforce { Value::Object(shadow.clone()) } else { json!({}) }, "shadow": shadow});
+    crate::taskfile::write(&store.state_dir.join(GATE_FILE), &written.to_string())
+        .map_err(|e| format!("quota gate: cannot write {GATE_FILE}: {e}"))
+}
+
 /// The watcher's quota pass: recompute the gate from the snapshot and the tasks, nudge the workers that may resume, clear session evidence on `quota_appeared`, and send the deduplicated notices. Returns log lines.
 ///
 /// Without `quota.enforce = "true"` nothing is gated: the pass only records and logs what it would do.
@@ -140,17 +154,11 @@ pub fn pass(settings: &Settings, store: &Store) -> Vec<String> {
     };
     let old = read_gate(&store.state_dir);
     let prev = addresses(&old, if enforce { "gated" } else { "shadow" });
-    let gate = core::gate(&pools, &workers, &prev, MAX_RESUMES_PER_PASS);
+    let mut gate = core::gate(&pools, &workers, &prev, MAX_RESUMES_PER_PASS);
     let held: BTreeSet<String> = gate.gated.keys().cloned().collect();
-    let gated_json: serde_json::Map<String, Value> = gate
-        .gated
-        .iter()
-        .map(|(k, v)| (k.clone(), json!(v)))
-        .collect();
-    let written = json!({"generated_at": now, "enforced": enforce,
-        "gated": if enforce { Value::Object(gated_json.clone()) } else { json!({}) }, "shadow": gated_json});
-    if let Err(e) = crate::taskfile::write(&store.state_dir.join(GATE_FILE), &written.to_string()) {
-        lines.push(format!("quota gate: cannot write {GATE_FILE}: {e}"));
+    // The file goes first and without the resumed workers: the nudge below is refused while they are still in it.
+    if let Err(e) = write_gate(store, now, enforce, &gate.gated) {
+        lines.push(e);
     }
     let mode = if enforce { "" } else { "shadow: would " };
     for address in held.difference(&prev) {
@@ -159,11 +167,19 @@ pub fn pass(settings: &Settings, store: &Store) -> Vec<String> {
             gate.gated[address]
         ));
     }
+    let mut unsent = false;
     for address in &gate.resumed {
         lines.push(format!("quota gate {mode}resume {address}"));
         if enforce && let Err(e) = omnigent::send(settings, address, RESUME_TEXT) {
             lines.push(format!("quota resume nudge to {address} failed: {e}"));
+            // Still waiting, so the next pass resumes it again.
+            gate.gated
+                .insert(address.clone(), "resume nudge pending".to_owned());
+            unsent = true;
         }
+    }
+    if unsent && let Err(e) = write_gate(store, now, enforce, &gate.gated) {
+        lines.push(e);
     }
     let last = store.record(APPEARED_RECORD).unwrap_or_default();
     let recorded = |pool: &str| {
