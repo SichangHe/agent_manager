@@ -730,6 +730,7 @@ fn attempt(
     plan: &Plan,
     text: &str,
     reply: Option<&str>,
+    trace: Option<&omnigent::DeliveryTrace<'_>>,
 ) -> Outcome {
     let (mut state, mut evidence) = omnigent::status(settings, &plan.target);
     // The human's message to an agent that waits on a question it was sent is the answer to that question.
@@ -755,15 +756,18 @@ fn attempt(
     // A missing or stuck agent reads no messages, so its mail goes to its manager.
     let sent = match state {
         "missing" | "stuck" | "error" => Err(format!("the agent is {state}: {evidence}")),
-        _ => omnigent::send_now(settings, &plan.target, text),
+        _ => omnigent::send_now_traced(settings, &plan.target, text, trace),
     };
     let Err(error) = sent else {
         return Outcome::Delivered;
     };
     let second = match &plan.fallback {
-        Some(manager) => {
-            omnigent::send_now(settings, manager, &decide::rerouted(task, &error, text))
-        }
+        Some(manager) => omnigent::send_now_traced(
+            settings,
+            manager,
+            &decide::rerouted(task, &error, text),
+            trace,
+        ),
         None => Err("no manager to fall back to".to_owned()),
     };
     match second {
@@ -780,10 +784,49 @@ fn deliver_block(
     plan: &Plan,
     block: &[String],
 ) -> bool {
+    let name = &task.name;
+    let zulip_id = match decide::source_of(&block[0]) {
+        Source::Mail(file) => Path::new(file)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .and_then(|name| name.strip_prefix("zulip-"))
+            .and_then(|name| name.strip_suffix(".txt"))
+            .filter(|id| {
+                !id.is_empty() && id.len() <= 20 && id.bytes().all(|byte| byte.is_ascii_digit())
+            }),
+        _ => None,
+    };
+    // 🧑 "Coordinate with the relevant agents to relentlessly monitor and minimize E2E latency"
+    let trace = zulip_id.map(|id| omnigent::DeliveryTrace {
+        state_dir: &store.state_dir,
+        task: name,
+        zulip_message_id: id,
+    });
+    let began = Instant::now();
+    if let Some(id) = zulip_id
+        && let Err(error) = crate::log::event(
+            &store.state_dir,
+            "delivery started",
+            name,
+            serde_json::json!({"zulip_message_id": id, "to": plan.target, "block": block[0]}),
+        )
+    {
+        log(&error);
+    }
     if omnigent::status(settings, &plan.target).0 == "paused" {
+        if let Some(id) = zulip_id
+            && let Err(error) = crate::log::event(
+                &store.state_dir,
+                "delivery paused",
+                name,
+                serde_json::json!({"zulip_message_id": id, "to": plan.target,
+                    "elapsed_ms": began.elapsed().as_secs_f64() * 1000.0}),
+            )
+        {
+            log(&error);
+        }
         return false;
     }
-    let name = &task.name;
     let reply = match decide::source_of(&block[0]) {
         Source::Mail(file) => {
             let file = Path::new(file).file_name().unwrap_or_default();
@@ -800,10 +843,17 @@ fn deliver_block(
             return false;
         }
     };
-    let outcome = attempt(settings, task, plan, &text, reply.as_deref());
+    let outcome = attempt(
+        settings,
+        task,
+        plan,
+        &text,
+        reply.as_deref(),
+        trace.as_ref(),
+    );
     let settled = decide::settle(task, plan, &block[0], &outcome);
     // 🧑 "log all the events (resolution requested, etc.) and who did those"
-    let (kind, data) = match &outcome {
+    let (kind, mut data) = match &outcome {
         Outcome::Delivered => (
             "message delivered",
             serde_json::json!({"to": plan.target, "block": block[0]}),
@@ -817,6 +867,10 @@ fn deliver_block(
             serde_json::json!({"to": plan.target, "block": block[0], "error": error, "fallback_error": second}),
         ),
     };
+    if let Some(id) = zulip_id {
+        data["zulip_message_id"] = serde_json::json!(id);
+        data["elapsed_ms"] = serde_json::json!(began.elapsed().as_secs_f64() * 1000.0);
+    }
     if let Err(error) = crate::log::event(&store.state_dir, kind, name, data) {
         log(&error);
     }

@@ -62,8 +62,10 @@ fn start_slot() -> Result<(), String> {
             Err(NO_SLOT.to_owned())
         } else if Instant::now() >= given_up {
             queue.retain(|pid| *pid != me);
-            Err("waited 30 min for a start slot; the machine allows 2 agent starts per minute"
-                .to_owned())
+            Err(
+                "waited 30 min for a start slot; the machine allows 2 agent starts per minute"
+                    .to_owned(),
+            )
         } else {
             Ok(false)
         };
@@ -94,6 +96,23 @@ pub fn api(
     path: &str,
     body: Option<&Value>,
 ) -> Result<Value, String> {
+    api_traced(settings, method, path, body, None)
+}
+
+/// Correlate a human message with server dispatch timing without recording its contents.
+pub struct DeliveryTrace<'a> {
+    pub state_dir: &'a std::path::Path,
+    pub task: &'a str,
+    pub zulip_message_id: &'a str,
+}
+
+fn api_traced(
+    settings: &Settings,
+    method: &str,
+    path: &str,
+    body: Option<&Value>,
+    trace: Option<&DeliveryTrace<'_>>,
+) -> Result<Value, String> {
     let base = settings
         .get("omnigent.url")
         .map(String::as_str)
@@ -109,7 +128,17 @@ pub fn api(
         .get("omnigent.token")
         .filter(|token| !token.is_empty())
         .map(|token| format!("Bearer {token}"));
-    let sent = match body {
+    let began = Instant::now();
+    let started_at = chrono::Local::now().to_rfc3339();
+    if let Some(trace) = trace {
+        let _ = crate::log::event(
+            trace.state_dir,
+            "dispatch started",
+            trace.task,
+            json!({"zulip_message_id": trace.zulip_message_id, "path": path, "started_at": started_at}),
+        );
+    }
+    let mut sent = match body {
         Some(body) => {
             let request = if method == "PATCH" {
                 agent.patch(&url)
@@ -117,6 +146,9 @@ pub fn api(
                 agent.post(&url)
             };
             let mut request = request.header("Content-Type", "application/json");
+            if let Some(trace) = trace {
+                request = request.header("X-Amh-Zulip-Message-Id", trace.zulip_message_id);
+            }
             if let Some(token) = &token {
                 request = request.header("Authorization", token);
             }
@@ -130,9 +162,31 @@ pub fn api(
             request.call()
         }
     };
-    let mut answer = sent.map_err(|error| format!("Omnigent is unreachable at {url}: {error}"))?;
+    let body_read = sent
+        .as_mut()
+        .ok()
+        .map(|answer| answer.body_mut().read_to_string());
+    let body_ok = body_read.as_ref().is_some_and(Result::is_ok);
+    let text = body_read.and_then(Result::ok).unwrap_or_default();
+    if let Some(trace) = trace {
+        let timing_id = sent.as_ref().ok().and_then(|answer| {
+            answer
+                .headers()
+                .get("X-Omnigent-Timing-Id")
+                .and_then(|value| value.to_str().ok())
+        });
+        let _ = crate::log::event(
+            trace.state_dir,
+            "dispatch finished",
+            trace.task,
+            json!({"zulip_message_id": trace.zulip_message_id, "path": path,
+                "started_at": started_at, "elapsed_ms": began.elapsed().as_secs_f64() * 1000.0,
+                "request_id": timing_id, "http_status": sent.as_ref().ok().map(|answer| answer.status().as_u16()),
+                "transport_ok": sent.is_ok() && body_ok, "body_ok": body_ok}),
+        );
+    }
+    let answer = sent.map_err(|error| format!("Omnigent is unreachable at {url}: {error}"))?;
     let status = answer.status().as_u16();
-    let text = answer.body_mut().read_to_string().unwrap_or_default();
     if !(200..300).contains(&status) {
         let shown: String = text.chars().take(300).collect();
         return Err(format!(
@@ -156,12 +210,20 @@ fn post_event(
     )
 }
 
-fn post_message(settings: &Settings, address: &str, text: &str) -> Result<Value, String> {
-    post_event(
+fn post_message(
+    settings: &Settings,
+    address: &str,
+    text: &str,
+    trace: Option<&DeliveryTrace<'_>>,
+) -> Result<Value, String> {
+    api_traced(
         settings,
-        address,
-        "message",
-        json!({"role": "user", "content": [{"type": "input_text", "text": text}]}),
+        "POST",
+        &format!("/v1/sessions/{}/events", session(address)?),
+        Some(
+            &json!({"type": "message", "data": {"role": "user", "content": [{"type": "input_text", "text": text}]}}),
+        ),
+        trace,
     )
 }
 
@@ -230,7 +292,7 @@ pub fn retire(settings: &Settings, address: &str) -> Result<(), String> {
 }
 
 pub fn send(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
-    send_gated(settings, address, text, true)
+    send_gated(settings, address, text, true, None)
 }
 
 /// `send` without waiting for a start slot, for the human's own messages.
@@ -273,11 +335,22 @@ pub fn set_hold(address: &str, reason: Option<&str>) -> Result<(), String> {
         .map_err(|e| format!("cannot write holds: {e}"))
 }
 
-pub fn send_now(settings: &Settings, address: &str, text: &str) -> Result<(), String> {
-    send_gated(settings, address, text, false)
+pub fn send_now_traced(
+    settings: &Settings,
+    address: &str,
+    text: &str,
+    trace: Option<&DeliveryTrace<'_>>,
+) -> Result<(), String> {
+    send_gated(settings, address, text, false, trace)
 }
 
-fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Result<(), String> {
+fn send_gated(
+    settings: &Settings,
+    address: &str,
+    text: &str,
+    gated: bool,
+    trace: Option<&DeliveryTrace<'_>>,
+) -> Result<(), String> {
     // A message to a session that moved goes to where the agent lives now; the watcher updates the task file soon after.
     let moved = moved_to(settings, address);
     let address = moved.as_deref().unwrap_or(address);
@@ -310,7 +383,7 @@ fn send_gated(settings: &Settings, address: &str, text: &str, gated: bool) -> Re
     } else {
         text.to_owned()
     };
-    let answer = match post_message(settings, address, text) {
+    let answer = match post_message(settings, address, text, trace) {
         Ok(answer) => answer,
         Err(error) => {
             if error.starts_with("Omnigent answered ") {
@@ -843,6 +916,65 @@ pub fn launch_default(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn dispatch_correlates_http_and_events() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let server = TcpListener::bind("127.0.0.1:0")?;
+        let address = server.local_addr()?;
+        let root = std::env::temp_dir().join(format!(
+            "amh-dispatch-{}-{}",
+            std::process::id(),
+            address.port()
+        ));
+        std::fs::create_dir_all(&root)?;
+        let receiver = std::thread::spawn(move || -> std::io::Result<String> {
+            let (mut socket, _) = server.accept()?;
+            socket.set_read_timeout(Some(std::time::Duration::from_secs(5)))?;
+            let mut bytes = Vec::new();
+            let mut byte = [0];
+            while !bytes.ends_with(b"\r\n\r\n") {
+                socket.read_exact(&mut byte)?;
+                bytes.push(byte[0]);
+            }
+            let headers = String::from_utf8_lossy(&bytes).to_string();
+            let size = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_lowercase()
+                        .strip_prefix("content-length: ")?
+                        .parse::<usize>()
+                        .ok()
+                })
+                .unwrap_or_default();
+            let mut body = vec![0; size];
+            socket.read_exact(&mut body)?;
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 15\r\nX-Omnigent-Timing-Id: trace-test\r\nConnection: close\r\n\r\n{\"queued\":true}")?;
+            Ok(headers)
+        });
+        let settings =
+            super::Settings::from([("omnigent.url".to_owned(), format!("http://{address}"))]);
+        let trace = super::DeliveryTrace {
+            state_dir: &root,
+            task: "test.md",
+            zulip_message_id: "638616497",
+        };
+        let result =
+            super::post_message(&settings, "omnigent://test", "private body", Some(&trace))?;
+        assert_eq!(result["queued"], true);
+        let headers = receiver.join().map_err(|_| "HTTP receiver panicked")??;
+        assert!(
+            headers
+                .to_lowercase()
+                .contains("x-amh-zulip-message-id: 638616497\r\n")
+        );
+        let log = std::fs::read_to_string(root.join("amh-events.jsonl"))?;
+        assert!(log.contains("dispatch started") && log.contains("dispatch finished"));
+        assert!(log.contains("trace-test") && log.contains("638616497"));
+        assert!(!log.contains("private body"));
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
     use super::*;
 
     #[test]
