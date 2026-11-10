@@ -42,6 +42,8 @@ export function createModel({botId, humanId}) {
     },
     find(id) { for (const map of byTopic.values()) if (map.has(id)) return map.get(id); },
     remove(topic, id) { byTopic.get(topic)?.delete(id); },
+    /** Replaces the content of message `id` (a new object, so cached parsing is dropped); returns it, or undefined. */
+    edit(id, content) { for (const map of byTopic.values()) if (map.has(id)) { const m = {...map.get(id), content}; map.set(id, m); return m; } },
     messages: topic => [...(byTopic.get(topic)?.values() ?? [])].sort((a, b) => a.id - b.id),
     agentMessages(topic) { return this.messages(topic).filter(m => isAgent(m) && !m.local); },
     unreadAgentMessages(topic) { return this.agentMessages(topic).filter(m => !m.flags?.includes('read')); },

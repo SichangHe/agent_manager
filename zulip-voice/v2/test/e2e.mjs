@@ -1627,6 +1627,45 @@ scenarios.localCommand = async ({srv}) => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.messageEditedWhileRead = async ({srv}) => {
+  // The message being read is edited: the "updated" tone, then it is read again from its start with the new text.
+  await L.wipeTasks();
+  const long = tag => '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `${tag} paragraph ${i} keeps the message playing for a while.`).join('\n\n');
+  const id = await L.agentSays('alpha', long('First'));
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent .s'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'on the second chunk', () => /audio +start \d+:1/.test(window.__voice.log.text()), 30000);
+    await L.bot('PATCH', 'messages/' + id, {content: long('Second')});
+    await L.waitFor(p, 'edit seen', () => /message \d+ edited while being read/.test(window.__voice.log.text()), 20000);
+    await L.waitFor(p, 'new text shown', () => document.querySelector('#feed').innerText.includes('Second paragraph 0'), 10000);
+    await L.waitFor(p, 'restart from the start', () => (window.__voice.log.text().match(/audio +start \d+:0/g) || []).length >= 2, 20000);
+    assert.equal(await p.evaluate(() => window.__voice.player.snapshot().status), 'playing');
+  } finally { await c.close(); }
+};
+
+scenarios.messageDeletedAndReplaced = async ({srv}) => {
+  // amh replaces a message by delete + new post: the message being read is deleted, a replacement arrives; tone, then the replacement is read from its start.
+  await L.wipeTasks();
+  const long = tag => '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `${tag} paragraph ${i} keeps the message playing for a while.`).join('\n\n');
+  const id = await L.agentSays('alpha', long('Old'));
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent .s'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'on the second chunk', () => /audio +start \d+:1/.test(window.__voice.log.text()), 30000);
+    await L.bot('DELETE', 'messages/' + id);
+    await L.waitFor(p, 'delete seen', () => /message \d+ deleted while being read/.test(window.__voice.log.text()), 20000);
+    const id2 = await L.agentSays('alpha', long('New'));
+    await L.waitFor(p, 'replacement read', id2 => new RegExp(`replacement ${id2} read from its start`).test(window.__voice.log.text()), 20000, id2);
+    await L.waitFor(p, 'replacement playing', id2 => new RegExp(`audio +start ${id2}:0`).test(window.__voice.log.text()), 30000, id2);
+    assert.ok(!(await p.evaluate(() => document.querySelector('#feed').innerText)).includes('Old paragraph'), 'the deleted message is gone from the feed');
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

@@ -320,6 +320,10 @@ function onEvent(event) {
     const m = event.message;
     voice.onMessage(m);
     if (m.type === 'stream' && (m.stream_id === cfg.streamId || isOurChannel(m.stream_id))) onTaskMessage(ing(m));
+  } else if (event.type === 'delete_message') {
+    for (const id of event.message_ids ?? [event.message_id]) onMessageDeleted(id);
+  } else if (event.type === 'update_message') {
+    if (event.content !== undefined) onMessageEdited(event.message_id, event.content);
   } else if (event.type === 'update_message_flags' && event.flag === 'read' && event.op === 'add') {
     model.markRead(event.messages);
     renderUnread();
@@ -346,6 +350,7 @@ const userSpeaking = () => !!dict || !!vc || utterancePending || Date.now() < an
 const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); };
 
 function onNewAgentMessage(m) {
+  if (takeReplacement(m)) return;
   lat.begin('play:' + m.id, 'playback', performance.now() - Math.max(0, Date.now() - m.timestamp * 1000));   // starts at the server's timestamp
   lat.stage('play:' + m.id, 'to-client');
   const items = itemsOf(m);
@@ -358,6 +363,59 @@ function onNewAgentMessage(m) {
     else player.append(items);
   }
   if (pendingSwitch && !items.length && player.position().status === 'idle') runSwitch();
+}
+
+
+// ---- edited and deleted messages (amh replaces a message by deleting it and posting a new one) ----
+let replacementWait = null;   // `{topic, until, timer}` while the message being read was deleted and its replacement may still arrive
+const reading = id => nowMsgId === id && ['playing', 'loading', 'paused'].includes(player.position().status);
+function forgetReadState(id) {
+  const pos = store.get('voice2-pos', null); if (pos?.msgId === id) store.set('voice2-pos', null);
+  const last = store.get('voice2-last', null); if (last?.msgId === id) store.set('voice2-last', null);
+  if (pausedItem?.msgId === id) pausedItem = null;
+  readQueue.delete(id); store.set('voice2-readq', [...readQueue]);
+}
+function replaceNode(m) {
+  const node = els.get(m.id); if (!node) return;
+  const fresh = model.isAgent(m) ? agentEl(m, attUrl) : mineEl(m.content, 'sent', {}, attUrl);
+  fresh.dataset.id = m.id; node.replaceWith(fresh); els.set(m.id, fresh);
+}
+function onMessageEdited(id, content) {
+  if (!model.find(id)) return;
+  const wasReading = reading(id), m = model.edit(id, content);
+  log('app', `message ${id} edited${wasReading ? ' while being read' : ''}`);
+  replaceNode(m); highlight();
+  if (!model.isAgent(m)) return;
+  if (wasReading) { player.stop(); player.earcon(EARCON_NOTES.updated, EARCON_NOTE_S); setTimeout(() => playFrom(m, 0), 700); }   // the changed text is read from its start
+  else if (!m.flags?.includes('read') && player.position().status !== 'idle') { player.removeFuture(id); player.append(itemsOf(m)); }
+  renderUnread(); persist();
+}
+function onMessageDeleted(id) {
+  const m = model.find(id); if (!m) return;
+  const wasReading = reading(id), topic = m.subject;
+  model.remove(topic, id); els.get(id)?.remove(); els.delete(id); forgetReadState(id);
+  log('app', `message ${id} deleted${wasReading ? ' while being read' : ''}`);
+  player.removeFuture(id);
+  if (wasReading && model.isAgent(m)) {
+    player.stop(); player.earcon(EARCON_NOTES.updated, EARCON_NOTE_S);
+    const recent = x => model.isAgent(x) && x.id > id && !x.flags?.includes('read') && Math.abs(Date.now() - x.timestamp * 1000) <= REPLACEMENT_WINDOW_MS;
+    const found = model.agentMessages(topic).find(recent);
+    if (found) setTimeout(() => playFrom(found, 0), 700);
+    else {   // the replacement is usually posted a moment after the delete; if none comes, reading carries on with whatever is queued
+      const timer = setTimeout(() => { replacementWait = null; maybeAutoplay(); }, 3000);
+      replacementWait = {topic, until: Date.now() + REPLACEMENT_WINDOW_MS, timer};
+    }
+  }
+  renderUnread(); persist();
+}
+const REPLACEMENT_WINDOW_MS = 10000;
+/** A new agent message that replaces the one just deleted (same topic, within the window): read it from its start. */
+function takeReplacement(m) {
+  if (!replacementWait || replacementWait.topic !== m.subject || Date.now() > replacementWait.until) return false;
+  clearTimeout(replacementWait.timer); replacementWait = null;
+  log('app', `replacement ${m.id} read from its start`);
+  setTimeout(() => playFrom(m, 0), 700);
+  return true;
 }
 
 // ---- reading ----
@@ -393,6 +451,7 @@ function resumeAfterPause() {
 }
 
 function maybeAutoplay() {
+  if (replacementWait) return;
   if (!autoplay || !current || userSpeaking() || player.position().status !== 'idle') return;   // never start speech while the user speaks
   // Forward only: anything older than the newest read message counts as read and is never played again.
   const newestRead = model.agentMessages(current).filter(m => m.flags?.includes('read')).at(-1);
@@ -1436,7 +1495,7 @@ async function checkVoice() {
 
 function persist() { prebuildCommands(); clearTimeout(persist.t); persist.t = setTimeout(() => store.set('voice2-cache', model.snapshot(current)), 800); }
 
-const events = createEvents({zulip, log, eventTypes: ['message', 'update_message_flags'], onInit, onEvent, onState: renderConn});
+const events = createEvents({zulip, log, eventTypes: ['message', 'update_message_flags', 'update_message', 'delete_message'], onInit, onEvent, onState: renderConn});
 
 // Blank-feed watchdog and uncaught errors ship the debug log to the server.
 let lastErrLogMs = 0;

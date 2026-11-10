@@ -55,8 +55,8 @@ export function createVoice({zulip, cfg, log}) {
   }
 
   /** The bundle (one upload holding several chunks) containing chunk `idx` of message `msgId`, if the service rendered it. */
-  function bundleFor(msgId, idx) {
-    return bundles.get(msgId)?.find(p => chunkIndex(p, msgId, idx) >= 0);
+  function bundleFor(msgId, idx, text) {
+    return bundles.get(msgId)?.findLast(p => { const k = chunkIndex(p, msgId, idx); return k >= 0 && (text === undefined || p.texts[k] === text); });   // the newest bundle whose text still matches (an edit makes the old audio stale)
   }
   /** Position of chunk `idx` of message `msgId` inside bundle `p` (its audio and `texts` order), or -1. */
   function chunkIndex(p, msgId, idx) {

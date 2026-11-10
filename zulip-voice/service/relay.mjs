@@ -422,18 +422,19 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       if (message.type !== 'stream' || ![taskStreamId, ...extraStreamIds].includes(message.stream_id) || message.sender_id !== botId) return;
       const pieces = speechPieces(message.content);
       if (!pieces.length) return;
+      const ver = message.last_edit_timestamp ? 'e' + message.last_edit_timestamp : '';   // an edited message gets fresh ids, so clients accept the new audio
       const topic = message.stream_id + ':' + message.subject;
       let burst = bursts.get(topic);
       if (!burst && pieces.length <= SHORT_MESSAGE_CHUNKS) {   // short: one bundle, no separate head (saves 3 Zulip calls; rendering it whole is already quick)
-        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}_0`, op: 'tts', texts: pieces, proactive: true, messageId: message.id, firstIdx: 0})});
+        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}${ver}_0`, op: 'tts', texts: pieces, proactive: true, messageId: message.id, firstIdx: 0})});
         return;
       }
       if (!burst) {
-        burst = {spans: [], texts: [], firstId: message.id};
+        burst = {spans: [], texts: [], firstId: message.id, ver};
         bursts.set(topic, burst);
         burst.spans.push({messageId: message.id, firstIdx: 1, n: pieces.length - 1}); burst.texts.push(...pieces.slice(1));
         burst.timer = setTimeout(() => { bursts.delete(topic); this.renderTails(burst).catch(error => console.log('tail render failed: ' + error.message)); }, COALESCE_MS);
-        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}_0`, op: 'tts', texts: pieces.slice(0, 1), proactive: true, messageId: message.id, firstIdx: 0})});
+        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}${ver}_0`, op: 'tts', texts: pieces.slice(0, 1), proactive: true, messageId: message.id, firstIdx: 0})});
       } else { burst.spans.push({messageId: message.id, firstIdx: 0, n: pieces.length}); burst.texts.push(...pieces); }
     },
     /** Renders a burst's tail as bundles of at most MAX_TAIL_BATCH chunks (normally one). */
@@ -450,7 +451,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
         const flat = burst.flatTexts ??= [...burst.texts];
         const part = flat.splice(0, count);
         const single = group.length === 1 && group[0].messageId === burst.firstId;   // the first message's own tail keeps its old id
-        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${burst.firstId}_${single ? group[0].firstIdx : 't' + n}`.slice(0, 100), op: 'tts', texts: part, proactive: true, messageId: group[0].messageId, firstIdx: group[0].firstIdx, ...(single ? {} : {spans: group}), messageIds: group.map(g => g.messageId)})});
+        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${burst.firstId}${burst.ver ?? ''}_${single ? group[0].firstIdx : 't' + n}`.slice(0, 100), op: 'tts', texts: part, proactive: true, messageId: group[0].messageId, firstIdx: group[0].firstIdx, ...(single ? {} : {spans: group}), messageIds: group.map(g => g.messageId)})});
         n++;
       }
     },
@@ -484,6 +485,13 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     /** Records which agent messages the human has read, so their clips are evicted first. */
     /** p50/p90 of transcription time since the last call (one log line a minute); warns above 1.5 s: the GPU is contended. */
     sttSummary() { if (!sttSamples.length) return; const a = sttSamples.splice(0).sort((x, y) => x - y), q = k => a[Math.min(a.length - 1, Math.floor(a.length * k))]; console.log(`stt last minute: n=${a.length} p50=${q(0.5)}ms p90=${q(0.9)}ms${q(0.5) > 1500 ? ' WARNING: slow, GPU contended' : ''}`); },
+    /** A message was deleted or edited: its pre-rendered audio is stale. Records covering only that message are dropped (upload and result deleted); a shared bundle just stops matching on the client. Returns the number dropped. */
+    async messageGone(id) {
+      const stale = Object.values(records).filter(r => r.proactive && r.status === 'sent' && (r.messageIds ?? [r.messageId]).length === 1 && r.messageId === id);
+      if (stale.length) await cleanup(stale);
+      for (const [key, r] of Object.entries(records)) if (stale.includes(r) && r.status === 'done') delete records[key];
+      return stale.length;
+    },
     markRead(ids) { for (const r of Object.values(records)) if (r.messageId && (r.messageIds ?? [r.messageId]).every(m => ids.includes(m))) r.read = true; },
     syncUnread(unreadIds) { for (const r of Object.values(records)) if (r.messageId) r.read = !(r.messageIds ?? [r.messageId]).some(m => unreadIds.has(m)); },
     /** Reconciles interrupted posts, then deletes acked or expired items. */
@@ -574,7 +582,7 @@ export async function run(env = process.env) {
   for (;;) {
     try {
       if (!queue) {
-        queue = await api.call('POST', 'register', {event_types: ['message', 'update_message_flags'], apply_markdown: false});
+        queue = await api.call('POST', 'register', {event_types: ['message', 'update_message_flags', 'update_message', 'delete_message'], apply_markdown: false});
         const backlog = await api.call('GET', 'messages', {narrow: [{operator: 'stream', operand: streamId}], anchor: 'newest', num_before: 100, num_after: 0, apply_markdown: false});
         for (const message of backlog.messages || []) if (Date.now() - message.timestamp * 1000 < 3600000) await guard('backlog', relay.handle(message));
         console.log(`registered queue ${queue.queue_id}`);
@@ -583,6 +591,12 @@ export async function run(env = process.env) {
       for (const event of data.events) {
         queue.last_event_id = event.id;
         if (event.type === 'update_message_flags' && event.flag === 'read' && event.op === 'add') relay.markRead(event.messages ?? []);
+        if (event.type === 'delete_message') { for (const id of event.message_ids ?? [event.message_id]) guard('gone', relay.messageGone(id)); continue; }
+        if (event.type === 'update_message') {   // an edit: stale audio goes, the new text is rendered again
+          if (event.content === undefined) continue;
+          guard('edit', (async () => { await relay.messageGone(event.message_id); const r = await humanApi?.call('GET', 'messages/' + event.message_id, {apply_markdown: false}); if (r?.message) await relay.prepare(r.message, taskStreamId); })());
+          continue;
+        }
         if (event.type !== 'message') continue;
         stats.events++;
         await guard('handle', relay.handle(event.message));
