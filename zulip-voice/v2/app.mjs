@@ -139,7 +139,7 @@ const player = createPlayer({
     if (pendingSwitch?.msgId === item.msgId) runSwitch();
   },
   onIdle() { store.set('voice2-pos', null); nowMsgId = null; highlight(); $('jump').hidden = true; if (pendingSwitch && (pendingSwitch.msgId === null || model.find(pendingSwitch.msgId)?.flags?.includes('read'))) runSwitch(); else if (pendingSwitch) pendingSwitch = null; /* an unplayed message's directive does not fire */ maybeAutoplay(); },
-  onStatus: renderTransport,
+  onStatus: renderTransport, onInterrupt: reason => interrupted(reason),
 });
 player.setRate(rate);
 
@@ -517,12 +517,36 @@ function jump(direction, whole = false, noRestart = false) {
   burst.timer = setTimeout(() => { const b = burst; burst = null; if (b.pending) play(); }, SKIP_DEBOUNCE_MS);
 }
 
+
+// ---- waiting and interruptions: the user always knows whether audio is coming ----
+let lastInterruptMs = 0, waitingSinceMs = 0, lastPlayTapMs = 0, lastErrorTapMs = 0;
+const WAITING_SOUND_AFTER_MS = 5000;
+/** Playback stopped unexpectedly (load error, stall, play rejected): one distinct falling tone, at most every 20 s. */
+function interrupted(reason) {
+  log('audio', `interrupted: ${reason}`);
+  if (userSpeaking() || Date.now() - lastInterruptMs < 20000) return;
+  lastInterruptMs = Date.now();
+  player.earcon(EARCON_NOTES.interrupted, EARCON_NOTE_S);
+}
+/** Every second: is the user waiting for audio (loading or retrying, queue not empty)? After 5 s, a soft ambient pad fades in; it fades out when audio plays or the wait ends. */
+setInterval(() => {
+  const {status} = player.position(), waiting = (status === 'loading' || status === 'error' || status === 'blocked') && !userSpeaking() && !vc && !dict;
+  if (!waiting) { waitingSinceMs = 0; if (player.ambientOn()) { log('audio', 'waiting sound off'); player.ambient(false); } return; }
+  waitingSinceMs ||= Date.now();
+  if (Date.now() - waitingSinceMs >= WAITING_SOUND_AFTER_MS && !player.ambientOn()) { log('audio', `waiting sound on (${status} for ${Math.round((Date.now() - waitingSinceMs) / 1000)} s)`); player.ambient(true); }
+}, 1000);
+
 function togglePlay() {
   const {status} = player.position();
   player.unlock();
-  if (status === 'playing' || status === 'loading') player.pause();
+  if (status === 'loading') {   // idempotent: a quick second tap never restarts or queues; a later tap cancels
+    if (Date.now() - lastPlayTapMs < 1500) { toast(navigator.onLine ? 'Loading audio…' : 'Waiting for the connection…'); lastPlayTapMs = Date.now(); return; }
+    player.pause(); return;
+  }
+  lastPlayTapMs = Date.now();
+  if (status === 'playing') player.pause();
   else if (status === 'paused') player.resume();
-  else if (status === 'error' || status === 'blocked') player.retry();
+  else if (status === 'error' || status === 'blocked') { if (Date.now() - lastErrorTapMs < 1500) { toast(navigator.onLine ? 'Still trying to load audio…' : 'Waiting for the connection…'); return; } lastErrorTapMs = Date.now(); player.retry(); }
   else {
     const agents = model.agentMessages(current);
     const start = model.unreadAgentMessages(current).find(m => itemsOf(m).length) ?? agents.findLast(m => itemsOf(m).length);
@@ -812,7 +836,7 @@ const kwsHitMs = {};
 let sttInFlight = 0, lastAttentionHitMs = 0;
 /** The on-device keyword spotter heard a keyword: "attention" opens a reply session at once (pausing playback, no upload); "tomato" inside a reply ends it. */
 function onKwsHit(word) {
-  if (!voiceControl || !store.get('voice2-kws', false) || dict || Date.now() - (kwsHitMs[word] ?? 0) < 1500) return;   // the same word twice in a row is one hit; a different word may follow at once ("attention katana")
+  if (!voiceControl || !kwsEnabled() || dict || Date.now() - (kwsHitMs[word] ?? 0) < 1500) return;   // the same word twice in a row is one hit; a different word may follow at once ("attention katana")
   kwsHitMs[word] = Date.now();
   log('vc', `on-device keyword: ${word}`);
   if (word === 'ATTENTION' && startWord() === 'attention' && !vc && !(pendingChoice && Date.now() < pendingChoice.until)) {
@@ -820,6 +844,8 @@ function onKwsHit(word) {
     lat.stage('sw', 'kws-local');
     lastAttentionHitMs = Date.now();
     openSession('', {deferChime: true});
+  } else if (word === 'BAMBOO' && cancelWord() === 'bamboo') {
+    if (vc) cancelSession(); else if (pendingChoice) cancelChoice();
   } else if (word === 'KATANA' && vc && vc.mode !== 'command' && commandWord() === 'katana') {
     enterCommandMode('');
   } else if (word === 'TOMATO' && vc?.mode === 'command') {
@@ -828,7 +854,8 @@ function onKwsHit(word) {
     sendVoiceReplyNow('end word on device');
   }
 }
-const recorder = createRecorder({log, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); if (vc?.mode === 'command') for (const tag of kwsSpotter.feedCommands(samples)) onCommandHit(tag); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
+const kwsEnabled = () => store.get('voice2-kws', null) ?? true;   // on-device recognition is the default; the toggle in Settings turns it off
+const recorder = createRecorder({log, onSpeechOnset: () => { if (!kwsSpotter.ready()) return; for (const w of kwsSpotter.restart(0.6)) onKwsHit(w); if (vc?.mode === 'command' || choiceOpen()) for (const tag of kwsSpotter.restartCommands(0.6)) onCommandHit(tag); }, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); if (vc?.mode === 'command' || choiceOpen()) for (const tag of kwsSpotter.feedCommands(samples)) onCommandHit(tag); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
 let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
 
 const RESUME_DEFAULT = 'tomato';   // the human's pick from the end-word study: 99% on-device detection, 0 false accepts in 4.9 h of speech
@@ -941,15 +968,20 @@ async function handleCommandClip(blob, meta) {
     log('vc', 'rejected as noise: too short or low confidence'); recorder.setReplyMode(false); resumeBarge(); vcIdle(); return;
   }
   if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
+  if (lastLocalNav && Date.now() - lastLocalNav.ms < 10000) {   // "skip forward three": the device already skipped once, add the rest
+    const nav = navCommand(normalize(afterStartWord(heard) ?? heard).replace(/^katana\s+/, ''));
+    if (nav && nav.dir === lastLocalNav.dir && nav.count > 1) { log('vc', `count from the transcript: ${nav.count - 1} more`); navigate({...nav, count: nav.count - 1}); lastLocalNav = null; vcIdle(); return; }
+    lastLocalNav = null;
+  }
   if (pendingChoice && Date.now() < pendingChoice.until) {   // while a switch question is open, answers are matched first, even inside or after "pause"
     const w = (afterStartWord(heard) !== null ? normalize(afterStartWord(heard)) : normalize(heard));
     const NUMBERS = ['one first 1', 'two second 2', 'three third 3'];
     let pick = null;
-    if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
-    else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w)); if (i >= 0) pick = pendingChoice.names[i]; }
+    if (pendingChoice.confirm) { if (/^(positive|yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
+    else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w.replace(/^number /, ''))); if (i >= 0) pick = pendingChoice.names[i]; }
     const closeSession = () => { if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; } recorder.setReplyMode(false); };
     if (pick) { pendingChoice = null; lat.stage('switch', 'answer-heard'); closeSession(); switchTopic(pick); vcIdle(); return; }   // the switch tone and "Now on X" follow; no voice state lingers
-    if (/^(no|nope|cancel|cancel that|none|never mind|scratch that|stop)$/.test(w)) { pendingChoice = null; closeSession(); recorder.beep('cancel'); vcIdle(); maybeAutoplay(); return; }
+    if (/^(negative|no|nope|cancel|cancel that|none|never mind|scratch that|stop)$/.test(w) || CANCEL_RE.test(w)) { pendingChoice = null; closeSession(); recorder.beep('cancel'); vcIdle(); maybeAutoplay(); return; }
     if (!vc) { log('vc', `ignored during the switch question: "${heard}"`); vcIdle(); return; }   // "pause" must not open a reply while we wait for the answer
   }
   if (!vc) {
@@ -988,25 +1020,42 @@ function commandPhrases() {
   const names = model.topics().slice(0, 40).map(t => spokenName(t.name)).filter(Boolean);
   const unique = [...new Set(names)].filter(n => !names.some(o => o !== n && o.startsWith(n + ' ')));   // "alpha" is left out while "alpha beta" exists: it would fire first
   return [{tag: 'CANCEL', text: 'cancel', threshold: LOCAL_CMD_THRESHOLD}, {tag: 'STOP', text: 'stop', threshold: LOCAL_CMD_THRESHOLD},
+    {tag: 'POSITIVE', text: 'positive', threshold: LOCAL_CMD_THRESHOLD}, {tag: 'NEGATIVE', text: 'negative', threshold: LOCAL_CMD_THRESHOLD},
+    {tag: 'SKIP_FORWARD', text: 'skip forward', threshold: LOCAL_CMD_THRESHOLD}, {tag: 'SKIP_BACKWARD', text: 'skip backward', threshold: LOCAL_CMD_THRESHOLD},
     ...unique.map(n => ({tag: 'SWITCH_TO_' + n.toUpperCase().replace(/[^A-Z0-9]+/g, '_'), text: 'switch to ' + n, threshold: LOCAL_CMD_THRESHOLD, say: 'switch to ' + n}))];
 }
 let lastLocalCommandMs = 0, lastLocalTag = '', lastLocalTagMs = 0, localPhrases = new Map();
+let lastLocalNav = null;   // {dir, ms}: a "skip forward/backward" heard on the device; the transcript may add a count
+const choiceOpen = () => !!pendingChoice && Date.now() < pendingChoice.until;
 function onCommandHit(tag) {
-  if (!vc || vc.mode !== 'command' || (tag === lastLocalTag && Date.now() - lastLocalTagMs < 1000)) return;
-  lastLocalTag = tag; lastLocalTagMs = lastLocalCommandMs = Date.now();
-  const text = localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' ');
-  log('vc', `on-device command: ${text} (${Math.round(Date.now() - (lastCommandWindowMs || Date.now()))}ms into the window)`);
-  runCommands(text);
+  const inCommand = vc?.mode === 'command';
+  if ((!inCommand && !choiceOpen()) || (tag === lastLocalTag && Date.now() - lastLocalTagMs < 1000)) return;
+  lastLocalTag = tag; lastLocalTagMs = Date.now();
+  log('vc', `on-device command: ${localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' ')} (${Math.round(Date.now() - (lastCommandWindowMs || Date.now()))}ms into the window)`);
+  if (choiceOpen() && (tag === 'POSITIVE' || tag === 'NEGATIVE')) {   // the switch question: answered at once
+    lastLocalCommandMs = Date.now(); lat.stage('switch', 'answer-heard');
+    const names = pendingChoice.names, confirm = pendingChoice.confirm; pendingChoice = null;
+    if (tag === 'POSITIVE' && confirm) { if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; recorder.setReplyMode(false); } switchTopic(names[0]); vcIdle(); }
+    else { recorder.beep('cancel'); if (vc) { clearTimeout(vc.timer); draftEl.value = vc.base; vc = null; recorder.setReplyMode(false); } vcIdle(); maybeAutoplay(); }
+    return;
+  }
+  if (!inCommand) return;
+  if (tag === 'SKIP_FORWARD' || tag === 'SKIP_BACKWARD') {   // runs once now; a spoken count ("skip forward three") is added when the transcript arrives
+    lastLocalNav = {dir: tag === 'SKIP_FORWARD' ? 1 : -1, ms: Date.now()};
+    runCommands(tag === 'SKIP_FORWARD' ? 'skip forward' : 'skip backward'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
+  }
+  lastLocalCommandMs = Date.now();
+  runCommands(localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' '));
 }
 let lastCommandWindowMs = 0, prebuildTimer = 0;
 /** Rebuilds the command spotter ahead of time (about 0.7 s of work) whenever the agent list changes, so opening command mode never waits for it. */
 function prebuildCommands() {
   clearTimeout(prebuildTimer);
-  prebuildTimer = setTimeout(() => { if (kwsSpotter.ready() && store.get('voice2-kws', false) && !vc) { const phrases = commandPhrases(); localPhrases = new Map(phrases.map(p => [p.tag, p.say ?? p.text])); kwsSpotter.setCommands(phrases); } }, 2500);
+  prebuildTimer = setTimeout(() => { if (kwsSpotter.ready() && kwsEnabled() && !vc) { const phrases = commandPhrases(); localPhrases = new Map(phrases.map(p => [p.tag, p.say ?? p.text])); kwsSpotter.setCommands(phrases); } }, 2500);
 }
 function armLocalCommands() {
   lastCommandWindowMs = Date.now();
-  if (!kwsSpotter.ready() || !store.get('voice2-kws', false)) return;
+  if (!kwsSpotter.ready() || !kwsEnabled()) return;
   const phrases = commandPhrases(); localPhrases = new Map(phrases.map(p => [p.tag, p.say ?? p.text]));
   kwsSpotter.setCommands(phrases); kwsSpotter.resetCommands();
 }
@@ -1073,6 +1122,8 @@ function navCommand(words) {
   const whole = tokens.includes('message') || tokens.includes('messages');
   const rest = tokens.filter(t => t !== 'message' && t !== 'messages');
   const NUMBERS = {to: 2, too: 2, won: 1, for: 4, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10};
+  { const dirWord = {forward: 1, forwards: 1, ahead: 1, backward: -1, backwards: -1}[rest[1]];   // "skip forward [two]" / "skip backward [three]": no count means one
+    if (rest[0] === 'skip' && dirWord && rest.length <= 3) { const c = rest.length === 3 ? NUMBERS[rest[2]] : 1; if (c) return {dir: dirWord, whole, count: c}; } }
   const n = NUMBERS[rest.at(-1)];
   if (rest.length === 2 && n && !NUMBERS[rest[0]]) {   // "next three", "skip five", "back two"
     const d = ['back', 'previous', 'last'].includes(rest[0]) ? -1 : ['next', 'skip', 'forward'].includes(rest[0]) ? 1 : null;
@@ -1098,7 +1149,10 @@ function navigate({dir, whole, count}) {
 
 const SWITCH_RE = /^(?:switch agents? to|switch agents?|switch to|go to agents?)\s+(.+)$/;   // never bare "open" or "go to": those are ordinary words
 const SWITCH_BACK_RE = /^(switch back|go back|previous agent|(go|switch) back to (the )?previous agent|switch to (the )?previous agent)$/;
-const CANCEL_RE = /^(?:cancel|cancel that|never mind|scratch that|forget it)$/;
+const CANCEL_WORD_DEFAULT = 'bamboo';   // the rare word the human picked (study: 90% hit, 0 false accepts in 4.9 h); "cancel" and friends keep working as server-path aliases
+const cancelWord = () => normalize(store.get('voice2-cancel-word', CANCEL_WORD_DEFAULT)) || CANCEL_WORD_DEFAULT;
+const hasCancelWord = text => { const w = cancelWord(); return normalize(text).split(' ').some(t => t === w || soundsLikeWord(w, [t])); };   // the rare word counts anywhere in an utterance
+const CANCEL_RE = {test: t => /^(?:cancel|cancel that|never mind|scratch that|forget it)$/.test(t) || (t.split(' ').every(x => x === cancelWord() || soundsLikeWord(cancelWord(), [x])))};
 const SWITCH_MIN_SCORE = 0.8;
 /** "switch to <name>": one clear match switches (with a chime); otherwise show the top 3 and accept first/second/third. */
 function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.say(text).then(ms => recorder.muteFor(ms)); }
@@ -1116,6 +1170,7 @@ function voiceSwitch(spoken) {
   const prompt = clear ? `Switch to ${readable(ranked[0].t.name)}?` : pendingChoice.names.map((n, i) => `${i + 1}, ${readable(n)}.`).join(' ');
   toast(prompt);
   sayAndMute(prompt);
+  armLocalCommands();
   lat.stage('switch', 'question-shown');
   return true;
 }
@@ -1152,6 +1207,7 @@ function cancelSession() {
 }
 const withoutStrayEndWords = t => removeControlWords(t.split(/\s+/).filter(Boolean)).join(' ');   // "Tomato." said mid-reply is a command, never text
 function addToSession(heard) {
+  if (hasCancelWord(heard)) { cancelSession(); return; }   // the rare cancel word fires wherever it is said
   { const words = (afterStartWord(heard) ?? heard).split(/\s+/).filter(Boolean), at = commandWordAt(words);   // the command word switches to COMMAND mode: what follows it is commands, what precedes it is reply text
     if (at >= 0 && vc) { const before = words.slice(0, at).join(' '); if (before) { vc.text = [vc.text, withoutStrayEndWords(before)].filter(Boolean).join(' '); draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize(); } enterCommandMode(words.slice(at + 1).join(' ')); return; } }
   if (endsWithCancel(heard)) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
@@ -1164,7 +1220,7 @@ function addToSession(heard) {
 }
 /** (Re)starts the end-of-reply timer: "over" + short silence, else the long silence; an empty session gets the empty timeout. */
 function armSessionTimer() {
-  if (!vc) return;
+  if (!vc || vc.ending) return;
   clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
   const silenceMs = stripResumePhrase(vc.text) !== null ? RESUME_SILENCE_MS : Number(store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S)) * 1000;
   if (vc.text.trim() && silenceMs > 0) vc.timer = setTimeout(finishVcReply, silenceMs);
@@ -1193,6 +1249,7 @@ async function sendVoiceReplyNow(why) {
   while (performance.now() - waitStart < END_WAIT_MS && (reply.parts ?? []).some(p => p.text === null)) await new Promise(r => setTimeout(r, 40));
   await new Promise(r => setTimeout(r, 0));   // lets the session take the text of the clip that just finished
   if (vc !== reply) return;
+  clearTimeout(reply.timer); clearTimeout(reply.emptyTimer);   // transcripts that finished during the wait re-armed them
   if (performance.now() - waitStart > 50) log('vc', `waited ${Math.round(performance.now() - waitStart)}ms for clips already in transcription`);
   if (why.includes('on device')) { const w = reply.text.trim().split(/\s+/); if (w.length && looksLikeClippedEndWord(w.at(-1))) { log('vc', `dropped the clipped end word "${w.at(-1)}"`); reply.text = w.slice(0, -1).join(' '); } }
   const items = [];
@@ -1214,6 +1271,7 @@ async function sendVoiceReplyNow(why) {
 }
 
 function finishVcReply() {
+  if (!vc || vc.ending) return;   // a timer re-armed while a send was waiting for clips must not fire on a closed session
   if ((vc?.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips still untranscribed'); return; }
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
   vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
@@ -1232,14 +1290,14 @@ function finishVcReply() {
 async function loadKws(retry = true) {
   const r = await kwsSpotter.load();
   if (r.ok) prebuildCommands();
-  if (!r.ok && retry && voiceControl && store.get('voice2-kws', false)) { setTimeout(() => { if (voiceControl && store.get('voice2-kws', false) && !kwsSpotter.ready()) loadKws(false); }, 8000); }
-  if (!r.ok && voiceControl) { toast('On-device start word failed to load; using the server (slower)'); setTimeout(() => $('set-kws').checked = store.get('voice2-kws', false), 0); }
+  if (!r.ok && retry && voiceControl && kwsEnabled()) { setTimeout(() => { if (voiceControl && kwsEnabled() && !kwsSpotter.ready()) loadKws(false); }, 8000); }
+  if (!r.ok && voiceControl) { toast('On-device start word failed to load; using the server (slower)'); setTimeout(() => $('set-kws').checked = kwsEnabled(), 0); }
 }
 async function setVoiceControl(on) {
   voiceControl = on; voiceListening = on; store.set('voice2-vc', on);
   $('set-voice').checked = on; if (on) vcIdle(); else setVcState('off', 'off');
   if (!on) { recorder.listen(false); kwsSpotter.unload(); return; }
-  if (store.get('voice2-kws', false)) loadKws(); else log('kws', 'on-device start word is OFF in Settings: start words take the server path (slower)');   // opt-in beta, lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
+  if (kwsEnabled()) loadKws(); else log('kws', 'on-device start word is OFF in Settings: start words take the server path (slower)');   // opt-in beta, lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
   const r = await recorder.listen(true);
   if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
   if (!r.ok) { toast(r.error); player.say('Microphone stopped. Tap the microphone button to restart.'); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
@@ -1254,7 +1312,7 @@ $('set-cmd').onchange = e => store.set('voice2-cmd-word', e.target.value.trim().
 $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.trim().toLowerCase() || START_DEFAULT);
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
-$('set-kws').checked = store.get('voice2-kws', false);
+$('set-kws').checked = kwsEnabled();
 $('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) loadKws(); else if (!e.target.checked) kwsSpotter.unload(); };
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
 $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "tomato"' : 'Voice control off'); };
@@ -1456,7 +1514,7 @@ function debugStatus() {
     `ua: ${navigator.userAgent}`,
     `page: ${document.visibilityState}, navigator.onLine=${navigator.onLine}`,
     `events: ${info.state} queue=${info.queueId} lastOk=${info.lastOkAgoMs ?? '-'}ms fails=${info.failures} poll=${info.pollAgeMs ?? '-'}ms`,
-    `on-device start word: setting ${store.get('voice2-kws', false) ? 'on' : 'OFF'}, ${kwsSpotter.state().status}${kwsSpotter.state().detail ? ' (' + kwsSpotter.state().detail + ')' : ''}`,
+    `on-device start word: setting ${kwsEnabled() ? 'on' : 'OFF'}, ${kwsSpotter.state().status}${kwsSpotter.state().detail ? ' (' + kwsSpotter.state().detail + ')' : ''}`,
     (st => `stt: n=${st.n} p50=${st.p50}ms p90=${st.p90}ms server-work p50=${st.workP50}ms${st.n >= 3 && st.p50 > 1500 ? '  WARNING: speech-to-text is slow (>1.5 s), the server GPU is probably busy' : ''}`)(voice.sttStats()),
     `voice: ${voiceState.text}; prepared=${voice.preparedCount()} pending=${voice.pendingCount()}`,
     `player: ${JSON.stringify(player.snapshot())}`,

@@ -18,13 +18,15 @@ const WARM_AHEAD = 3;
 const HEARD_FRACTION = 0.8;
 const RESUME_BACKUP_MS = 2000;
 
-export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStatus}) {
+export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStatus, onInterrupt}) {
   const variantId = part => part.id;
   const slots = Array.from({length: N_SLOTS}, () => ({used: 0, el: Object.assign(new Audio(), {preload: 'auto', playsInline: true}), index: -1, ready: false, bundleId: null, chunk: null}));
   for (const slot of slots) { slot.el.setAttribute('playsinline', ''); slot.el.hidden = true; document.body.append(slot.el); }
   let items = [], index = -1, active = null, status = 'idle', gen = 0, unlocked = false, error = '';
   const sayEl = Object.assign(new Audio(), {preload: 'auto', playsInline: true});
   const earEl = Object.assign(new Audio(), {preload: 'auto', playsInline: true});
+  const ambientEl = Object.assign(new Audio(), {loop: true, playsInline: true, volume: 0});   // the waiting sound (generated locally on first use)
+  let ambientUrl = '', ambientOn = false, ambientFade = 0;
   let rate = 1, lastTimeMs = 0, lastProgressMs = 0;
   const clips = new Map();
   try { navigator.audioSession.type = 'playback'; } catch { /* unsupported */ }
@@ -143,6 +145,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     if (r.stale) return;
     if (r.error) {
       error = r.error;
+      onInterrupt?.('load-error');
       setStatus('error');
       await new Promise(res => setTimeout(res, Math.min(1000 * 2 ** attempt, RETRY_CAP_MS)));
       if (myGen === gen) playIndex(i, attempt + 1);
@@ -170,7 +173,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     }, err => {
       if (myGen !== gen) return;
       log('audio', `play() rejected: ${err.name}`);
-      if (err.name === 'NotAllowedError') setStatus('blocked'); else { error = err.name; setStatus('error'); }
+      if (err.name === 'NotAllowedError') setStatus('blocked'); else { error = err.name; onInterrupt?.('play-rejected'); setStatus('error'); }
     });
   }
 
@@ -209,7 +212,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     if (status !== 'playing' || !active) return;
     const t = active.el.currentTime;
     if (t !== lastTimeMs) { lastTimeMs = t; lastProgressMs = performance.now(); }
-    else if (performance.now() - lastProgressMs > STALL_MS) { log('audio', `stalled ${STALL_MS}ms at item ${index}; reloading`); pausedMs = t * 1000;   // reload continues near where it stopped, not from the chunk start
+    else if (performance.now() - lastProgressMs > STALL_MS) { log('audio', `stalled ${STALL_MS}ms at item ${index}; reloading`); onInterrupt?.('stall'); pausedMs = t * 1000;   // reload continues near where it stopped, not from the chunk start
  clips.delete(index); active.index = -1; active.ready = false; active.bundleId = null; playIndex(index); }
   }, 1000);
 
@@ -225,6 +228,27 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       if (status === 'blocked') start(active, gen);
     },
     isUnlocked: () => unlocked,
+    /** A soft looping pad (two low sines with a slow swell), made locally; `ambient(true)` fades it in over 2 s, `ambient(false)` fades it out. */
+    ambient(on) {
+      if (on === ambientOn) return;
+      ambientOn = on; clearInterval(ambientFade);
+      if (on) {
+        if (!unlocked) { ambientOn = false; return; }
+        if (!ambientUrl) {
+          const hz = 8000, secs = 12, n = hz * secs, pcm = new Int16Array(n);
+          for (let i = 0; i < n; i++) { const t = i / hz, swell = 0.7 + 0.3 * Math.sin(2 * Math.PI * t / secs * 1); pcm[i] = Math.round((Math.sin(2 * Math.PI * 196 * t) * 0.6 + Math.sin(2 * Math.PI * 294 * t) * 0.4) * swell * 0.12 * 32767); }   // whole periods per loop: no click at the seam
+          const head = new DataView(new ArrayBuffer(44)), w = (o, t) => [...t].forEach((c, i) => head.setUint8(o + i, c.charCodeAt(0)));
+          w(0, 'RIFF'); head.setUint32(4, 36 + pcm.byteLength, true); w(8, 'WAVEfmt '); head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true); head.setUint32(24, hz, true); head.setUint32(28, hz * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true); w(36, 'data'); head.setUint32(40, pcm.byteLength, true);
+          ambientUrl = URL.createObjectURL(new Blob([head, pcm], {type: 'audio/wav'}));
+        }
+        if (!ambientEl.src) ambientEl.src = ambientUrl;
+        ambientEl.volume = 0; ambientEl.play().catch(() => {});
+        ambientFade = setInterval(() => { ambientEl.volume = Math.min(1, ambientEl.volume + 0.05); if (ambientEl.volume >= 1) clearInterval(ambientFade); }, 100);   // iOS ignores volume: the pad is already quiet
+      } else {
+        ambientFade = setInterval(() => { ambientEl.volume = Math.max(0, ambientEl.volume - 0.25); if (ambientEl.volume <= 0) { clearInterval(ambientFade); ambientEl.pause(); } }, 60);
+      }
+    },
+    ambientOn: () => ambientOn,
     /** Plays a short synthesized earcon on the speech element (no AudioContext): same output path and level as speech, about -13 LUFS like the clips. */
     earcon(notes, noteS) {
       const hz = 24000, gain = 0.45, n = Math.round(noteS * hz), pcm = new Int16Array(n * notes.length);

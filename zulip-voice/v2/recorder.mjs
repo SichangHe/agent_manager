@@ -61,9 +61,9 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [660, 440], command: [523, 784, 1047], tick: [1568], updated: [988, 740, 988]};
+export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [660, 440], command: [523, 784, 1047], tick: [1568], updated: [988, 740, 988], interrupted: [523, 415, 330, 262]};
 
-export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio}) {
+export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio, onSpeechOnset}) {
   /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
   const setSession = type => { try { if (navigator.audioSession.type !== type) { navigator.audioSession.type = type; log('route', `audioSession.type -> ${type}`); } } catch { /* unsupported */ } };
   let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
@@ -102,7 +102,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
       sustainMs = speaking ? sustainMs + ms : 0;
       preroll.push(frame); while (preroll.length * ms > LISTEN_PREROLL_MS) preroll.shift();   // ring buffer: speech before the decision is kept
       if (sustainMs < (replyMode ? REPLY_BARGE_MS : backoff ? BACKOFF_BARGE_MS : BARGE_MS)) return;
-      sustainMs = 0; log('mic', `barge-in: speech sustained ${replyMode ? REPLY_BARGE_MS : BARGE_MS}ms`); onBarge?.();
+      sustainMs = 0; log('mic', `barge-in: speech sustained ${replyMode ? REPLY_BARGE_MS : BARGE_MS}ms`); onBarge?.(); onSpeechOnset?.();
       frames = preroll; preroll = []; clipMs = frames.length * ms; speechMs = replyMode ? REPLY_BARGE_MS : BARGE_MS; silentMs = 0;
       return;
     }

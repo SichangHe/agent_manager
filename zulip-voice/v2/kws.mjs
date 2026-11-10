@@ -5,7 +5,7 @@
  */
 import {parseBpe, encodeBpe} from './bpe.mjs';
 const KWS_BASE = './kws/';   // build.mjs rewrites this to the hashed asset directory
-const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A @KATANA';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
+const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A @KATANA\n▁BA M B O O @BAMBOO';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
 const THRESHOLD = 0.25;   // tuned in research-kws: 41/42 clips, no false hit in 35 minutes of agent speech
 
 const loadScript = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });
@@ -19,8 +19,28 @@ function makeKws(keywords, threshold, module) {
   }, module);
 }
 
+/** Gain that brings quiet microphones up to a level the model was trained on (a phone held at arm's length peaks around 0.03): follows the peak of the last few seconds, at most 12x. */
+function agc(samples, state) {
+  let p = 0; for (let i = 0; i < samples.length; i++) { const a = Math.abs(samples[i]); if (a > p) p = a; }
+  state.peak = Math.max(p, state.peak * 0.9985);   // ~4 s memory at 12 chunks a second
+  const gain = Math.max(1, Math.min(12, 0.3 / Math.max(state.peak, 0.01)));
+  if (gain === 1) return samples;
+  const out = new Float32Array(samples.length); for (let i = 0; i < samples.length; i++) out[i] = Math.max(-1, Math.min(1, samples[i] * gain));
+  return out;
+}
+const RING_SAMPLES = 16000;
+/** Feeds `samples` to `stream` of spotter `k` and returns the keywords it reports. */
+function pump(k, stream, samples) {
+  stream.acceptWaveform(16000, samples);
+  const hits = [];
+  while (k.isReady(stream)) { k.decode(stream); const r = k.getResult(stream); if (r.keyword) { hits.push(r.keyword); k.reset(stream); } }
+  return hits;
+}   // one second of audio kept for restarts
+
 export function createKeywordSpotter({log}) {
-  let kws = null, stream = null, loading = null, status = 'off', detail = '', wasm = null, bpe = null, cmd = null, cmdStream = null, cmdKey = '';   // status: off | loading | ready | failed
+  const agcState = {peak: 0};
+  let lastX = null;   // the gain-adjusted samples of the latest `feed`, which the command spotter shares
+  let kws = null, stream = null, loading = null, status = 'off', detail = '', wasm = null, bpe = null, cmd = null, cmdStream = null, cmdKey = '', ring = new Float32Array(0), peak = 0, alt = null, altUntil = 0, cmdAlt = null, cmdAltUntil = 0;   // status: off | loading | ready | failed
   async function load() {
     const t0 = performance.now(), base = new URL(KWS_BASE, import.meta.url).href;
     const stage = name => log('kws', `${name} +${Math.round(performance.now() - t0)}ms`);
@@ -73,9 +93,8 @@ export function createKeywordSpotter({log}) {
     /** Feeds the command spotter (command mode only); returns the tags heard. */
     feedCommands(samples) {
       if (!cmd) return [];
-      cmdStream.acceptWaveform(16000, samples);
-      const hits = [];
-      while (cmd.isReady(cmdStream)) { cmd.decode(cmdStream); const r = cmd.getResult(cmdStream); if (r.keyword) { hits.push(r.keyword); cmd.reset(cmdStream); } }
+      const x = lastX ?? samples, hits = pump(cmd, cmdStream, x);
+      if (cmdAlt) { if (performance.now() > cmdAltUntil) { try { cmdAlt.free(); } catch { /* freed */ } cmdAlt = null; } else hits.push(...pump(cmd, cmdAlt, x)); }
       return hits;
     },
     /** Clears the command stream's audio history (call when command mode opens, so earlier speech cannot complete a phrase). */
@@ -83,16 +102,31 @@ export function createKeywordSpotter({log}) {
     /** Feeds 16 kHz mono float samples; returns the keywords heard (`ATTENTION`, `TOMATO`). */
     feed(samples) {
       if (!kws) return [];
-      stream.acceptWaveform(16000, samples);
-      const hits = [];
-      while (kws.isReady(stream)) {
-        kws.decode(stream);
-        const r = kws.getResult(stream);
-        if (r.keyword) { hits.push(r.keyword); kws.reset(stream); }
-      }
+      const x = lastX = agc(samples, agcState);
+      const joined = new Float32Array(Math.min(RING_SAMPLES, ring.length + x.length)); joined.set(ring.subarray(Math.max(0, ring.length + x.length - RING_SAMPLES)), 0); joined.set(x, joined.length - x.length); ring = joined;
+      const hits = pump(kws, stream, x);
+      if (alt) { if (performance.now() > altUntil) { try { alt.free(); } catch { /* freed */ } alt = null; } else hits.push(...pump(kws, alt, x)); }
       return hits;
     },
+    /**
+     * A second stream primed with the last `prerollS` seconds: a keyword after a pause is found reliably only when the stream starts at (just before) the speech
+     * (study: an isolated word after 1 s of silence was heard 38% of the time, after a restart 100%). Call when speech starts; returns the hits from the replay.
+     */
+    restart(prerollS = 0.6) {
+      if (!kws) return [];
+      try { alt?.free(); } catch { /* freed */ }
+      alt = kws.createStream(); altUntil = performance.now() + 4000;   // runs beside the continuous stream for 4 s: the continuous one answers sooner, this one catches what it misses
+      const tail = ring.subarray(Math.max(0, ring.length - Math.round(prerollS * 16000)));
+      return tail.length ? pump(kws, alt, tail) : [];
+    },
+    restartCommands(prerollS = 0.6) {
+      if (!cmd) return [];
+      try { cmdAlt?.free(); } catch { /* freed */ }
+      cmdAlt = cmd.createStream(); cmdAltUntil = performance.now() + 4000;
+      const tail = ring.subarray(Math.max(0, ring.length - Math.round(prerollS * 16000)));
+      return tail.length ? pump(cmd, cmdAlt, tail) : [];
+    },
     /** Frees the model (voice control off). */
-    unload() { try { cmdStream?.free(); cmd?.free(); stream?.free(); kws?.free(); } catch { /* already freed */ } kws = stream = loading = cmd = cmdStream = wasm = bpe = null; cmdKey = ''; status = 'off'; detail = ''; },
+    unload() { try { cmdAlt?.free(); alt?.free(); cmdStream?.free(); cmd?.free(); stream?.free(); kws?.free(); } catch { /* already freed */ } kws = stream = loading = cmd = cmdStream = wasm = bpe = alt = cmdAlt = null; cmdKey = ''; status = 'off'; detail = ''; },
   };
 }
