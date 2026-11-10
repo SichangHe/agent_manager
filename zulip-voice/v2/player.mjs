@@ -36,8 +36,8 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   /** `{part, startMs, endMs}`: the bundle holding item `it` (from the service's pre-render or an on-demand batch) and its time range. */
   function bundleOf(it) {
     const part = voice.bundleFor(it.msgId, it.idx) ?? [...localParts.values()].find(p => p.messageId === it.msgId && it.idx >= p.firstIdx && it.idx < p.firstIdx + p.texts.length);
-    if (!part || part.texts[it.idx - part.firstIdx] !== it.text) return null;
-    const k = it.idx - part.firstIdx;
+    const k = part ? voice.chunkIndex(part, it.msgId, it.idx) : -1;
+    if (k < 0 || part.texts[k] !== it.text) return null;
     return {part, startMs: part.offsetsMs[k], endMs: part.offsetsMs[k + 1] ?? part.durationMs};
   }
 

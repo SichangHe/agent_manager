@@ -19,9 +19,12 @@ export function createVoice({zulip, cfg, log}) {
     const waiter = pending.get(body.id);
     if (waiter) { pending.delete(body.id); waiter(body); }
     else if (body.proactive && body.bundle && body.audioURL) {
-      const parts = bundles.get(body.messageId) ?? [];
-      if (!parts.some(p => p.id === body.id)) parts.push({...body, arrivedMs: Math.min(Date.now(), message.timestamp * 1000)});
-      bundles.set(body.messageId, parts);
+      const part = {...body, arrivedMs: Math.min(Date.now(), message.timestamp * 1000)};
+      for (const id of new Set((body.spans ?? [{messageId: body.messageId}]).map(sp => sp.messageId))) {   // a bundle may hold the chunks of several messages (`spans`, in play order)
+        const parts = bundles.get(id) ?? [];
+        if (!parts.some(p => p.id === body.id)) parts.push(part);
+        bundles.set(id, parts);
+      }
       for (const [key, list] of bundles) if (Date.now() - list[0].arrivedMs > PREPARED_TTL_MS) bundles.delete(key);
     }
   }
@@ -53,7 +56,14 @@ export function createVoice({zulip, cfg, log}) {
 
   /** The bundle (one upload holding several chunks) containing chunk `idx` of message `msgId`, if the service rendered it. */
   function bundleFor(msgId, idx) {
-    return bundles.get(msgId)?.find(p => idx >= p.firstIdx && idx < p.firstIdx + p.texts.length);
+    return bundles.get(msgId)?.find(p => chunkIndex(p, msgId, idx) >= 0);
+  }
+  /** Position of chunk `idx` of message `msgId` inside bundle `p` (its audio and `texts` order), or -1. */
+  function chunkIndex(p, msgId, idx) {
+    if (!p.spans) return p.messageId === msgId && idx >= p.firstIdx && idx < p.firstIdx + p.texts.length ? idx - p.firstIdx : -1;
+    let base = 0;
+    for (const sp of p.spans) { if (sp.messageId === msgId && idx >= sp.firstIdx && idx < sp.firstIdx + sp.n) return base + idx - sp.firstIdx; base += sp.n; }
+    return -1;
   }
 
   /** On-demand speech for several chunks in ONE request: `{ok: true, clip}` with `clip.texts`/`offsetsMs`; used when the service has no bundle. */
@@ -119,5 +129,5 @@ export function createVoice({zulip, cfg, log}) {
     return r.ok ? {ok: true, ...r.result, totalMs: r.totalMs} : r;
   }
 
-  return {onMessage, backfill, sendVoice, bundleFor, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
+  return {onMessage, backfill, sendVoice, bundleFor, chunkIndex, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
 }

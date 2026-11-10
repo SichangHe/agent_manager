@@ -12,8 +12,13 @@ import {speechPieces, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} 
 
 const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
+const MAX_TAIL_BATCH = 60;       // chunks in one pre-rendered tail bundle (about 4 minutes of speech)
+const SHORT_MESSAGE_CHUNKS = 3;  // messages up to this many chunks are rendered as a single bundle
+const COALESCE_MS = 1500;        // messages arriving within this window of the first share one tail bundle
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
 const MAX_DELETES_PER_SWEEP = 40;
+const SWEEP_INTERVAL_MS = 3600000;   // cleanup runs once an hour: at about 100 KB per clip even 500 clips an hour stay far below the 100 MB cap, and deletes are the main Zulip API cost
+const EARLY_SWEEP_FRACTION = 0.8;    // ...unless the stored clips pass this share of the cap
 const HUMAN_CLEANUP_PER_MIN = 5;   // the human key is shared with the phone (200 calls/min): cleanup may use only a trickle of it, per relay
 const HUMAN_RESERVE = 120;         // and none at all once fewer calls than this are left in the window
 const ID_PATTERN = /^[a-zA-Z0-9_-]{8,100}$/;
@@ -30,7 +35,7 @@ export function parseRequest(message, humanId, streamId) {
   try { request = JSON.parse(message.content); } catch { return null; }
   if (request?.voice !== 1 || !ID_PATTERN.test(request.id) || !OPS.includes(request.op) || message.subject !== request.op) return null;
   if (request.op === 'tts' && request.texts !== undefined) {
-    if (!Array.isArray(request.texts) || !request.texts.length || request.texts.length > MAX_BATCH || request.texts.some(t => typeof t !== 'string' || !t.trim()) || request.texts.join('').length > MAX_TEXT_CHARS) return null;
+    if (!Array.isArray(request.texts) || !request.texts.length || request.texts.length > (request.proactive ? MAX_TAIL_BATCH : MAX_BATCH) || request.texts.some(t => typeof t !== 'string' || !t.trim()) || request.texts.join('').length > (request.proactive ? 4 * MAX_TEXT_CHARS : MAX_TEXT_CHARS)) return null;
   } else if (request.op === 'tts' && (typeof request.text !== 'string' || !request.text.trim() || request.text.length > MAX_TEXT_CHARS)) return null;
   if (request.op === 'stt' && (typeof request.uri !== 'string' || (request.prompt !== undefined && (typeof request.prompt !== 'string' || request.prompt.length > 200)) || (request.kws !== undefined && typeof request.kws !== 'boolean'))) return null;
   if (request.op === 'send' && (typeof request.topic !== 'string' || !request.topic || request.topic.length > 200 || !Array.isArray(request.items) || !request.items.length || request.items.length > MAX_SEND_ITEMS || request.items.some(i => typeof i?.text !== 'string' && typeof i?.uri !== 'string'))) return null;
@@ -203,7 +208,8 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   const save = () => { saving = saving.catch(() => {}).then(async () => { await writeFile(statePath + '.tmp', JSON.stringify(records), {mode: 0o600}); await rename(statePath + '.tmp', statePath); }); return saving; };
   const pools = {stt: createPool(2), tts: createPool(3)};
   const startedMs = now();
-  let lastPruneMs = 0, lastOrphanMs = 0, humanCleanups = [];
+  const bursts = new Map();   // topic -> messages arriving close together, rendered as one tail bundle
+  let lastPruneMs = 0, lastOrphanMs = 0, lastSweepMs = now(), humanCleanups = [];
   /** Whether a cleanup call with the human's key may go out now (rate: HUMAN_CLEANUP_PER_MIN, reserve: HUMAN_RESERVE); counts it when it may. */
   function humanMayClean(owner) {
     if (owner !== humanApi) return true;
@@ -287,7 +293,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   async function process(request, record, queuedMs, eventLagMs = null) {
     const t = now();
     const result = {voice: 1, id: request.id, op: 'result', of: request.op};
-    if (request.op === 'tts' && request.proactive) Object.assign(result, {proactive: true, bundle: true, messageId: request.messageId, firstIdx: request.firstIdx});
+    if (request.op === 'tts' && request.proactive) Object.assign(result, {proactive: true, bundle: true, messageId: request.messageId, firstIdx: request.firstIdx, ...(request.spans ? {spans: request.spans} : {})});
     let detail = '';
     try {
       detail = request.op === 'stt' ? await transcribe(request, result) : request.op === 'send' ? await sendMessage(request, result) : await synthesize(request, result, record);
@@ -386,20 +392,52 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       if (request.op === 'ping') { await ping(request).catch(error => console.log('ping failed: ' + error.message)); return; }
       const inflight = Object.values(records).filter(r => r.status === 'working' || r.status === 'sending').length;
       if (inflight >= maxActive + (request.proactive ? 0 : 50)) return;
-      const record = records[request.id] = {created: now(), status: 'working', proactive: !!request.proactive, messageId: request.messageId};
+      const record = records[request.id] = {created: now(), status: 'working', proactive: !!request.proactive, messageId: request.messageId, ...(request.messageIds ? {messageIds: request.messageIds} : {})};
       await save();
       const enqueuedMs = now();
       const eventLagMs = message.timestamp ? Math.max(0, now() - message.timestamp * 1000) : null;
       (pools[request.op] ?? pools.stt).add(request.proactive ? 1 : 0, () => process(request, record, now() - enqueuedMs, eventLagMs));
     },
-    /** Pre-renders speech for a new agent message so playback starts instantly. */
+    /**
+     * Pre-renders speech for new agent messages so playback starts instantly. Policy: the first message of a burst gets a one-chunk head bundle at once
+     * (fast start); everything else that arrives within COALESCE_MS, plus the rest of the first message, goes into ONE tail bundle with a `spans` index
+     * (message id, first chunk, count) so the client can find every chunk. A lone message costs the same as before (head + tail); a backlog of N messages
+     * costs 2 bundles instead of 2N (3 Zulip calls per bundle: upload, temporary URL, result post).
+     */
     async prepare(message, taskStreamId) {
       if (message.type !== 'stream' || message.stream_id !== taskStreamId || message.sender_id !== botId) return;
       const pieces = speechPieces(message.content);
-      // A small head bundle starts playback sooner; the rest of the message follows as one bundle.
-      for (const [firstIdx, texts] of [[0, pieces.slice(0, 1)], [1, pieces.slice(1)]]) {
-        if (!texts.length) continue;
-        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}_${firstIdx}`, op: 'tts', texts, proactive: true, messageId: message.id, firstIdx})});
+      if (!pieces.length) return;
+      const topic = message.subject;
+      let burst = bursts.get(topic);
+      if (!burst && pieces.length <= SHORT_MESSAGE_CHUNKS) {   // short: one bundle, no separate head (saves 3 Zulip calls; rendering it whole is already quick)
+        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}_0`, op: 'tts', texts: pieces, proactive: true, messageId: message.id, firstIdx: 0})});
+        return;
+      }
+      if (!burst) {
+        burst = {spans: [], texts: [], firstId: message.id};
+        bursts.set(topic, burst);
+        burst.spans.push({messageId: message.id, firstIdx: 1, n: pieces.length - 1}); burst.texts.push(...pieces.slice(1));
+        burst.timer = setTimeout(() => { bursts.delete(topic); this.renderTails(burst).catch(error => console.log('tail render failed: ' + error.message)); }, COALESCE_MS);
+        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}_0`, op: 'tts', texts: pieces.slice(0, 1), proactive: true, messageId: message.id, firstIdx: 0})});
+      } else { burst.spans.push({messageId: message.id, firstIdx: 0, n: pieces.length}); burst.texts.push(...pieces); }
+    },
+    /** Renders a burst's tail as bundles of at most MAX_TAIL_BATCH chunks (normally one). */
+    async renderTails(burst) {
+      const spans = burst.spans.filter(sp => sp.n > 0);
+      let n = 0;
+      while (spans.length) {
+        const group = []; let count = 0;
+        while (spans.length && count < MAX_TAIL_BATCH) {
+          const sp = spans[0], take = Math.min(sp.n, MAX_TAIL_BATCH - count);
+          group.push({messageId: sp.messageId, firstIdx: sp.firstIdx, n: take}); count += take;
+          if (take === sp.n) spans.shift(); else { sp.firstIdx += take; sp.n -= take; }
+        }
+        const flat = burst.flatTexts ??= [...burst.texts];
+        const part = flat.splice(0, count);
+        const single = group.length === 1 && group[0].messageId === burst.firstId;   // the first message's own tail keeps its old id
+        await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${burst.firstId}_${single ? group[0].firstIdx : 't' + n}`.slice(0, 100), op: 'tts', texts: part, proactive: true, messageId: group[0].messageId, firstIdx: group[0].firstIdx, ...(single ? {} : {spans: group}), messageIds: group.map(g => g.messageId)})});
+        n++;
       }
     },
     /**
@@ -430,8 +468,8 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       if (n || u) console.log(`swept ${n} orphan messages and ${u} uploads`);
     },
     /** Records which agent messages the human has read, so their clips are evicted first. */
-    markRead(ids) { for (const r of Object.values(records)) if (r.messageId && ids.includes(r.messageId)) r.read = true; },
-    syncUnread(unreadIds) { for (const r of Object.values(records)) if (r.messageId) r.read = !unreadIds.has(r.messageId); },
+    markRead(ids) { for (const r of Object.values(records)) if (r.messageId && (r.messageIds ?? [r.messageId]).every(m => ids.includes(m))) r.read = true; },
+    syncUnread(unreadIds) { for (const r of Object.values(records)) if (r.messageId) r.read = !(r.messageIds ?? [r.messageId]).some(m => unreadIds.has(m)); },
     /** Reconciles interrupted posts, then deletes acked or expired items. */
     async expire() {
       for (const [id, record] of Object.entries(records)) {
@@ -445,6 +483,10 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       // Clips rendered with an older loudness chain are dropped (a few per sweep); the next unread render makes fresh ones.
       const quiet = Object.entries(records).filter(([, r]) => r.proactive && r.status === 'sent' && r.uri && r.chain !== CHAIN).slice(0, MAX_DELETES_PER_SWEEP);
       if (quiet.length) { await cleanup(quiet.map(([, r]) => r)); for (const [id, r] of quiet) if (r.status === 'done') delete records[id]; console.log(`replaced ${quiet.length} quiet legacy clips`); }
+      const stored = Object.values(records).filter(r => r.status === 'sent' && r.uri).reduce((n, r) => n + (r.bytes ?? 0), 0);
+      const sweepDue = now() - lastSweepMs >= SWEEP_INTERVAL_MS || stored > EARLY_SWEEP_FRACTION * maxUploadBytes;
+      if (!sweepDue) { await save(); return; }
+      lastSweepMs = now();
       const sent = Object.values(records).filter(r => r.status === 'sent');
       const age = r => now() - r.created;
       const full = new Set(sent.filter(r => (r.acked && !r.proactive) || age(r) > ttlMs || (!r.uri && age(r) > orphanTtlMs)));
@@ -457,7 +499,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
         if (await api.call('DELETE', 'messages/' + r.responseId).then(() => true, () => false)) delete r.responseId;
       }
       await save();
-      if (now() - lastOrphanMs > ORPHAN_SWEEP_MS) { lastOrphanMs = now(); await this.sweepOrphans(); }
+      lastOrphanMs = now(); await this.sweepOrphans();
       if (now() - lastPruneMs > 3600000) { lastPruneMs = now(); await pruneLogs().catch(error => console.log('log prune failed: ' + error.message)); }
     },
   };

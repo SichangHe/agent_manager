@@ -1504,6 +1504,27 @@ scenarios.skipPastEnd = async ({srv}) => {
   } finally { await c.close(); }
 };
 
+scenarios.coalescedBundle = async ({srv}) => {
+  // A burst of messages in one topic is pre-rendered as one head bundle plus ONE shared tail bundle; every chunk of every message still plays, in order.
+  await L.wipeTasks();
+  const ids = [];
+  for (const n of [1, 2, 3]) ids.push(await L.agentSays('alpha', `[alpha] M${n}\n\n` + Array.from({length: 5}, (_, i) => `Message ${n} sentence ${i} is here.`).join('\n\n')));
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'messages', () => document.querySelectorAll('.msg.agent').length >= 3);
+    await L.waitFor(p, 'prepared bundles', ids => new Set(window.__voice.voice.preparedEntries().filter(b => (b.spans ?? [b]).some(x => ids.includes(x.messageId))).map(b => b.id)).size >= 2, 40000, ids);
+    await L.sleep(4000);
+    const ids2 = await p.evaluate(ids => [...new Set(window.__voice.voice.preparedEntries().filter(b => (b.spans ?? [b]).some(x => ids.includes(x.messageId))).map(b => b.id))], ids);
+    assert.ok(ids2.length <= 3, 'bundles: ' + JSON.stringify(ids2));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'last message heard', () => /start \d+:\d+/.test(window.__voice.log.text()) && (window.__voice.log.text().match(/audio +start /g) || []).length >= 15, 90000);
+    const starts = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio +start /.test(l)).map(l => l.match(/start (\d+):(\d+)/).slice(1).join(':'));
+    assert.deepEqual(starts.slice(0, 15), ids.flatMap(id => [0, 1, 2, 3, 4].map(i => `${id}:${i}`)), 'order ' + starts);
+    return {bundles: ids2.length};
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
