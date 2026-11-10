@@ -1731,6 +1731,34 @@ scenarios.positiveAnswer = async ({srv}) => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.commandSpeechNeverPosted = async ({srv}) => {
+  // Speech after the command word never joins the reply; a cancel word (even misheard as "Rambo") posts nothing.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const mk = async (name, texts, gaps) => { const ws = await Promise.all(texts.map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8)); const parts = [gap(12000)]; ws.forEach((w, i) => { parts.push(pcm(w), gap(gaps[i])); }); const data = Buffer.concat(parts); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
+  const files = {
+    '/__leak.wav': await mk('leak', ['Attention.', 'Remember the milk.', 'Katana.', 'Pencil.'], [2500, 2000, 1800, 40000]),
+    '/__rambo.wav': await mk('rambo', ['Attention.', 'Remember the milk.', 'Katana.', 'Pencil. Rambo. Cancel.'], [2500, 2000, 1800, 40000]),
+  };
+  const srv2 = await L.serve(undefined, files);
+  const posted = async () => (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content);
+  try {
+    for (const [file, wantText] of [['/__leak.wav', /^Remember the milk\.?$/i], ['/__rambo.wav', null]]) {
+      const c = await L.openClient({url: srv2.url, mic: file, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-long-silence-s': 6}});
+      try {
+        await L.waitFor(c.page, 'message', () => document.querySelector('.msg.agent'));
+        await c.page.locator('.msg.agent .s').first().tap();
+        await L.waitFor(c.page, 'command mode', () => /vc +command mode/.test(window.__voice.log.text()), 70000);
+        await L.sleep(wantText ? 40000 : 12000);
+      } finally { await c.close(); }
+      const got = await posted();
+      if (wantText) { assert.equal(got.length, 1, 'one reply: ' + JSON.stringify(got)); assert.match(got[0], wantText, 'only the reply text: ' + got[0]); }
+      else assert.equal(got.length, 1, 'the cancelled one posts nothing (still just the first reply): ' + JSON.stringify(got));
+    }
+  } finally { await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

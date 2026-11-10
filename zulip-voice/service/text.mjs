@@ -141,6 +141,7 @@ function distance(a, b) {
 }
 /** Per control word: its key, the allowed edit distance on keys, and a sanity check on the heard key that keeps ordinary words ("Canada", "tension") out. */
 const CONTROL = {
+  kangaroo: {key: soundKey('kangaroo'), max: 2, ok: k => /^ka?n?g/.test(k) && k.includes('r') && k.length >= 5},   // the previous end word: still removed from replies
   tomato: {key: soundKey('tomato'), max: 1, ok: k => /^t/.test(k) && k.includes('m') && !/s$/.test(k) && k.length >= 5},   // the end word; plurals ("tomatoes") are ordinary text
   attention: {key: soundKey('attention'), max: 1, multi: 1, ok: (k, raw) => /^a/.test(raw) && /^a/.test(k) && k.includes('t') && k.includes('n') && k.length >= 6},
 };
@@ -190,3 +191,26 @@ export function soundsLikeWord(word, parts) {
 
 /** The last word of a reply that the on-device spotter just confirmed as the end word: a clipped start of it ("Tomat" for "tomato") is within 2 edits of its sound key. */
 export function looksLikeClippedEndWord(word) { const k = soundKey(word); return k.length >= 5 && distance(k, CONTROL.tomato.key) <= 2; }
+
+/* ---- Reply assembly rules shared by the client and the relay's `send` ---- */
+const COMMAND_VOCAB = new Set('attention katana tomato bamboo cancel never mind skip jump forward backward back next previous message messages again stop play resume switch to agent agents number one two three four five six seven eight nine ten positive negative yes no over send pencil'.split(' '));
+/**
+ * `texts` (one transcript per clip, in order) -> `{text, discard}`. Rules: a transcript containing the cancel word ("bamboo", phonetic: "Rambo") discards everything; "cancel"/"never mind"
+ * as the last utterance discards everything; in each clip the command word and all that follows it is dropped; stray end words go; a reply made only of control words is empty.
+ */
+export function assembleReply(texts, {cancelWord = 'bamboo', commandWord = 'katana'} = {}) {
+  const tokens = t => t.split(/\s+/).filter(Boolean), flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
+  const parts = [];
+  for (const raw of texts) {
+    const words = tokens(raw ?? '');
+    if (words.some(w => flat(w) === cancelWord || soundsLikeWord(cancelWord, [flat(w)]))) return {text: '', discard: true, why: 'cancel word'};
+    const at = words.findIndex(w => flat(w) === commandWord || soundsLikeWord(commandWord, [flat(w)]));
+    const kept = stripTrailingControl(removeControlWords(stripTrailingControl(at >= 0 ? words.slice(0, at) : words, 'tomato', ['over'])), 'kangaroo');
+    if (kept.length) parts.push(kept.join(' '));
+  }
+  const last = (parts.at(-1) ?? '').toLowerCase().replace(/[^a-z ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/^(cancel|cancel that|never mind|scratch that|forget it)$/.test(last) || /(^| )(cancel that|never mind)$/.test(last)) return {text: '', discard: true, why: 'cancel as the last utterance'};
+  const text = parts.join(' ').trim();
+  if (!text || tokens(text).every(w => COMMAND_VOCAB.has(flat(w)))) return {text: '', discard: false, why: 'only control words'};
+  return {text, discard: false};
+}

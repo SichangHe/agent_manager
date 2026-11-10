@@ -929,7 +929,7 @@ function onBarge() {
 }
 async function onCommandClip(blob, meta = {}) {
   if (dict) return;
-  if (vc) { meta.part = {blob, text: null}; (vc.parts ??= []).push(meta.part); }   // kept so a spotted end word can send the audio itself
+  if (vc) { meta.part = {blob, text: vc.mode === 'command' ? '' : null, fromCommand: vc.mode === 'command'}; (vc.parts ??= []).push(meta.part); }   // speech in command mode is never reply text   // kept so a spotted end word can send the audio itself
   try { await handleCommandClip(blob, meta); } finally { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) maybeAutoplay(); }
 }
 const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
@@ -941,7 +941,7 @@ function noteStartResult(useful) {
   if (emptyRun >= EMPTY_RUN_BACKOFF && Date.now() > backoffUntil) { backoffUntil = Date.now() + BACKOFF_MS; recorder.setBackoff(true); log('vc', `noisy room: ${emptyRun} useless clips in a row, stricter detection for 60 s`); setTimeout(() => { recorder.setBackoff(false); emptyRun = 0; }, BACKOFF_MS); }
 }
 async function handleCommandClip(blob, meta) {
-  if (Date.now() - lastLocalCommandMs < (meta.ms ?? 0) + 800 && lastLocalCommandMs) { log('vc', 'clip already handled on-device: not sent to the server'); if (vc?.mode === 'command') armCommandTimer(); return; }
+  if (Date.now() - lastLocalCommandMs < (meta.ms ?? 0) + 800 && lastLocalCommandMs) { log('vc', 'clip already handled on-device: not sent to the server'); if (vc?.parts?.length) vc.parts.at(-1).text ||= ''; if (vc?.mode === 'command') armCommandTimer(); return; }
   log('vc', `clip ${Math.round(meta.ms ?? 0)}ms (${Math.round(meta.speechMs ?? 0)}ms speech) ${vc ? 'in reply' : pendingChoice ? 'for the question' : 'for the start word'}`);
   lat.stage('sw', 'clip-end');
   if (!vc && !pendingChoice) {
@@ -1070,7 +1070,7 @@ function enterCommandMode(rest) {
   if (!vc) return;
   clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); clearTimeout(vc.readyTimer);
   const first = vc.mode !== 'command';
-  vc.mode = 'command';
+  vc.mode = 'command'; vc.sawCommand = true;
   if (first) { armLocalCommands(); recorder.beep('command'); log('vc', 'command mode'); log('lat', `command mode ready ${Math.round(Date.now() - (vc.openedAt ?? Date.now()))}ms after the session opened`); }
   setVcState('command', 'command mode');
   toast('Command mode: ' + 'back, next, switch to…, cancel');
@@ -1229,7 +1229,7 @@ function armSessionTimer() {
 /** A pause with nothing said after it never hangs: close it and carry on. */
 function closeEmptySession() {
   if (!vc || vc.text.trim()) return;
-  if ((vc.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips could not be transcribed here'); return; }   // offline: the audio is sent and transcribed by the server later
+  if (!vc.sawCommand && (vc.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips could not be transcribed here'); return; }   // offline: the audio is sent and transcribed by the server later
   log('vc', 'empty session timed out: resuming');
   vc = null; recorder.setReplyMode(false); recorder.beep('done');
   player.unlock();
@@ -1255,7 +1255,7 @@ async function sendVoiceReplyNow(why) {
   const items = [];
   if (reply.base.trim()) items.push({text: reply.base.trim()});
   if (reply.text.trim()) items.push({text: reply.text.trim()});   // everything already transcribed, in arrival order
-  for (const p of reply.parts ?? []) { p.sentAway = true; if (p.text === null) items.push({blob: p.blob}); }   // clips still waiting for text go as audio
+  for (const p of reply.parts ?? []) { p.sentAway = true; if (p.text === null && !reply.sawCommand) items.push({blob: p.blob}); }   // after a command word the audio may hold commands: only text already transcribed is trusted   // clips still waiting for text go as audio
   vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
   log('vc', `${why}: sending now (${items.filter(i => i.blob).length} clips for the server to transcribe)`);
   recorder.beep('done');
@@ -1272,7 +1272,7 @@ async function sendVoiceReplyNow(why) {
 
 function finishVcReply() {
   if (!vc || vc.ending) return;   // a timer re-armed while a send was waiting for clips must not fire on a closed session
-  if ((vc?.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips still untranscribed'); return; }
+  if (!vc.sawCommand && (vc?.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips still untranscribed'); return; }
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
   vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
   draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
@@ -1389,8 +1389,8 @@ async function deliver(l) {
       if (found.ok && found.data.messages.some(m => m.sender_id === cfg.humanId && m.content === l.text && m.timestamp * 1000 > l.sentAtMs - 5000)) { log('send', 'uncertain send was delivered'); removeLocal(l); for (const m of found.data.messages) if (model.add(m) && l.topic === current) appendMessage(m); return; }
     }
     if (l.items) {   // a voice reply: the service joins the transcripts and posts it, so nothing here waits for text
-      const v = await voice.sendVoice({sendId: l.sendId, topic: topicOf(l.topic), streamId: streamOf(l.topic), items: l.items});
-      if (v.ok) { lat.finish('send:' + l.localId, 'server-posted'); l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) toast('Nothing was recognised in that recording'); return; }
+      const v = await voice.sendVoice({sendId: l.sendId, topic: topicOf(l.topic), streamId: streamOf(l.topic), items: l.items, cancelWord: cancelWord(), commandWord: commandWord()});
+      if (v.ok) { lat.finish('send:' + l.localId, 'server-posted'); l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) toast(v.discarded ? 'Reply cancelled' : 'Nothing was recognised in that recording'); return; }
       l.attempts = (l.attempts ?? 0) + 1;
       if (l.attempts <= 12) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
       else { l.state = 'failed'; refreshLocal(l); toast(v.error); }

@@ -8,7 +8,7 @@ import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {unlink} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
-import {speechPieces, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
+import {speechPieces, assembleReply, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 
 const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
@@ -40,6 +40,7 @@ export function parseRequest(message, humanId, streamId) {
   } else if (request.op === 'tts' && (typeof request.text !== 'string' || !request.text.trim() || request.text.length > MAX_TEXT_CHARS)) return null;
   if (request.op === 'stt' && (typeof request.uri !== 'string' || (request.prompt !== undefined && (typeof request.prompt !== 'string' || request.prompt.length > 200)) || (request.kws !== undefined && typeof request.kws !== 'boolean'))) return null;
   if (request.op === 'send' && (typeof request.topic !== 'string' || !request.topic || request.topic.length > 200 || !Array.isArray(request.items) || !request.items.length || request.items.length > MAX_SEND_ITEMS || request.items.some(i => typeof i?.text !== 'string' && typeof i?.uri !== 'string'))) return null;
+  if (request.op === 'send' && ['cancelWord', 'commandWord'].some(k => request[k] !== undefined && (typeof request[k] !== 'string' || request[k].length > 40 || !/^[a-z]+$/.test(request[k])))) return null;
   if (request.op === 'log' && (typeof request.text !== 'string' || request.text.length > MAX_LOG_REQUEST_CHARS)) return null;
   if (request.op === 'ack' && !(request.ids ?? [request.id]).every(id => typeof id === 'string')) return null;
   return request;
@@ -289,11 +290,14 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     const jobs = request.items.map(async (item, i) => { if (texts[i] === null) { const piece = {}; await transcribe({uri: item.uri, prompt: DOMAIN_PROMPT}, piece); texts[i] = piece.text ?? ''; } });
     const settled = Promise.allSettled(jobs);
     const timedOut = await Promise.race([settled.then(() => false), new Promise(r => setTimeout(() => r(true), SEND_DEADLINE_MS))]);
-    const compose = () => stripEndWord(stripStartWord(texts.map(p => (p ?? '').trim()).filter(Boolean).join(' '))).trim();
+    let discarded = null;
+    const compose = () => { const r = assembleReply(texts.map(t => stripStartWord(t ?? '')), {cancelWord: request.cancelWord, commandWord: request.commandWord}); if (r.discard) discarded = r.why; return r.text; };
     const text = compose();
+    if (discarded) { result.empty = true; result.discarded = discarded; return `discarded (${discarded}), nothing posted`; }
     if (!text && !timedOut) { result.empty = true; return 'empty message, nothing posted'; }
     if (!text) await settled;   // nothing to post yet: wait for the first text
     const first = compose();
+    if (discarded) { result.empty = true; result.discarded = discarded; return `discarded (${discarded}), nothing posted`; }
     if (!first) { result.empty = true; return 'empty message, nothing posted'; }
     const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: [taskStreamId, ...extraStreamIds].includes(request.streamId) ? request.streamId : taskStreamId, topic: request.topic, content: first});
     result.messageId = sent.id; result.text = first;
