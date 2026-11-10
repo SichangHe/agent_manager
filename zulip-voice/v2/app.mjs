@@ -6,7 +6,7 @@ import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
 import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
-import {stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
+import {removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
 import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
@@ -827,7 +827,12 @@ async function handleCommandClip(blob, meta) {
   // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
   sttInFlight++;
   const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening).finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
-  if (!r.ok) { log('vc', `stt failed: ${r.error}`); recorder.beep('error'); resumeBarge(); vcIdle(); return; }
+  if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
+    log('vc', `stt failed: ${r.error}`);
+    if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute("Connection lost. Keep talking; I'll send when it's back."); }
+    if (vc) armSessionTimer();
+    resumeBarge(); vcIdle(); return;
+  }
   const heard = r.text.trim();
   if (meta.part) { if (meta.part.sentAway) return; meta.part.text = heard; }   // already sent from the audio: nothing more to do with this transcript
   lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
@@ -925,13 +930,13 @@ const CANCEL_RE = /^(?:cancel|cancel that|never mind|scratch that|forget it)$/;
 const SWITCH_MIN_SCORE = 0.8;
 /** "switch to <name>": one clear match switches (with a chime); otherwise show the top 3 and accept first/second/third. */
 function sayAndMute(text) { recorder.muteFor(2500 + text.length * 70); player.say(text).then(ms => recorder.muteFor(ms)); }
-function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('error'); toast('Switch cancelled'); maybeAutoplay(); } }
+function cancelChoice() { if (pendingChoice) { pendingChoice = null; toast('Switch cancelled'); maybeAutoplay(); } }
 const ranksConfident = spoken => (rankTopics(spoken)[0]?.score ?? 0) >= SWITCH_MIN_SCORE;
 function voiceSwitch(spoken) {
   lat.begin('switch', 'switch');
   const ranked = rankTopics(spoken);
   log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
-  if (!ranked.length) { log('vc', 'no agent matches'); recorder.beep('error'); toast(`No agent called “${spoken}”`); sayAndMute(`No agent called ${spoken}`); return false; }
+  if (!ranked.length) { log('vc', 'no agent matches'); toast(`No agent called “${spoken}”`); sayAndMute(`No agent called ${spoken}`); return false; }
   const clear = ranked[0].score >= SWITCH_MIN_SCORE && (ranked.length === 1 || ranked[0].score - ranked[1].score >= 0.15);
   pendingChoice = {names: clear ? [ranked[0].t.name] : ranked.slice(0, 3).map(x => x.t.name), until: Date.now() + 20000, confirm: clear};
   setTimeout(() => { if (pendingChoice && Date.now() >= pendingChoice.until) cancelChoice(); }, 20500);
@@ -974,11 +979,12 @@ function cancelSession() {
   vc = null; recorder.setReplyMode(false); recorder.beep('cancel');
   resumeAfterPause(); vcIdle();
 }
+const withoutStrayEndWords = t => removeControlWords(t.split(/\s+/).filter(Boolean)).join(' ');   // "Kangaroo." said mid-reply is a command, never text
 function addToSession(heard) {
   if (endsWithCancel(heard)) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
   clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
   if (stripResumePhrase(heard) !== null && !vc.sending) { vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' '); draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize(); sendVoiceReplyNow('end word in the transcript'); return; }   // no quiet window
-  vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' ');
+  vc.text = [vc.text, withoutStrayEndWords((afterStartWord(heard) ?? heard).trim())].filter(Boolean).join(' ');
   draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize();
   setVcState('dictating', 'dictating reply');
   armSessionTimer();
@@ -994,6 +1000,7 @@ function armSessionTimer() {
 /** A pause with nothing said after it never hangs: close it and carry on. */
 function closeEmptySession() {
   if (!vc || vc.text.trim()) return;
+  if ((vc.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips could not be transcribed here'); return; }   // offline: the audio is sent and transcribed by the server later
   log('vc', 'empty session timed out: resuming');
   vc = null; recorder.setReplyMode(false); recorder.beep('done');
   player.unlock();
@@ -1033,6 +1040,7 @@ async function sendVoiceReplyNow(why) {
 }
 
 function finishVcReply() {
+  if ((vc?.parts ?? []).some(p => p.text === null && !p.sentAway)) { sendVoiceReplyNow('clips still untranscribed'); return; }
   const reply = vc, stripped = stripResumePhrase(reply.text) ?? reply.text;
   vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
   draftEl.value = [reply.base.trim(), stripped].filter(Boolean).join(' '); autosize(); saveDraft();
@@ -1059,7 +1067,7 @@ async function setVoiceControl(on) {
   if (store.get('voice2-kws', false)) loadKws(); else log('kws', 'on-device start word is OFF in Settings: start words take the server path (slower)');   // opt-in beta, lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
   const r = await recorder.listen(true);
   if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
-  if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
+  if (!r.ok) { toast(r.error); player.say('Microphone stopped. Tap the microphone button to restart.'); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
   log('vc', `voice control ${r.ok ? 'on' : 'failed'}`);
   if (r.ok && r.running) recorder.beep('ready');
 }

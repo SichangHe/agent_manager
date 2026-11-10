@@ -3,3 +3,8 @@ research-kws/trig/*.npy
 research-kws/trig/*.json
 research-kws/trig/*.log
 research-kws/trig/raw*/
+research-kws/trig/human_*
+research-kws/trig/e4_*
+research-kws/trig/e3_*
+research-kws/trig/e2_*
+research-kws/trig/fa16*

@@ -8,7 +8,7 @@ import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {unlink} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
-import {speechPieces, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
+import {speechPieces, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 
 const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
@@ -273,7 +273,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   }
 
   /** Trailing end word ("kangaroo", matched by sound; repeats allowed; also "over") removed from `text`. */
-  function stripEndWord(text) { return stripTrailingControl(text.trim().split(/\s+/).filter(Boolean), 'kangaroo', ['over']).join(' '); }
+  function stripEndWord(text) { return removeControlWords(stripTrailingControl(text.trim().split(/\s+/).filter(Boolean), 'kangaroo', ['over'])).join(' '); }
 
   /** Leading start word(s) ("attention", matched by sound) removed: a clip recorded around the on-device detection still contains it. */
   function stripStartWord(text) { const w = text.trim().split(/\s+/).filter(Boolean); return w.slice(leadingControlCount('attention', w)).join(' '); }

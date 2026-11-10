@@ -178,3 +178,6 @@ export function leadingControlCount(name, words) {
 
 /** Domain words for reply dictation (the speech model's context prompt): the assistant, model and tool names this household says a lot. */
 export const DOMAIN_PROMPT = 'Claude, Codex, Haiku, Sonnet, Opus, quota, Zulip, nvim, Neovim, agent, topic, GPU, GitHub, Anthropic, OpenAI';
+
+/** `words` without any word that sounds like the end word, wherever it stands: a stray "Kangaroo." in the middle of a dictation is never content. */
+export function removeControlWords(words, name = 'kangaroo') { return words.filter(w => !soundsLike(name, [w])); }
