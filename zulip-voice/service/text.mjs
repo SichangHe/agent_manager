@@ -141,21 +141,21 @@ function distance(a, b) {
 }
 /** Per control word: its key, the allowed edit distance on keys, and a sanity check on the heard key that keeps ordinary words ("Canada", "tension") out. */
 const CONTROL = {
-  kangaroo: {key: soundKey('kangaroo'), max: 2, ok: k => /^ka?n?g/.test(k) && k.includes('r') && k.length >= 5},
+  tomato: {key: soundKey('tomato'), max: 1, ok: k => /^t/.test(k) && k.includes('m') && !/s$/.test(k) && k.length >= 5},   // the end word; plurals ("tomatoes") are ordinary text
   attention: {key: soundKey('attention'), max: 1, multi: 1, ok: (k, raw) => /^a/.test(raw) && /^a/.test(k) && k.includes('t') && k.includes('n') && k.length >= 6},
 };
 /** Whether the spoken words `parts` (1 to 3 adjacent words, e.g. "kanga" "roo") sound like the control word `name`. */
 export function soundsLike(name, parts) {
   const c = CONTROL[name], raw = parts.join('').toLowerCase().replace(/[^a-z]/g, ''), k = soundKey(raw);
-  return !!c && c.ok(k, raw) && distance(k, c.key) <= (parts.length > 1 ? c.multi ?? 0 : c.max);   // split forms must match exactly, so "kangaroo is" stays text
+  return !!c && c.ok(k, raw) && distance(k, c.key) <= (parts.length > 1 ? c.multi ?? 0 : c.max);   // split forms must match exactly, so "tomato is" stays text
 }
 /** How many trailing words of `words` form a control word (0 when none); tries 1, 2 and 3 words ("kanga roo", "can guru"). */
 function endCount(name, words) {
   for (const k of [1, 2, 3]) if (words.length >= k && soundsLike(name, words.slice(-k))) return k;
   return 0;
 }
-/** `words` without trailing control words (repeats too: "kangaroo kangaroo"); the number removed is `words.length - result.length`. */
-export function stripTrailingControl(words, name = 'kangaroo', extra = []) {
+/** `words` without trailing control words (repeats too: "tomato tomato"); the number removed is `words.length - result.length`. */
+export function stripTrailingControl(words, name = 'tomato', extra = []) {
   let n = words.length;
   const flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
   for (;;) {
@@ -179,11 +179,14 @@ export function leadingControlCount(name, words) {
 /** Domain words for reply dictation (the speech model's context prompt): the assistant, model and tool names this household says a lot. */
 export const DOMAIN_PROMPT = 'Claude, Codex, Haiku, Sonnet, Opus, quota, Zulip, nvim, Neovim, agent, topic, GPU, GitHub, Anthropic, OpenAI';
 
-/** `words` without any word that sounds like the end word, wherever it stands: a stray "Kangaroo." in the middle of a dictation is never content. */
-export function removeControlWords(words, name = 'kangaroo') { return words.filter(w => !soundsLike(name, [w])); }
+/** `words` without any word that sounds like the end word, wherever it stands: a stray "Tomato." in the middle of a dictation is never content. */
+export function removeControlWords(words, name = 'tomato') { return words.filter(w => !soundsLike(name, [w])); }
 
 /** Whether the spoken words `parts` sound like an arbitrary configured keyword (single words: one edit on the sound key; split forms: exact key). */
 export function soundsLikeWord(word, parts) {
   const target = soundKey(word), k = soundKey(parts.join(''));
   return target.length >= 3 && k.length >= 3 && distance(k, target) <= (parts.length > 1 ? 0 : target.length >= 5 ? 1 : 0);
 }
+
+/** The last word of a reply that the on-device spotter just confirmed as the end word: a clipped start of it ("Tomat" for "tomato") is within 2 edits of its sound key. */
+export function looksLikeClippedEndWord(word) { const k = soundKey(word); return k.length >= 5 && distance(k, CONTROL.tomato.key) <= 2; }

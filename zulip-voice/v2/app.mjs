@@ -6,7 +6,7 @@ import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
 import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
-import {soundsLikeWord, soundsLike, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
+import {looksLikeClippedEndWord, soundsLikeWord, soundsLike, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
 import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
@@ -749,29 +749,31 @@ function maybeFinish() {
 }
 
 const kwsSpotter = createKeywordSpotter({log});
-let lastKwsHitMs = 0, sttInFlight = 0;
-/** The on-device keyword spotter heard a keyword: "attention" opens a reply session at once (pausing playback, no upload); "kangaroo" inside a reply ends it. */
+const kwsHitMs = {};
+let sttInFlight = 0, lastAttentionHitMs = 0;
+/** The on-device keyword spotter heard a keyword: "attention" opens a reply session at once (pausing playback, no upload); "tomato" inside a reply ends it. */
 function onKwsHit(word) {
-  if (!voiceControl || !store.get('voice2-kws', false) || dict || Date.now() - lastKwsHitMs < 1500) return;
-  lastKwsHitMs = Date.now();
+  if (!voiceControl || !store.get('voice2-kws', false) || dict || Date.now() - (kwsHitMs[word] ?? 0) < 1500) return;   // the same word twice in a row is one hit; a different word may follow at once ("attention katana")
+  kwsHitMs[word] = Date.now();
   log('vc', `on-device keyword: ${word}`);
   if (word === 'ATTENTION' && startWord() === 'attention' && !vc && !(pendingChoice && Date.now() < pendingChoice.until)) {
     if (!lat.has('sw')) lat.begin('sw', 'startword');
     lat.stage('sw', 'kws-local');
-    openSession('');
+    lastAttentionHitMs = Date.now();
+    openSession('', {deferChime: true});
   } else if (word === 'KATANA' && vc && vc.mode !== 'command' && commandWord() === 'katana') {
     enterCommandMode('');
-  } else if (word === 'KANGAROO' && vc?.mode === 'command') {
+  } else if (word === 'TOMATO' && vc?.mode === 'command') {
     leaveCommandMode('end word on device');
-  } else if (word === 'KANGAROO' && vc && normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT)) === 'kangaroo') {
+  } else if (word === 'TOMATO' && vc && normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT)) === 'tomato') {
     sendVoiceReplyNow('end word on device');
   }
 }
 const recorder = createRecorder({log, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
 let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
 
-const RESUME_DEFAULT = 'kangaroo';   // chosen from the end-word study: 100% detection in every condition, 0 false accepts, never in agent text
-if (store.get('voice2-resume-phrase', null) === 'over') store.set('voice2-resume-phrase', RESUME_DEFAULT);   // the old default migrates; a customised phrase stays
+const RESUME_DEFAULT = 'tomato';   // the human's pick from the end-word study: 99% on-device detection, 0 false accepts in 4.9 h of speech
+if (['over', 'kangaroo'].includes(store.get('voice2-resume-phrase', null))) store.set('voice2-resume-phrase', RESUME_DEFAULT);   // the old default migrates; a customised phrase stays
 const RESUME_SILENCE_MS = 1000;   // plus the recorder's 0.7 s end-of-utterance silence: about 1.7 s of quiet after the phrase
 const normalize = t => t.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
 function editDistance(a, b) {
@@ -784,10 +786,10 @@ function editDistance(a, b) {
 function stripResumePhrase(text) {
   const words = text.trim().split(/\s+/).filter(Boolean), norm = words.map(w => normalize(w));
   const phrase = normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT));
-  if (phrase === 'kangaroo' || phrase === 'over') {
+  if (phrase === 'tomato' || phrase === 'over') {
     let n = norm.length;
     if (phrase === 'over' && n >= 3 && norm[n - 1] === 'out' && norm[n - 2] === 'and' && norm[n - 3] === 'over') n -= 2;
-    const kept = phrase === 'over' ? (() => { let m = n; while (m > 0 && norm[m - 1] === 'over') m--; return m; })() : stripTrailingControl(words.slice(0, n), 'kangaroo').length;   // "kangaroo" is matched by sound (Cangaroo, Canguro, kanga roo ...)
+    const kept = phrase === 'over' ? (() => { let m = n; while (m > 0 && norm[m - 1] === 'over') m--; return m; })() : stripTrailingControl(words.slice(0, n), 'tomato').length;   // "kangaroo" is matched by sound (Cangaroo, Canguro, kanga roo ...)
     return kept < norm.length ? words.slice(0, kept).join(' ') : null;
   }
   for (const q of [phrase]) {
@@ -853,6 +855,7 @@ function noteStartResult(useful) {
   if (emptyRun >= EMPTY_RUN_BACKOFF && Date.now() > backoffUntil) { backoffUntil = Date.now() + BACKOFF_MS; recorder.setBackoff(true); log('vc', `noisy room: ${emptyRun} useless clips in a row, stricter detection for 60 s`); setTimeout(() => { recorder.setBackoff(false); emptyRun = 0; }, BACKOFF_MS); }
 }
 async function handleCommandClip(blob, meta) {
+  log('vc', `clip ${Math.round(meta.ms ?? 0)}ms (${Math.round(meta.speechMs ?? 0)}ms speech) ${vc ? 'in reply' : pendingChoice ? 'for the question' : 'for the start word'}`);
   lat.stage('sw', 'clip-end');
   if (!vc && !pendingChoice) {
     startWordUploads = startWordUploads.filter(t => Date.now() - t < 60000);
@@ -870,7 +873,7 @@ async function handleCommandClip(blob, meta) {
     resumeBarge(); vcIdle(); return;
   }
   let heard = r.text.trim();
-  { const w = heard.split(/\s+/).filter(Boolean); if (w.length >= 2 && removeControlWords(removeControlWords(w, 'kangaroo'), 'attention').length === 0 && w.some(x => soundsLike('kangaroo', [x])) && w.some(x => soundsLike('attention', [x]))) { log('vc', `dropped "${heard}": only control words, an echo of noise`); heard = ''; } }
+  { const w = heard.split(/\s+/).filter(Boolean); if (w.length >= 2 && removeControlWords(removeControlWords(w, 'tomato'), 'attention').length === 0 && w.some(x => soundsLike('tomato', [x])) && w.some(x => soundsLike('attention', [x]))) { log('vc', `dropped "${heard}": only control words, an echo of noise`); heard = ''; } }
   if (meta.part) { if (meta.part.sentAway) return; meta.part.text = heard; }   // already sent from the audio: nothing more to do with this transcript
   lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
   log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
@@ -915,17 +918,17 @@ async function handleCommandClip(blob, meta) {
   addToSession(heard);
 }
 // ---- Command mode: start word -> INPUT mode (dictation) -> command word -> COMMAND mode (a closed list, chainable, never text) ----
-const CMD_DEFAULT = 'katana', COMMAND_SILENCE_MS = 4000;
+const CMD_DEFAULT = 'katana', COMMAND_SILENCE_MS = 4000, START_CHIME_DELAY_MS = 600, ATTENTION_COMMAND_WINDOW_MS = 1500;
 const commandWord = () => normalize(store.get('voice2-cmd-word', CMD_DEFAULT)) || CMD_DEFAULT;
 const isCommandWord = w => { const n = normalize(w); return !!n && (n === commandWord() || soundsLikeWord(commandWord(), [n])); };
 /** Index of the first command word in `words`, or -1. */
 const commandWordAt = words => words.findIndex(isCommandWord);
 function enterCommandMode(rest) {
   if (!vc) return;
-  clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
+  clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); clearTimeout(vc.readyTimer);
   const first = vc.mode !== 'command';
   vc.mode = 'command';
-  if (first) { recorder.beep('command'); log('vc', 'command mode'); }
+  if (first) { recorder.beep('command'); log('vc', 'command mode'); log('lat', `command mode ready ${Math.round(Date.now() - (vc.openedAt ?? Date.now()))}ms after the session opened`); }
   setVcState('command', 'command mode');
   toast('Command mode: ' + 'back, next, switch to…, cancel');
   armCommandTimer();
@@ -1023,13 +1026,17 @@ function voiceSwitch(spoken) {
   return true;
 }
 
-function openSession(rest) {
+function openSession(rest, {deferChime = false} = {}) {
   bargePaused = false;
   if (['playing', 'loading'].includes(player.position().status)) player.pause();
   lat.finish('sw', 'pause-applied');
  
-  vc = {base: draftEl.value, text: '', timer: 0, emptyTimer: 0};
-  recorder.setReplyMode(true); recorder.beep('ready');
+  vc = {base: draftEl.value, text: '', timer: 0, emptyTimer: 0, openedAt: Date.now()};
+  recorder.setReplyMode(true);
+  const direct = !!rest && isCommandWord(normalize(rest).split(' ')[0]);   // "attention katana ...": straight to command mode, one chime only
+  if (direct) { /* the command chime follows */ }
+  else if (deferChime) vc.readyTimer = setTimeout(() => { if (vc && vc.mode !== 'command') recorder.beep('ready'); }, START_CHIME_DELAY_MS);   // gives a following command word the chance to replace it
+  else recorder.beep('ready');
   log('vc', `session opened by start word; rest "${rest}"`);
   const words = normalize(rest);
   if (CANCEL_RE.test(words)) { log('vc', 'cancel right after the start word'); vc = null; recorder.setReplyMode(false); recorder.beep('cancel'); resumeAfterPause(); vcIdle(); return; }
@@ -1049,7 +1056,7 @@ function cancelSession() {
   vc = null; recorder.setReplyMode(false); recorder.beep('cancel');
   resumeAfterPause(); vcIdle();
 }
-const withoutStrayEndWords = t => removeControlWords(t.split(/\s+/).filter(Boolean)).join(' ');   // "Kangaroo." said mid-reply is a command, never text
+const withoutStrayEndWords = t => removeControlWords(t.split(/\s+/).filter(Boolean)).join(' ');   // "Tomato." said mid-reply is a command, never text
 function addToSession(heard) {
   { const words = (afterStartWord(heard) ?? heard).split(/\s+/).filter(Boolean), at = commandWordAt(words);   // the command word switches to COMMAND mode: what follows it is commands, what precedes it is reply text
     if (at >= 0 && vc) { const before = words.slice(0, at).join(' '); if (before) { vc.text = [vc.text, withoutStrayEndWords(before)].filter(Boolean).join(' '); draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize(); } enterCommandMode(words.slice(at + 1).join(' ')); return; } }
@@ -1093,6 +1100,7 @@ async function sendVoiceReplyNow(why) {
   await new Promise(r => setTimeout(r, 0));   // lets the session take the text of the clip that just finished
   if (vc !== reply) return;
   if (performance.now() - waitStart > 50) log('vc', `waited ${Math.round(performance.now() - waitStart)}ms for clips already in transcription`);
+  if (why.includes('on device')) { const w = reply.text.trim().split(/\s+/); if (w.length && looksLikeClippedEndWord(w.at(-1))) { log('vc', `dropped the clipped end word "${w.at(-1)}"`); reply.text = w.slice(0, -1).join(' '); } }
   const items = [];
   if (reply.base.trim()) items.push({text: reply.base.trim()});
   if (reply.text.trim()) items.push({text: reply.text.trim()});   // everything already transcribed, in arrival order
@@ -1154,7 +1162,7 @@ $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, 
 $('set-kws').checked = store.get('voice2-kws', false);
 $('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) loadKws(); else if (!e.target.checked) kwsSpotter.unload(); };
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
-$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "kangaroo"' : 'Voice control off'); };
+$('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "tomato"' : 'Voice control off'); };
 function drawLevel(level) {
   const canvas = $('level'), ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);

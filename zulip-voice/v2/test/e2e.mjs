@@ -663,9 +663,9 @@ scenarios.voiceControl = async () => {
   };
   const files = {
     '/__pause.wav': await seq(gap(9000), 'Attention attention attention.', gap(12000)),
-    '/__reply.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first. Kangaroo.', gap(20000)),
-    '/__phrase.wav': await seq(gap(9000), 'Attention.', gap(6000), 'Kangaroo.', gap(20000)),
-    '/__split.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Kangaroo.', gap(20000)),
+    '/__reply.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first. Tomato.', gap(20000)),
+    '/__phrase.wav': await seq(gap(9000), 'Attention.', gap(6000), 'Tomato.', gap(20000)),
+    '/__split.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Tomato.', gap(20000)),
     '/__next.wav': await seq(gap(9000), 'Attention. Katana. Next.', gap(8000)),
     '/__noise.wav': await seq(gap(9000), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
@@ -712,7 +712,7 @@ scenarios.voiceControl = async () => {
     const sent = await (async () => { for (let i = 0; i < 10; i++) { const m = await mine(); if (m.length) return m; await L.sleep(1000); } return []; })();
     assert.equal(sent.length, 1, 'exactly one message sent: ' + JSON.stringify(sent));
     assert.match(sent[0], /deploy it to staging/i);
-    assert.ok(!/kangaroo/i.test(sent[0]), 'resume phrase stripped: ' + sent[0]);
+    assert.ok(!/tomato/i.test(sent[0]), 'resume phrase stripped: ' + sent[0]);
     times.replySent = sent[0];
   });
   await L.wipeTasks(); await L.agentSays('alpha', '[alpha] Long\n\n' + long);
@@ -771,7 +771,7 @@ scenarios.voiceFirstWord = async () => {
   // Speech that starts right at barge-in: the ring-buffer preroll keeps the first word; our own chimes never count as speech.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const speech = await L.speechWav('Attention. Deploy the build to staging now. Kangaroo.');
+  const speech = await L.speechWav('Attention. Deploy the build to staging now. Tomato.');
   const at = speech.indexOf('data'), head = Buffer.from(speech.subarray(0, at + 8)), data = Buffer.concat([gap(2500), speech.subarray(at + 8), gap(20000)]);
   head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__first.wav': Buffer.concat([head, data])});
@@ -1136,7 +1136,7 @@ scenarios.voiceSwitchRules = async ({srv}) => {
 };
 
 scenarios.voiceYesAfterPause = async () => {
-  // The switch question is open; "Pause." then "Yes." must be taken as the answer, with no reply session left behind.
+  // "Attention. Switch to terminal." (no command word) is a switch: read back, "Yes.", switched; the phrase is never reply text.
   await L.wipeTasks();
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
@@ -1162,7 +1162,7 @@ scenarios.voiceTrailingCancel = async () => {
   // "Pause. Some reply. Cancel." in one utterance discards everything; later silence or "over" sends nothing.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Attention. This is a test whether the cancel works. Cancel.', 'Kangaroo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention. This is a test whether the cancel works. Cancel.', 'Tomato.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(9000), pcm(ws[0]), gap(6000), pcm(ws[1]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__tc.wav': Buffer.concat([head, data])});
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
@@ -1343,7 +1343,7 @@ scenarios.directiveFiresOnce = async ({srv}) => {
 scenarios.voiceSendNoWait = async () => {
   // Send while transcripts are pending, and again while offline: the UI frees at once, queued sends retry with the same id, exactly one message each, end word stripped.
   await L.wipeTasks();
-  const sp = await L.speechWav('Deploy the build to staging now. Kangaroo.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const sp = await L.speechWav('Deploy the build to staging now. Tomato.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([sp.subarray(at + 8), Buffer.alloc(48000 * 30)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sn.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sn.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
@@ -1371,7 +1371,7 @@ scenarios.voiceSendNoWait = async () => {
       for (let i = 0; i < 40; i++) { got = await mine(); if (got.length >= want) break; await L.sleep(1500); }
       await L.sleep(3000); got = await mine();
       assert.equal(got.length, want, `exactly ${want} message(s): ` + JSON.stringify(got));
-      assert.match(got.at(-1), /deploy/i); assert.doesNotMatch(got.at(-1), /kangaroo/i, 'end word stripped: ' + JSON.stringify(got));
+      assert.match(got.at(-1), /deploy/i); assert.doesNotMatch(got.at(-1), /tomato/i, 'end word stripped: ' + JSON.stringify(got));
     }
   } finally { await c.close(); await srv2.close(); }
 };
@@ -1408,10 +1408,10 @@ scenarios.outboxSurvivesReload = async () => {
 };
 
 scenarios.onDeviceStartWord = async () => {
-  // With the opt-in on-device keyword spotter, "attention" pauses playback and opens the session without any upload; "kangaroo" ends a reply.
+  // With the opt-in on-device keyword spotter, "attention" pauses playback and opens the session without any upload; "tomato" ends a reply.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Attention.', 'Deploy it to staging.', 'Kangaroo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention.', 'Deploy it to staging.', 'Tomato.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(10000), pcm(ws[0]), gap(3500), pcm(ws[1]), gap(1200), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__od.wav': Buffer.concat([head, data])});
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 12}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
@@ -1431,15 +1431,15 @@ scenarios.onDeviceStartWord = async () => {
     assert.doesNotMatch(lg, /vc +resume phrase \+ silence/, 'no quiet window');
     let sent = [];
     for (let i = 0; i < 10 && !sent.length; i++) { sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content); if (!sent.length) await L.sleep(1000); }
-    assert.equal(sent.length, 1, JSON.stringify(sent)); assert.match(sent[0], /deploy it to staging/i); assert.doesNotMatch(sent[0], /kangaroo|attention/i);
+    assert.equal(sent.length, 1, JSON.stringify(sent)); assert.match(sent[0], /deploy it to staging/i); assert.doesNotMatch(sent[0], /tomato|attention/i);
   } finally { await c.close(); await srv2.close(); }
 };
 
 scenarios.onDeviceAfterReload = async () => {
-  // After a reload with voice control and the on-device toggle persisted on, the spotter loads by itself (no tap on the toggle); with the opt-in on-device keyword spotter, "attention" pauses playback and opens the session without any upload; "kangaroo" ends a reply.
+  // After a reload with voice control and the on-device toggle persisted on, the spotter loads by itself (no tap on the toggle); with the opt-in on-device keyword spotter, "attention" pauses playback and opens the session without any upload; "tomato" ends a reply.
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Attention.', 'Deploy it to staging.', 'Kangaroo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention.', 'Deploy it to staging.', 'Tomato.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(10000), pcm(ws[0]), gap(3500), pcm(ws[1]), gap(1200), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__od.wav': Buffer.concat([head, data])});
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 12}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
@@ -1459,7 +1459,7 @@ scenarios.onDeviceAfterReload = async () => {
     assert.doesNotMatch(lg, /vc +resume phrase \+ silence/, 'no quiet window');
     let sent = [];
     for (let i = 0; i < 10 && !sent.length; i++) { sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content); if (!sent.length) await L.sleep(1000); }
-    assert.equal(sent.length, 1, JSON.stringify(sent)); assert.match(sent[0], /deploy it to staging/i); assert.doesNotMatch(sent[0], /kangaroo|attention/i);
+    assert.equal(sent.length, 1, JSON.stringify(sent)); assert.match(sent[0], /deploy it to staging/i); assert.doesNotMatch(sent[0], /tomato|attention/i);
   } finally { await c.close(); await srv2.close(); }
 };
 
@@ -1577,6 +1577,31 @@ scenarios.multiChannel = async ({srv}) => {
     return {id};
   } finally { await c.close(); }
 };
+
+const attentionCommand = onDevice => async ({srv}) => {
+  // "Attention katana next two" in one breath: straight to command mode, both chunks skipped, nothing in the draft.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 10}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const w = await L.speechWav('Attention. Katana. Next two.'), at = w.indexOf('data'), head = Buffer.from(w.subarray(0, at + 8));
+  const data = Buffer.concat([gap(14000), w.subarray(at + 8), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__ak.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__ak.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, ...(onDevice ? {'voice2-kws': true} : {})}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    if (onDevice) await L.waitFor(p, 'kws ready', () => /kws +ready/.test(window.__voice.log.text()), 40000);
+    await L.waitFor(p, 'navigated', () => /navigate next x2/.test(window.__voice.log.text()), 70000);
+    const log = await p.evaluate(() => window.__voice.log.text());
+    assert.equal((log.match(/vc +command mode\n|vc +command mode$/gm) || []).length, 1, 'one command-mode entry');
+    assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'no draft text');
+    if (process.env.DUMP) console.log(log.split('\n').filter(l => / (vc|kws|lat) /.test(l)).join('\n'));
+    return {ready: (log.match(/command mode ready (\d+)ms/) || [])[1]};
+  } finally { await c.close(); await srv2.close(); }
+};
+scenarios.attentionKatana = attentionCommand(false);
+scenarios.attentionKatanaOnDevice = attentionCommand(true);
 
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();

@@ -1,10 +1,10 @@
 /**
- * Keyword spotting in the browser (sherpa-onnx streaming zipformer, WebAssembly) for the start word "attention" and the end word "kangaroo".
+ * Keyword spotting in the browser (sherpa-onnx streaming zipformer, WebAssembly) for the start word "attention" and the end word "tomato".
  * Loaded lazily when voice control turns on; assets live in the hashed `kws-<hash>/` directory written by `build.mjs`.
  * The detector hears the microphone directly, so a start word pauses playback with no upload and no server round trip.
  */
 const KWS_BASE = './kws/';   // build.mjs rewrites this to the hashed asset directory
-const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁K A NG AR O O @KANGAROO\n▁K AT AN A @KATANA';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
+const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A @KATANA';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
 const THRESHOLD = 0.25;   // tuned in research-kws: 41/42 clips, no false hit in 35 minutes of agent speech
 
 const loadScript = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });
@@ -45,7 +45,7 @@ export function createKeywordSpotter({log}) {
       loading ??= Promise.race([load(), new Promise((_, reject) => setTimeout(() => reject(Error('timed out after 40 s')), 40000))]).then(() => ({ok: true}), error => { loading = null; status = 'failed'; detail = error.message; log('kws', `unavailable: ${error.message}`); return {ok: false, error: error.message}; });
       return loading;
     },
-    /** Feeds 16 kHz mono float samples; returns the keywords heard (`ATTENTION`, `KANGAROO`). */
+    /** Feeds 16 kHz mono float samples; returns the keywords heard (`ATTENTION`, `TOMATO`). */
     feed(samples) {
       if (!kws) return [];
       stream.acceptWaveform(16000, samples);

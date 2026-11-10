@@ -206,7 +206,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     /** Ignore the microphone for `ms` (our own speech or chime is playing). */
     muteFor(ms) { earconUntilMs = performance.now() + ms + 250; },
     /** Cuts the clip in progress right now and hands it over (a spotted end word does not wait for a pause in speech). */
-    flush() { if (listening && !capturing && frames.length) { speechMs = Math.max(speechMs, 1e6); cut(true); } },
+    flush() { if (listening && !capturing && frames.length) { speechMs = Math.max(speechMs, replyMode ? REPLY_MIN_SPEECH_MS : MIN_SPEECH_MS); cut(true); } },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
     setReplyMode(on) { replyMode = on; },
     /** Noisy-room mode: higher level and longer duration needed to start a start-word clip. */
