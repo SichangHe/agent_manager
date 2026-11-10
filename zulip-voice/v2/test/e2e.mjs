@@ -1434,6 +1434,8 @@ scenarios.onDeviceStartWord = async () => {
     let sent = [];
     for (let i = 0; i < 10 && !sent.length; i++) { sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content); if (!sent.length) await L.sleep(1000); }
     assert.equal(sent.length, 1, JSON.stringify(sent)); assert.match(sent[0], /deploy it to staging/i); assert.doesNotMatch(sent[0], /tomato|attention/i);
+    const lat = ((await p.evaluate(() => window.__voice.log.text())).match(/local hit -> \w+ sound started in \d+ms/g) || []).join('; ');
+    return {lat};
   } finally { await c.close(); await srv2.close(); }
 };
 
@@ -1708,6 +1710,8 @@ scenarios.bambooCancels = async ({srv}) => {
     await L.waitFor(p, 'kws ready', () => /kws +ready/.test(window.__voice.log.text()), 40000);
     await L.waitFor(p, 'on-device cancel', () => /on-device keyword: BAMBOO/.test(window.__voice.log.text()) && /vc +cancel: reply discarded/.test(window.__voice.log.text()), 70000);
     assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'nothing left in the draft');
+    const lat = ((await p.evaluate(() => window.__voice.log.text())).match(/local hit -> \w+ sound started in \d+ms/g) || []).join('; ');
+    return {lat};
   } finally { await c.close(); await srv2.close(); }
 };
 
@@ -1728,6 +1732,8 @@ scenarios.positiveAnswer = async ({srv}) => {
     await L.waitFor(p, 'kws ready', () => /kws +ready/.test(window.__voice.log.text()), 40000);
     await L.waitFor(p, 'switched', () => window.__voice.current() === 'terminal_viz', 80000);
     assert.match(await p.evaluate(() => window.__voice.log.text()), /on-device command: positive/, 'the answer was heard on the device');
+    const lat = ((await p.evaluate(() => window.__voice.log.text())).match(/local hit -> \w+ sound started in \d+ms/g) || []).join('; ');
+    return {lat};
   } finally { await c.close(); await srv2.close(); }
 };
 
@@ -1757,6 +1763,28 @@ scenarios.commandSpeechNeverPosted = async ({srv}) => {
       else assert.equal(got.length, 1, 'the cancelled one posts nothing (still just the first reply): ' + JSON.stringify(got));
     }
   } finally { await srv2.close(); }
+};
+
+scenarios.switchEarcons = async ({srv}) => {
+  // The switch flow's sounds: ready (start word), command (katana), then no tone at all for "positive": only the spoken "Now on".
+  await L.wipeTasks();
+  await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Attention.', 'Katana.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1500), pcm(ws[1]), gap(1800), pcm(ws[2]), gap(7000), pcm(ws[3]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__se.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__se.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await p.evaluate(() => { window.__tones = []; const orig = window.__voice.player.earcon; window.__voice.player.earcon = (notes, s) => { window.__tones.push(notes.join('/')); return orig.call(window.__voice.player, notes, s); }; });
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'switched', () => window.__voice.current() === 'terminal_viz', 80000);
+    await L.sleep(1500);
+    const tones = await p.evaluate(() => window.__tones); if (process.env.DUMP) console.log((await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => / vc /.test(l)).join('\n'));
+    assert.deepEqual(tones, ['880/1320', '880/1320', '330/0/330'], 'mic-on ready, start-word ready, command, nothing after the switch: ' + JSON.stringify(tones));
+  } finally { await c.close(); await srv2.close(); }
 };
 
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
