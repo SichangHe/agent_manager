@@ -17,12 +17,17 @@ const botEnv = parseEnv(await readFile(homedir() + '/.config/amh/zulip.env', 'ut
 export const account = {site: ini.site.replace(/\/$/, ''), email: ini.email, key: ini.key, humanId: 1212497, botId: 1212502, streamId: TASKS, relayStreamId: RELAY};
 
 /** Zulip REST as `who` (`human` or `bot`). */
+let callsThisRun = 0, remaining = Infinity;
+const MAX_CALLS_PER_RUN = Number(process.env.VTEST_MAX_CALLS || 500), RESERVE = 120;
 export function zulipAs(who) {
   const [email, key] = who === 'bot' ? [botEnv.ZULIP_BOT_EMAIL, botEnv.ZULIP_BOT_API_KEY] : [account.email, account.key];
   const auth = 'Basic ' + Buffer.from(email + ':' + key).toString('base64');
   return async (method, path, fields = {}) => {
     const body = new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
+    if (++callsThisRun > MAX_CALLS_PER_RUN) throw Error(`test run exceeded ${MAX_CALLS_PER_RUN} Zulip calls (VTEST_MAX_CALLS); not running more`);
+    for (; who === 'human' && remaining < RESERVE; ) { await sleep(5000); remaining += 20; }   // the human key is shared with the phone: back off below the reserve
     const r = await fetch(account.site + '/api/v1/' + path + (method === 'GET' ? '?' + body : ''), {method, headers: {Authorization: auth}, body: method === 'GET' ? undefined : body});
+    if (who === 'human' && r.headers.has('x-ratelimit-remaining')) remaining = Number(r.headers.get('x-ratelimit-remaining'));
     const data = await r.json();
     if (data.code === 'RATE_LIMIT_HIT') { await sleep(Math.ceil((data['retry-after'] ?? 10)) * 1000 + 500); return zulipAs(who)(method, path, fields); }
     if (data.result !== 'success') throw Error(`${method} ${path}: ${data.msg}`);

@@ -14,6 +14,8 @@ const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
 const MAX_DELETES_PER_SWEEP = 40;
+const HUMAN_CLEANUP_PER_MIN = 5;   // the human key is shared with the phone (200 calls/min): cleanup may use only a trickle of it, per relay
+const HUMAN_RESERVE = 120;         // and none at all once fewer calls than this are left in the window
 const ID_PATTERN = /^[a-zA-Z0-9_-]{8,100}$/;
 const OPS = ['stt', 'tts', 'ack', 'ping', 'log', 'send'];
 const MAX_SEND_ITEMS = 40;
@@ -136,10 +138,12 @@ export function createAPI({site, email, key, fetchImpl = fetch}) {
   if (!site.startsWith('https://')) throw Error('Zulip must use HTTPS');
   const authorization = 'Basic ' + Buffer.from(email + ':' + key).toString('base64');
   const calls = {};
+  let remainingCalls = Infinity;   // from the X-RateLimit-Remaining header of the latest response
   async function call(method, path, fields = {}, attempt = 0) {
     calls[method] = (calls[method] ?? 0) + 1;
     const form = fields instanceof FormData ? fields : new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
     const response = await fetchImpl(site + '/api/v1/' + path + (method === 'GET' ? '?' + form : ''), {method, headers: {Authorization: authorization}, body: method === 'GET' ? undefined : form, signal: AbortSignal.timeout(path === 'events' ? 90000 : 20000), redirect: 'error'});
+    const left = Number(response.headers.get('x-ratelimit-remaining')); if (Number.isFinite(left) && response.headers.has('x-ratelimit-remaining')) remainingCalls = left;
     const data = await response.json();
     if (response.status === 429 && attempt < 3) {
       const waitS = Number(data['retry-after'] ?? response.headers.get('retry-after')) || 5;
@@ -169,7 +173,7 @@ export function createAPI({site, email, key, fetchImpl = fetch}) {
   }
   /** API calls made since the last read, by method. */
   const takeCalls = () => { const c = {...calls}; for (const k of Object.keys(calls)) delete calls[k]; return c; };
-  return {site, call, download, takeCalls};
+  return {site, call, download, takeCalls, remaining: () => remainingCalls};
 }
 
 /** Runs async jobs with at most `limit` at once, lowest `priority` first. */
@@ -199,7 +203,15 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   const save = () => { saving = saving.catch(() => {}).then(async () => { await writeFile(statePath + '.tmp', JSON.stringify(records), {mode: 0o600}); await rename(statePath + '.tmp', statePath); }); return saving; };
   const pools = {stt: createPool(2), tts: createPool(3)};
   const startedMs = now();
-  let lastPruneMs = 0, lastOrphanMs = 0;
+  let lastPruneMs = 0, lastOrphanMs = 0, humanCleanups = [];
+  /** Whether a cleanup call with the human's key may go out now (rate: HUMAN_CLEANUP_PER_MIN, reserve: HUMAN_RESERVE); counts it when it may. */
+  function humanMayClean(owner) {
+    if (owner !== humanApi) return true;
+    humanCleanups = humanCleanups.filter(t => t > now() - 60000);
+    if (humanCleanups.length >= HUMAN_CLEANUP_PER_MIN || (humanApi.remaining?.() ?? Infinity) < HUMAN_RESERVE) return false;
+    humanCleanups.push(now());
+    return true;
+  }
 
   async function transcribe(request, result) {
     const audio = await api.download(request.uri);
@@ -404,7 +416,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
         if (age < (proactive ? ttlMs : orphanTtlMs)) continue;
         const owner = m.sender_id === botId ? api : m.sender_id === humanId ? humanApi : null;
         if (n >= MAX_DELETES_PER_SWEEP) break;
-        if (owner && await owner.call('DELETE', 'messages/' + m.id).then(() => true, () => false)) n++;
+        if (owner && humanMayClean(owner) && await owner.call('DELETE', 'messages/' + m.id).then(() => true, () => false)) n++;
       }
       let u = 0;
       for (const [owner, prefix] of [[api, 'voice-'], [humanApi, 'dictation-']]) {
@@ -412,7 +424,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
         const {attachments} = await owner.call('GET', 'attachments');
         for (const a of attachments) {
           if (u >= MAX_DELETES_PER_SWEEP) break;   // the human key is shared with the phone: never burn its rate limit on cleanup
-          if (a.name.startsWith(prefix) && now() - a.create_time * 1000 > (prefix === 'voice-' ? ttlMs : orphanTtlMs) && await owner.call('DELETE', 'attachments/' + a.id).then(() => true, () => false)) u++;
+          if (a.name.startsWith(prefix) && now() - a.create_time * 1000 > (prefix === 'voice-' ? ttlMs : orphanTtlMs) && humanMayClean(owner) && await owner.call('DELETE', 'attachments/' + a.id).then(() => true, () => false)) u++;
         }
       }
       if (n || u) console.log(`swept ${n} orphan messages and ${u} uploads`);
