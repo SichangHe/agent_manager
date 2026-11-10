@@ -123,3 +123,58 @@ export function inlineHtml(text) {
     .replace(/(^|[\s(])\*([^*\s][^*]*)\*/g, '$1<i>$2</i>')
     .replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
 }
+
+/* ---- Control words (shared by the client and the relay): matched by sound, not from a fixed list of spellings. ---- */
+
+/** A rough phonetic key: letters only, c/q/ck -> k, doubled letters collapsed, every vowel run -> "a" ("Cangaroo", "Canguro", "kanguru" all become "kangara"). */
+export function soundKey(word) {
+  return word.toLowerCase().replace(/[^a-z]/g, '').replace(/ck/g, 'k').replace(/[cq]/g, 'k').replace(/([a-z])\1+/g, '$1').replace(/[aeiouy]+/g, 'a');
+}
+function distance(a, b) {
+  let row = Array.from({length: b.length + 1}, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const next = [i];
+    for (let j = 1; j <= b.length; j++) next[j] = Math.min(row[j] + 1, next[j - 1] + 1, row[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    row = next;
+  }
+  return row[b.length];
+}
+/** Per control word: its key, the allowed edit distance on keys, and a sanity check on the heard key that keeps ordinary words ("Canada", "tension") out. */
+const CONTROL = {
+  kangaroo: {key: soundKey('kangaroo'), max: 2, ok: k => /^ka?n?g/.test(k) && k.includes('r') && k.length >= 5},
+  attention: {key: soundKey('attention'), max: 1, multi: 1, ok: (k, raw) => /^a/.test(raw) && /^a/.test(k) && k.includes('t') && k.includes('n') && k.length >= 6},
+};
+/** Whether the spoken words `parts` (1 to 3 adjacent words, e.g. "kanga" "roo") sound like the control word `name`. */
+export function soundsLike(name, parts) {
+  const c = CONTROL[name], raw = parts.join('').toLowerCase().replace(/[^a-z]/g, ''), k = soundKey(raw);
+  return !!c && c.ok(k, raw) && distance(k, c.key) <= (parts.length > 1 ? c.multi ?? 0 : c.max);   // split forms must match exactly, so "kangaroo is" stays text
+}
+/** How many trailing words of `words` form a control word (0 when none); tries 1, 2 and 3 words ("kanga roo", "can guru"). */
+function endCount(name, words) {
+  for (const k of [1, 2, 3]) if (words.length >= k && soundsLike(name, words.slice(-k))) return k;
+  return 0;
+}
+/** `words` without trailing control words (repeats too: "kangaroo kangaroo"); the number removed is `words.length - result.length`. */
+export function stripTrailingControl(words, name = 'kangaroo', extra = []) {
+  let n = words.length;
+  const flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
+  for (;;) {
+    const k = extra.includes(flat(words[n - 1] ?? '')) ? 1 : endCount(name, words.slice(0, n));
+    if (!k) break;
+    n -= k;
+  }
+  return words.slice(0, n);
+}
+/** Leading start word(s) removed: how many leading words of `words` are "attention" (also split, e.g. "a tension"). */
+export function leadingControlCount(name, words) {
+  let i = 0;
+  for (;;) {
+    let k = 0;
+    for (const m of [1, 2, 3]) if (i + m <= words.length && soundsLike(name, words.slice(i, i + m))) { k = m; break; }
+    if (!k) return i;
+    i += k;
+  }
+}
+
+/** Domain words for reply dictation (the speech model's context prompt): the assistant, model and tool names this household says a lot. */
+export const DOMAIN_PROMPT = 'Claude, Codex, Haiku, Sonnet, Opus, quota, Zulip, nvim, Neovim, agent, topic, GPU, GitHub, Anthropic, OpenAI';

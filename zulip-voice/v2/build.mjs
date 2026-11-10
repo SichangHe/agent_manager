@@ -19,6 +19,9 @@ let wasmJs = await readFile(nm('sherpa-onnx/sherpa-onnx-wasm-nodejs.js'), 'utf8'
 const rawFsGuard = 'if(!ENVIRONMENT_IS_NODE){throw new Error("NODERAWFS is currently only supported on Node.js environment.")}', rawFsLoop = 'for(var _key in NODERAWFS){FS[_key]=_wrapNodeError(NODERAWFS[_key])}';
 if (!wasmJs.includes(rawFsGuard) || !wasmJs.includes(rawFsLoop)) throw Error('sherpa-onnx wasm loader changed; the browser patch no longer applies');
 wasmJs = wasmJs.replace(rawFsGuard, '').replace(rawFsLoop, 'if(ENVIRONMENT_IS_NODE)' + rawFsLoop);
+const syncInit = 'wasmExports=createWasm();run();';
+if (!wasmJs.includes(syncInit)) throw Error('sherpa-onnx wasm loader changed; the async instantiate patch no longer applies');
+wasmJs = wasmJs.replace(syncInit, 'wasmExports=await createWasm();run();');   // the factory is an async function: awaiting lets the browser compile the module asynchronously (Chrome refuses a synchronous compile over 8 MB)
 const kwsBlobs = await Promise.all(kwsFiles.map(async ([, , url]) => readFile(url)));
 const kwsHash = createHash('sha1').update(wasmJs); for (const b of kwsBlobs) kwsHash.update(b);
 const kwsDir = 'kws-' + kwsHash.digest('hex').slice(0, 10);

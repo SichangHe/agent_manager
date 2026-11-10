@@ -6,6 +6,7 @@ import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
 import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
+import {stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
 import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
@@ -650,7 +651,7 @@ function transcribe(part, owner) {
   (async () => {
     let r;
     for (let attempt = 0; attempt < 12; attempt++) {
-      r = await voice.stt(part.blob);
+      r = await voice.stt(part.blob, DOMAIN_PROMPT);   // domain words bias reply dictation only; start-word clips keep their own prompt
       if (r.ok) break;
       log('stt', `clip attempt ${attempt + 1} failed: ${r.error}`);
       for (let waited = 0; waited < 20000 && events.info().state !== 'live'; waited += 500) await new Promise(res => setTimeout(res, 500));
@@ -747,14 +748,10 @@ function stripResumePhrase(text) {
   const words = text.trim().split(/\s+/).filter(Boolean), norm = words.map(w => normalize(w));
   const phrase = normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT));
   if (phrase === 'kangaroo' || phrase === 'over') {
-    const forms = phrase === 'over' ? ['over'] : ['kangaroo', 'kangaroos', 'kangeroo', 'kangaru', 'kangarew', 'kanguru'];
-    const endIdx = () => norm.length;
-    let n = endIdx();
+    let n = norm.length;
     if (phrase === 'over' && n >= 3 && norm[n - 1] === 'out' && norm[n - 2] === 'and' && norm[n - 3] === 'over') n -= 2;
-    const end = n;
-    const isForm = (i) => forms.includes(norm[i]);
-    while (n > 0 && (isForm(n - 1) || (phrase === 'kangaroo' && n >= 2 && norm[n - 2] + norm[n - 1] === 'kangaroo'))) n -= (phrase === 'kangaroo' && n >= 2 && norm[n - 2] + norm[n - 1] === 'kangaroo' && !isForm(n - 1)) ? 2 : 1;
-    return n < end ? words.slice(0, n).join(' ') : null;
+    const kept = phrase === 'over' ? (() => { let m = n; while (m > 0 && norm[m - 1] === 'over') m--; return m; })() : stripTrailingControl(words.slice(0, n), 'kangaroo').length;   // "kangaroo" is matched by sound (Cangaroo, Canguro, kanga roo ...)
+    return kept < norm.length ? words.slice(0, kept).join(' ') : null;
   }
   for (const q of [phrase]) {
     const k = q.split(' ').length;
@@ -781,6 +778,7 @@ function afterStartWord(text) {
   const word = startWord();
   const accepted = new Set([word, ...(START_ALIASES[word] ?? [])]);
   const words = text.trim().split(/\s+/).filter(Boolean);
+  if (word === 'attention') { const c = leadingControlCount('attention', words); if (c) return words.slice(c).join(' '); }
   const isStart = w => { const n = normalize(w); return n && (accepted.has(n) || editDistance(n, word) <= Math.floor(word.length / 4)); };
   if (!words.length || !isStart(words[0])) return null;
   let i = 0;
@@ -1041,11 +1039,16 @@ function finishVcReply() {
   resumeAfterPause();
   vcIdle();
 }
+async function loadKws(retry = true) {
+  const r = await kwsSpotter.load();
+  if (!r.ok && retry && voiceControl && store.get('voice2-kws', false)) { setTimeout(() => { if (voiceControl && store.get('voice2-kws', false) && !kwsSpotter.ready()) loadKws(false); }, 8000); }
+  if (!r.ok && voiceControl) { toast('On-device start word failed to load; using the server (slower)'); setTimeout(() => $('set-kws').checked = store.get('voice2-kws', false), 0); }
+}
 async function setVoiceControl(on) {
   voiceControl = on; voiceListening = on; store.set('voice2-vc', on);
   $('set-voice').checked = on; if (on) vcIdle(); else setVcState('off', 'off');
   if (!on) { recorder.listen(false); kwsSpotter.unload(); return; }
-  if (store.get('voice2-kws', false)) kwsSpotter.load();   // opt-in beta, lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
+  if (store.get('voice2-kws', false)) loadKws(); else log('kws', 'on-device start word is OFF in Settings: start words take the server path (slower)');   // opt-in beta, lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
   const r = await recorder.listen(true);
   if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
   if (!r.ok) { toast(r.error); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
@@ -1059,7 +1062,7 @@ $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.tri
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
 $('set-kws').checked = store.get('voice2-kws', false);
-$('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) kwsSpotter.load(); else if (!e.target.checked) kwsSpotter.unload(); };
+$('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) loadKws(); else if (!e.target.checked) kwsSpotter.unload(); };
 $('set-voice').onchange = e => setVoiceControl(e.target.checked);
 $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "kangaroo"' : 'Voice control off'); };
 function drawLevel(level) {
@@ -1257,8 +1260,10 @@ function debugStatus() {
   const info = events.info();
   return [
     `build ${BUILD}  ${new Date().toISOString()}`,
+    `ua: ${navigator.userAgent}`,
     `page: ${document.visibilityState}, navigator.onLine=${navigator.onLine}`,
     `events: ${info.state} queue=${info.queueId} lastOk=${info.lastOkAgoMs ?? '-'}ms fails=${info.failures} poll=${info.pollAgeMs ?? '-'}ms`,
+    `on-device start word: setting ${store.get('voice2-kws', false) ? 'on' : 'OFF'}, ${kwsSpotter.state().status}${kwsSpotter.state().detail ? ' (' + kwsSpotter.state().detail + ')' : ''}`,
     `voice: ${voiceState.text}; prepared=${voice.preparedCount()} pending=${voice.pendingCount()}`,
     `player: ${JSON.stringify(player.snapshot())}`,
     `api: ${zulip.callsLastMinute()} calls in the last minute${zulip.rateLimitedForMs() ? '; RATE LIMITED for ' + Math.ceil(zulip.rateLimitedForMs() / 1000) + 's' : ''}`,

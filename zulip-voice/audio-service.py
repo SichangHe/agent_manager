@@ -97,7 +97,7 @@ class Speech:
         self.qwen = AutoModelForMultimodalLM.from_pretrained(self.model, dtype=torch.bfloat16, device_map="cuda")
         self.transcribe_qwen3(np.zeros(16000, dtype=np.float32) + 1e-3, force=True)
 
-    def transcribe_qwen3(self, samples: np.ndarray, force: bool = False) -> tuple[str, float]:
+    def transcribe_qwen3(self, samples: np.ndarray, force: bool = False, prompt: str = "") -> tuple[str, float]:
         """Return `(text, mean token logprob)` of the VAD-trimmed speech; `("", -9.0)` when VAD finds none."""
         from faster_whisper.vad import VadOptions, collect_chunks, get_speech_timestamps
 
@@ -105,7 +105,7 @@ class Speech:
         if not stamps and not force:
             return "", -9.0
         speech = collect_chunks(samples, stamps)[0] if stamps else samples
-        inputs = self.processor.apply_transcription_request(audio=speech, language="English").to(self.qwen.device, self.qwen.dtype)
+        inputs = self.processor.apply_transcription_request(audio=speech, language="English", prompt=prompt or None).to(self.qwen.device, self.qwen.dtype)
         out = self.qwen.generate(**inputs, max_new_tokens=256, do_sample=False, output_scores=True, return_dict_in_generate=True)
         ids = out.sequences[:, inputs["input_ids"].shape[1]:]
         logprobs = self.qwen.compute_transition_scores(out.sequences, out.scores, normalize_logits=True)
@@ -188,7 +188,7 @@ class Speech:
         if not samples.size or samples.size > MAX_AUDIO_S * 16000:
             return "Record between a fraction of a second and two minutes."
         if self.engine == "qwen3":
-            text, avg_logprob = self.transcribe_qwen3(samples)
+            text, avg_logprob = self.transcribe_qwen3(samples, prompt=prompt)
             heard = self.spot(samples) if kws and self.kws else None
             return {"text": text, "no_speech_prob": 0.0 if text else 1.0, "avg_logprob": avg_logprob, "kws": heard}
         segments, _ = self.stt.transcribe(

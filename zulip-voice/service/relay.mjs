@@ -8,7 +8,7 @@ import {spawn} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {unlink} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
-import {speechPieces} from './text.mjs';
+import {speechPieces, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 
 const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
@@ -251,24 +251,18 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     result.audioURLExpiresAt = now() + 55000;
   }
 
-  /** Trailing end word ("kangaroo", with common mishearings; repeats allowed) removed from `text`. */
-  function stripEndWord(text) {
-    const words = text.trim().split(/\s+/).filter(Boolean), flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
-    const forms = new Set(['kangaroo', 'kangaroos', 'kangeroo', 'kangaru', 'kangarew', 'kanguru', 'over']);
-    let n = words.length;
-    while (n > 0 && (forms.has(flat(words[n - 1])) || (n >= 2 && flat(words[n - 2]) + flat(words[n - 1]) === 'kangaroo'))) n -= forms.has(flat(words[n - 1])) ? 1 : 2;
-    return words.slice(0, n).join(' ');
-  }
+  /** Trailing end word ("kangaroo", matched by sound; repeats allowed; also "over") removed from `text`. */
+  function stripEndWord(text) { return stripTrailingControl(text.trim().split(/\s+/).filter(Boolean), 'kangaroo', ['over']).join(' '); }
 
-  /** Leading start word(s) ("attention") removed: a clip recorded around the on-device detection still contains it. */
-  function stripStartWord(text) { return text.replace(/^\s*(?:attention\b[\s,.!?]*)+/i, ''); }
+  /** Leading start word(s) ("attention", matched by sound) removed: a clip recorded around the on-device detection still contains it. */
+  function stripStartWord(text) { const w = text.trim().split(/\s+/).filter(Boolean); return w.slice(leadingControlCount('attention', w)).join(' '); }
 
   /** `send`: joins the client's typed/transcribed text with the transcripts of its not-yet-transcribed clips, in order, and posts it to the topic as the human. */
   async function sendMessage(request, result) {
     if (!humanApi) throw Error('no human key on the server');
     const parts = await Promise.all(request.items.map(async item => {
       if (typeof item.text === 'string') return item.text;
-      const piece = {}; await transcribe({uri: item.uri}, piece); return piece.text ?? '';
+      const piece = {}; await transcribe({uri: item.uri, prompt: DOMAIN_PROMPT}, piece); return piece.text ?? '';
     }));
     const text = stripEndWord(stripStartWord(parts.map(p => p.trim()).filter(Boolean).join(' '))).trim();
     if (!text) { result.empty = true; return 'empty message, nothing posted'; }

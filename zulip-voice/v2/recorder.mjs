@@ -6,7 +6,7 @@
 const TARGET_HZ = 16000;
 const MAX_CLIP_S = 10;
 const PAUSE_MS = 700;
-const LISTEN_PAUSE_MS = 350;   // a start-word clip ends sooner: the command is one short word
+const LISTEN_PAUSE_MS = 250;   // a start-word clip ends sooner: the command is one short word
 const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
 const MIN_LEVEL = 0.008;     // lowered from 0.012 and the margin from 3x to 2.5x: a false trigger is harmless now (the start word gates everything)
