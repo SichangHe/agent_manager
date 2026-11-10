@@ -79,7 +79,7 @@ export function createVoice({zulip, cfg, log}) {
    * Sends a voice reply without waiting for transcripts: uploads clips not yet transcribed (in parallel) and asks the service to join the pieces and post them.
    * `sendId` makes retries idempotent. `items`: `{text}` for finished transcripts, `{blob}` for the rest.
    */
-  async function sendVoice({sendId, topic, items}) {
+  async function sendVoice({sendId, topic, streamId, items}) {
     await Promise.all(items.filter(i => i.blob && !i.uri).map(async i => {
       const form = new FormData(); form.append('file', i.blob, `dictation-${Date.now()}.wav`);
       const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
@@ -87,7 +87,7 @@ export function createVoice({zulip, cfg, log}) {
     }));
     if (items.some(i => i.blob && !i.uri)) return {ok: false, error: 'upload failed'};
     const wire = items.map(i => i.blob ? {uri: i.uri} : {text: i.text});
-    const r = await request('send', {topic, items: wire, attachment: wire.filter(i => i.uri).map(i => `[audio](${i.uri})`).join(' ')}, 90000, sendId);
+    const r = await request('send', {topic, ...(streamId ? {streamId} : {}), items: wire, attachment: wire.filter(i => i.uri).map(i => `[audio](${i.uri})`).join(' ')}, 90000, sendId);
     return r.ok ? {ok: true, messageId: r.result.messageId, empty: !!r.result.empty} : r;
   }
 

@@ -109,7 +109,8 @@ export function topicRow(topic, snippet, current, onPick) {
   const li = el('li');
   li.setAttribute('role', 'button');
   if (current) li.setAttribute('aria-current', 'true');
-  li.append(textEl('span', 'name', topic.name), textEl('span', 'snip', snippet));
+  const [chan, ...rest] = topic.name.split(' · ');   // "channel · topic" for channels other than AMH
+  li.append(textEl('span', 'name', rest.length ? rest.join(' · ') : topic.name), ...(rest.length ? [textEl('span', 'chan', chan)] : []), textEl('span', 'snip', snippet));
   if (topic.unread) li.append(textEl('span', 'badge', String(topic.unread)));
   li.onclick = onPick;
   return li;

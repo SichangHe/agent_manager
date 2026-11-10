@@ -69,7 +69,7 @@ export async function openClient({url, prefs = {}, browserName = process.env.BRO
     if (!sessionStorage.getItem('seeded')) {
       sessionStorage.setItem('seeded', '1');
       localStorage.setItem('zulip-voice-account', JSON.stringify(account));
-      for (const [k, v] of Object.entries(prefs)) localStorage.setItem(k, JSON.stringify(v));
+      for (const [k, v] of Object.entries({'voice2-channels': [], ...prefs})) localStorage.setItem(k, JSON.stringify(v));
     }
     if (mic) { // The only fake: microphone hardware. Plays the recorded WAV into getUserMedia.
       MediaDevices.prototype.getUserMedia = async function () {

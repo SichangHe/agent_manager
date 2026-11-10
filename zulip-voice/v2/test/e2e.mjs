@@ -666,7 +666,7 @@ scenarios.voiceControl = async () => {
     '/__reply.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first. Kangaroo.', gap(20000)),
     '/__phrase.wav': await seq(gap(9000), 'Attention.', gap(6000), 'Kangaroo.', gap(20000)),
     '/__split.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Kangaroo.', gap(20000)),
-    '/__next.wav': await seq(gap(9000), 'Attention. Next.', gap(8000)),
+    '/__next.wav': await seq(gap(9000), 'Attention. Katana. Next.', gap(8000)),
     '/__noise.wav': await seq(gap(9000), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
   const srv2 = await L.serve(undefined, files);
@@ -879,7 +879,7 @@ scenarios.agentSearch = async () => {
   await L.agentSays('vl_meeting_work', '[vl] V\n\nMeeting agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\nAlpha agent is here. It has a long enough message to play for a few seconds while we talk to it.');
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const sp = await L.speechWav('Attention. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const sp = await L.speechWav('Attention. Katana. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(16000), yes.subarray(yes.indexOf('data') + 8), gap(20000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sw.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sw.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
@@ -956,7 +956,7 @@ scenarios.voiceSwitchInSession = async () => {
   await L.agentSays('vl_meeting_work', '[vl] V\n\nMeeting agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const ws = await Promise.all(['Attention. Attention.', 'Switch agent to UI client.', 'Yes.'].map(t => L.speechWav(t))), pcm = w => w.subarray(w.indexOf('data') + 8), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention. Attention.', 'Katana. Switch agent to UI client.', 'Yes.'].map(t => L.speechWav(t))), pcm = w => w.subarray(w.indexOf('data') + 8), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(2000), pcm(ws[0]), gap(2500), pcm(ws[1]), gap(10000), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ss.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ss.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
@@ -969,7 +969,7 @@ scenarios.voiceSwitchInSession = async () => {
     await p.locator('#settings').tap(); await p.locator('#set-voice').check(); await p.keyboard.press('Escape');
     await L.waitFor(p, 'switched to uiclient_steer', () => window.__voice.current() === 'uiclient_steer', 60000);
     const log = await p.evaluate(() => window.__voice.log.text());
-    assert.match(log, /switch command inside an open session/);
+    assert.match(log, /vc +commands: switch/);
     assert.equal((await p.locator('#draft').inputValue()).trim(), '', 'command text not left in the draft');
   } finally { await c.close(); await srv2.close(); }
 };
@@ -1022,7 +1022,7 @@ scenarios.voiceNavigation = async () => {
   await L.wipeTasks();
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 14}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const a = await L.speechWav('Attention.'), b = await L.speechWav('Back back.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const a = await L.speechWav('Attention.'), b = await L.speechWav('Katana. Back back.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
   const data = Buffer.concat([gap(24000), pcm(a), gap(3000), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__nav.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__nav.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1071,7 +1071,7 @@ scenarios.noPlaybackWhileConfirming = async () => {
   await L.agentSays('uiclient_steer', '[uiclient_steer] U\n\nUI client agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 6}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const sp = await L.speechWav('Attention. Switch to UI client.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const sp = await L.speechWav('Attention. Katana. Switch to UI client.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), sp.subarray(at + 8), gap(40000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__cf.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__cf.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true, 'voice2-vc': true}});
@@ -1098,7 +1098,7 @@ scenarios.voiceSwitchRules = async ({srv}) => {
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
   const wavOf = async (...parts) => { const ws = await Promise.all(parts.filter(x => typeof x === 'string').map(t => L.speechWav(t))); let k = 0; const bufs = parts.map(x => typeof x === 'string' ? pcm(ws[k++]) : x), first = ws[0], at = first.indexOf('data'), head = Buffer.from(first.subarray(0, at + 8)), data = Buffer.concat(bufs); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
   const files = {
-    '/__plain.wav': await wavOf(gap(9000), 'Attention. Switch to the store and buy some milk.', gap(30000)),
+    '/__plain.wav': await wavOf(gap(9000), 'Attention. Katana. Switch to the store and buy some milk.', gap(30000)),
     '/__cancel.wav': await wavOf(gap(9000), 'Attention. Deploy it to staging now.', gap(2500), 'Cancel.', gap(30000)),
   };
   const srv2 = await L.serve(undefined, files);
@@ -1141,7 +1141,7 @@ scenarios.voiceYesAfterPause = async () => {
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Attention. Switch to terminal.', 'Attention.', 'Yes.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention. Katana. Switch to terminal.', 'Attention.', 'Yes.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(10000), pcm(ws[0]), gap(7000), pcm(ws[1]), gap(2500), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ya.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ya.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1152,7 +1152,8 @@ scenarios.voiceYesAfterPause = async () => {
     await L.waitFor(p, 'switched', () => window.__voice.current() === 'terminal_viz', 60000);
     await L.sleep(12000);   // no delayed "out of voice mode" chime or leftover session
     const log = await p.evaluate(() => window.__voice.log.text());
-    assert.doesNotMatch(log, /session opened by start word[^]*switched|empty session timed out/, 'no lingering session');
+    if (process.env.DUMP) console.log(log.split('\n').filter(l => / vc /.test(l)).join('\n'));
+    assert.doesNotMatch(log, /empty session timed out|command mode left/, 'no lingering session');
     assert.equal(await p.evaluate(() => document.querySelector('#listen').dataset.state), 'on', 'back to idle state');
   } finally { await c.close(); await srv2.close(); }
 };
@@ -1204,7 +1205,7 @@ scenarios.voiceSwitchBack = async () => {
   await L.wipeTasks();
   await L.agentSays('beta', '[beta] T\n\nThis is the beta agent.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
-  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), sp = await L.speechWav('Attention. Switch back.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), sp = await L.speechWav('Attention. Katana. Switch back.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(9000), sp.subarray(at + 8), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sb.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sb.wav', prefs: {'voice2-topic': 'alpha', 'voice2-prev': 'beta', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1243,7 +1244,7 @@ scenarios.voiceSwitchAbbrev = async () => {
   for (const t of ['human_mgr', 'terminal_viz', 'uiclient_steer', 'main_manager_agy']) await L.agentSays(t, `[${t}] T\n\nThis is ${t}.`);
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Attention. Switch to Human Manager.', 'Yes.', 'Attention. Switch to xyzzy.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Attention. Katana. Switch to Human Manager.', 'Yes.', 'Attention. Katana. Switch to xyzzy.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(9000), pcm(ws[0]), gap(14000), pcm(ws[1]), gap(12000), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ab.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ab.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1522,6 +1523,58 @@ scenarios.coalescedBundle = async ({srv}) => {
     const starts = (await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /audio +start /.test(l)).map(l => l.match(/start (\d+):(\d+)/).slice(1).join(':'));
     assert.deepEqual(starts.slice(0, 15), ids.flatMap(id => [0, 1, 2, 3, 4].map(i => `${id}:${i}`)), 'order ' + starts);
     return {bundles: ids2.length};
+  } finally { await c.close(); }
+};
+
+scenarios.commandModes = async ({srv}) => {
+  // INPUT mode -> command word -> COMMAND mode: a chained "next two, back one" runs both and never becomes text; the draft before the command word is kept.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 10}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Attention.', 'Remember the milk.', 'Katana.', 'Next two. Back one.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(14000), pcm(ws[0]), gap(2500), pcm(ws[1]), gap(2000), pcm(ws[2]), gap(2000), pcm(ws[3]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__modes.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__modes.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'command mode', () => /vc +command mode/.test(window.__voice.log.text()), 70000);
+    await L.waitFor(p, 'both commands', () => /navigate next x2/.test(window.__voice.log.text()) && /navigate previous x1/.test(window.__voice.log.text()), 30000);
+    const log = await p.evaluate(() => window.__voice.log.text());
+    assert.match(log, /commands: navigate, navigate/, 'two ticks');
+    const draft = (await p.locator('#draft').inputValue()).trim();
+    assert.match(draft, /remember the milk/i, 'text before the command word is the draft: ' + draft);
+    assert.doesNotMatch(draft, /next|back|kimono/i, 'commands are not text: ' + draft);
+  } finally { await c.close(); await srv2.close(); }
+};
+
+scenarios.multiChannel = async ({srv}) => {
+  // Topics of another subscribed channel appear in the one list with a channel label; reading, unread marking and replies use that channel.
+  await L.wipeTasks();
+  const subs = await L.human('GET', 'users/me/subscriptions'), extra = subs.subscriptions.find(x => x.name === 'vtest-extra').stream_id;
+  const post = (topic, content) => L.bot('POST', 'messages', {type: 'stream', to: extra, topic, content}).then(r => r.id);
+  const id = await post('news_item', '[news_item] N\n\nFirst news sentence here.\n\nSecond news sentence here.');
+  await L.agentSays('alpha', '[alpha] A\n\nAlpha agent is here.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-channels': [extra]}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'both channels listed', () => window.__voice.model.topics().some(t => t.name === 'vtest-extra · news_item') && window.__voice.model.topics().some(t => t.name === 'alpha'), 20000);
+    await L.waitFor(p, 'channel history cached', () => window.__voice.model.messages('vtest-extra · news_item').length > 0, 20000);
+    await p.locator('#find').tap();
+    await p.locator('#topics li', {hasText: 'news_item'}).tap();
+    await L.waitFor(p, 'switched', () => window.__voice.current() === 'vtest-extra · news_item', 10000);
+    await L.waitFor(p, 'news shown', () => document.querySelector('#feed').innerText.includes('First news sentence'), 10000).catch(async e => { console.log('FEED:', await p.evaluate(() => JSON.stringify(document.querySelector('#feed').innerText.slice(0, 100)) + ' || ' + window.__voice.current() + ' || ' + JSON.stringify(window.__voice.model.messages(window.__voice.current()).map(m => m.subject)))); throw e; });
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'playing', () => window.__voice.player.snapshot().status === 'playing', 30000);
+    const reply = 'Thanks for the news ' + Date.now();
+    await p.locator('#draft').fill(reply);
+    await p.locator('#send').tap();
+    let msgs = [];
+    for (let i = 0; i < 10 && !msgs.length; i++) { await L.sleep(1000); msgs = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: extra}, {operator: 'topic', operand: 'news_item'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId && m.content === reply); }
+    assert.equal(msgs.length, 1, 'reply posted to the other channel');
+    for (const m of (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: extra}], anchor: 'newest', num_before: 50, num_after: 0, apply_markdown: false})).messages) await L.zulipAs(m.sender_id === L.account.botId ? 'bot' : 'human')('DELETE', 'messages/' + m.id).catch(() => {});
+    return {id};
   } finally { await c.close(); }
 };
 

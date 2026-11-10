@@ -156,3 +156,5 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pr
 #tap-flash { position: absolute; left: 50%; top: 45%; transform: translate(-50%, -50%) scale(.8); font-size: 44px; opacity: 0; pointer-events: none; z-index: 8; background: color-mix(in srgb, var(--bg) 80%, transparent); border-radius: 50%; width: 90px; height: 90px; display: grid; place-items: center; }
 #tap-flash.show { animation: flash .7s ease-out; }
 @keyframes flash { 0% { opacity: .95; transform: translate(-50%, -50%) scale(.8); } 100% { opacity: 0; transform: translate(-50%, -50%) scale(1.15); } }
+#listen[data-state='command'] { background: var(--warn); color: #000; }
+#topics .chan { font-size: 11px; color: var(--muted, #888); border: 1px solid var(--line); border-radius: 8px; padding: 1px 6px; margin-left: 6px; white-space: nowrap; }

@@ -6,7 +6,7 @@ import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
 import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
-import {soundsLike, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
+import {soundsLikeWord, soundsLike, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
 import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
@@ -111,8 +111,21 @@ const locals = new Map();
 const els = new Map();
 const feed = $('feed');
 
+// ---- channels: AMH plus the other subscribed channels the user includes (Settings). A non-AMH topic's key is "channel · topic". ----
+const channelNames = new Map(Object.entries(store.get('voice2-subs', {})).map(([id, n]) => [Number(id), n]));   // stream id -> name, from the subscriptions (cached)
+const keyInfo = new Map();   // topic key -> {streamId, topic}
+const isOurChannel = id => id !== cfg.streamId && id !== cfg.relayStreamId && channelNames.has(id) && includedChannels().includes(id);
+/** Subscribed channels offered by default: everything except AMH, the relay and test channels. */
+const mutedChannels = new Set(store.get('voice2-muted-subs', []));
+const defaultChannels = () => [...channelNames].filter(([id, n]) => !mutedChannels.has(id) && id !== cfg.streamId && id !== cfg.relayStreamId && !/^(voice-|vtest)/i.test(n)).map(([id]) => id);
+const includedChannels = () => store.get('voice2-channels', null) ?? defaultChannels();   // no UI: only tests pin it   // every subscribed, non-muted channel except the relay and test ones: all topics in one recency-sorted list
+const keyFor = (streamId, topic) => { if (streamId === cfg.streamId) return topic; const key = `${channelNames.get(streamId)} · ${topic}`; keyInfo.set(key, {streamId, topic}); return key; };
+/** A message with its topic replaced by the key (the model, caches and the UI only know keys). */
+const ing = m => m.stream_id === cfg.streamId || m.t0 !== undefined ? m : {...m, t0: m.subject, subject: keyFor(m.stream_id, m.subject)};
+const streamOf = key => keyInfo.get(key)?.streamId ?? cfg.streamId, topicOf = key => keyInfo.get(key)?.topic ?? key;
+
 const cache = store.get('voice2-cache', null);
-if (cache) { model.restore(cache); current ??= cache.current; }
+if (cache) { for (const list of Object.values(cache.msgs ?? {})) for (const m of list) if (m.t0 !== undefined) keyInfo.set(m.subject, {streamId: m.stream_id, topic: m.t0}); model.restore(cache); current ??= cache.current; }
 
 const player = createPlayer({
   log, voice,
@@ -214,13 +227,13 @@ function renderUnread() {
 }
 
 // ---- data loading ----
-const topicQuery = topic => [{operator: 'stream', operand: cfg.streamId}, {operator: 'topic', operand: topic}];
+const topicQuery = key => [{operator: 'stream', operand: streamOf(key)}, {operator: 'topic', operand: topicOf(key)}];
 
 /** Loads recent messages of `topic`; returns the newly seen ones. */
 async function loadTopic(topic) {
   const r = await zulip.call('GET', 'messages', {narrow: topicQuery(topic), anchor: 'newest', num_before: 40, num_after: 0, apply_markdown: false});
   if (!r.ok) return [];
-  const fresh = r.data.messages.filter(m => model.add(m));
+  const fresh = r.data.messages.map(ing).filter(m => model.add(m));
   model.markLoaded(topic);
   if (topic === current) { if (fresh.length === r.data.messages.length) hasEarlier = !r.data.found_oldest; for (const m of fresh) appendMessage(m); }
   return fresh;
@@ -230,7 +243,7 @@ async function loadEarlier() {
   const oldest = model.messages(current)[0];
   const r = await zulip.call('GET', 'messages', {narrow: topicQuery(current), anchor: oldest?.id ?? 'newest', num_before: 40, num_after: 0, include_anchor: false, apply_markdown: false});
   if (!r.ok) return toast(r.error);
-  for (const m of r.data.messages) model.add(m);
+  for (const m of r.data.messages) model.add(ing(m));
   hasEarlier = !r.data.found_oldest;
   const before = feed.scrollHeight - feed.scrollTop;
   renderFeed();
@@ -241,17 +254,37 @@ async function loadEarlier() {
 async function loadRecent() {
   const r = await zulip.call('GET', 'messages', {narrow: [{operator: 'stream', operand: cfg.streamId}], anchor: 'newest', num_before: 800, num_after: 0, apply_markdown: false});   // one call buckets every topic, so a switch never waits for the network
   if (r.ok) for (const m of r.data.messages) model.add(m);
+  for (const id of includedChannels()) {   // one call per extra channel buckets all its topics
+    if (!channelNames.has(id)) continue;
+    const x = await zulip.call('GET', 'messages', {narrow: [{operator: 'stream', operand: id}], anchor: 'newest', num_before: 300, num_after: 0, apply_markdown: false});
+    if (x.ok) for (const m of x.data.messages) model.add(ing(m));
+  }
 }
 
+async function loadChannels() {
+  const r = await zulip.call('GET', 'users/me/subscriptions');
+  if (!r.ok) return;
+  channelNames.clear();
+  mutedChannels.clear();
+  for (const sub of r.data.subscriptions) { channelNames.set(sub.stream_id, sub.name); if (sub.is_muted) mutedChannels.add(sub.stream_id); }
+  store.set('voice2-subs', Object.fromEntries(channelNames)); store.set('voice2-muted-subs', [...mutedChannels]);
+}
 async function loadTopics(unreadByTopic) {
   const r = await zulip.call('GET', `users/me/${cfg.streamId}/topics`);
-  if (r.ok) model.setTopics(r.data.topics, unreadByTopic ?? new Map(model.topics().map(t => [t.name, t.unread])));
+  const list = r.ok ? [...r.data.topics] : [];
+  for (const id of includedChannels()) {
+    if (!channelNames.has(id)) continue;
+    const x = await zulip.call('GET', `users/me/${id}/topics`);
+    if (x.ok) for (const t of x.data.topics) list.push({name: keyFor(id, t.name), max_id: t.max_id});
+  }
+  if (r.ok) model.setTopics(list, unreadByTopic ?? new Map(model.topics().map(t => [t.name, t.unread])));
 }
 
 async function onInit(state, isResync) {
   if (cfg.relayStreamId) voice.backfill();
   const unread = new Map();
-  for (const s of state.unread_msgs?.streams ?? []) if (s.stream_id === cfg.streamId) unread.set(s.topic, s.unread_message_ids.length);
+  await loadChannels();
+  for (const s of state.unread_msgs?.streams ?? []) if (s.stream_id === cfg.streamId || isOurChannel(s.stream_id)) unread.set(keyFor(s.stream_id, s.topic), s.unread_message_ids.length);
   const topicsLoaded = loadTopics(unread);
   if (!current) { await topicsLoaded; current = model.topics()[0]?.name ?? null; }
   if (current) {
@@ -286,7 +319,7 @@ function onEvent(event) {
   if (event.type === 'message') {
     const m = event.message;
     voice.onMessage(m);
-    if (m.type === 'stream' && m.stream_id === cfg.streamId) onTaskMessage(m);
+    if (m.type === 'stream' && (m.stream_id === cfg.streamId || isOurChannel(m.stream_id))) onTaskMessage(ing(m));
   } else if (event.type === 'update_message_flags' && event.flag === 'read' && event.op === 'add') {
     model.markRead(event.messages);
     renderUnread();
@@ -637,9 +670,9 @@ async function startDictation() {
   maybeFinish();
 }
 
-function onClip(blob) {
+function onClip(blob, meta = {}) {
   if (!dict || dict.cancelled) return;
-  const part = {state: 'pending', text: '', blob};
+  const part = {state: 'pending', text: '', blob, speechMs: meta.speechMs};
   dict.parts.push(part);
   transcribe(part, dict);
   syncDictation();
@@ -651,7 +684,7 @@ function transcribe(part, owner) {
   (async () => {
     let r;
     for (let attempt = 0; attempt < 12; attempt++) {
-      r = await voice.stt(part.blob, DOMAIN_PROMPT);   // domain words bias reply dictation only; start-word clips keep their own prompt
+      r = await voice.stt(part.blob, (part.speechMs ?? 9e9) >= 1500 ? DOMAIN_PROMPT : undefined);   // domain words bias reply dictation only; start-word clips keep their own prompt
       if (r.ok) break;
       log('stt', `clip attempt ${attempt + 1} failed: ${r.error}`);
       for (let waited = 0; waited < 20000 && events.info().state !== 'live'; waited += 500) await new Promise(res => setTimeout(res, 500));
@@ -726,6 +759,10 @@ function onKwsHit(word) {
     if (!lat.has('sw')) lat.begin('sw', 'startword');
     lat.stage('sw', 'kws-local');
     openSession('');
+  } else if (word === 'KATANA' && vc && vc.mode !== 'command' && commandWord() === 'katana') {
+    enterCommandMode('');
+  } else if (word === 'KANGAROO' && vc?.mode === 'command') {
+    leaveCommandMode('end word on device');
   } else if (word === 'KANGAROO' && vc && normalize(store.get('voice2-resume-phrase', RESUME_DEFAULT)) === 'kangaroo') {
     sendVoiceReplyNow('end word on device');
   }
@@ -825,7 +862,7 @@ async function handleCommandClip(blob, meta) {
   const listening = !!vc || (!!pendingChoice && Date.now() < pendingChoice.until);
   // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
   sttInFlight++;
-  const r = await voice.stt(blob, vc ? DOMAIN_PROMPT : undefined, !listening)   // never a prompt that names the control words: the model echoes it back on noise.finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
+  const r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening)   // never a prompt that names the control words: the model echoes it back on noise.finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
   if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
     log('vc', `stt failed: ${r.error}`);
     if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute("Connection lost. Keep talking; I'll send when it's back."); }
@@ -858,7 +895,7 @@ async function handleCommandClip(blob, meta) {
     if (kwsOn && !r.kws.includes('ATTENTION')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear the start word)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     let rest = afterStartWord(heard);
     // Whisper sometimes drops the leading start word but keeps the command after it: with a spotter hit, a bare command still counts.
-    const commandLike = t => { const n = normalize(t); return SWITCH_RE.test(n) || SWITCH_BACK_RE.test(n) || !!navCommand(n) || CANCEL_RE.test(n) || n === 'send'; };
+    const commandLike = t => { const n = normalize(t); return CANCEL_RE.test(n) || n === 'send'; };   // commands live in command mode, behind the command word
     if (kwsOn && rest === null && commandLike(heard)) rest = heard;
     if (kwsOn && rest !== null && afterStartWord(heard) === null && !commandLike(heard)) { log('vc', `ignored: "${heard}" (transcript is not the start word)`); rest = null; resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS && commandLike(heard)) rest = heard;   // a command right after a send is still a command, never reply text
@@ -868,31 +905,68 @@ async function handleCommandClip(blob, meta) {
     openSession(rest);
     return;
   }
-  const body = normalize(afterStartWord(heard) ?? heard);   // a clip that begins with the start word (the on-device spotter already opened the session) still holds the command after it
-  const nav = navCommand(body);   // inside an open reply, navigation words alone are a command, not reply text
-  if (nav) {
-    clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
-    const keep = vc.text.trim();
-    if (!keep) draftEl.value = vc.base; else log('vc', 'reply kept as a draft, not sent');
-    autosize(); saveDraft();
-    vc = null; recorder.setReplyMode(false);
-    if (keep) recorder.beep('done');
-    navigate(nav); vcIdle();
-    return;
+  const body = normalize(afterStartWord(heard) ?? heard);   // a clip that begins with the start word (the on-device spotter already opened the session) still holds what follows it
+  if (vc.mode === 'command') {   // COMMAND mode: the closed list only; the end word returns to input, cancel discards
+    const words = body.split(' ').filter(Boolean);
+    if (stripResumePhrase(body) !== null && !words.some(w => CANCEL_RE.test(w))) { leaveCommandMode('end word'); return; }
+    runCommands(body); return;
   }
-  if (SWITCH_BACK_RE.test(body)) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; recorder.setReplyMode(false); bargePaused = false; switchBack(); vcIdle(); return; }
-  const sw = body.match(SWITCH_RE);   // inside an open reply, a whole utterance "switch agent to X" is a command, not reply text
   if (CANCEL_RE.test(body)) { cancelSession(); return; }   // discards this reply and carries on
-  if (sw) {
-    clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
-    log('vc', 'switch command inside an open session');
-    draftEl.value = vc.base; autosize();
-    vc = null; recorder.setReplyMode(false);
-    voiceSwitch(sw[1]); vcIdle();
-    return;
-  }
   addToSession(heard);
 }
+// ---- Command mode: start word -> INPUT mode (dictation) -> command word -> COMMAND mode (a closed list, chainable, never text) ----
+const CMD_DEFAULT = 'katana', COMMAND_SILENCE_MS = 4000;
+const commandWord = () => normalize(store.get('voice2-cmd-word', CMD_DEFAULT)) || CMD_DEFAULT;
+const isCommandWord = w => { const n = normalize(w); return !!n && (n === commandWord() || soundsLikeWord(commandWord(), [n])); };
+/** Index of the first command word in `words`, or -1. */
+const commandWordAt = words => words.findIndex(isCommandWord);
+function enterCommandMode(rest) {
+  if (!vc) return;
+  clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
+  const first = vc.mode !== 'command';
+  vc.mode = 'command';
+  if (first) { recorder.beep('command'); log('vc', 'command mode'); }
+  setVcState('command', 'command mode');
+  toast('Command mode: ' + 'back, next, switch to…, cancel');
+  armCommandTimer();
+  if (rest) runCommands(rest);
+}
+function armCommandTimer() { clearTimeout(vc.timer); vc.timer = setTimeout(() => leaveCommandMode('silence'), COMMAND_SILENCE_MS); }
+/** Back to INPUT mode with the draft kept. */
+function leaveCommandMode(why) {
+  if (!vc || vc.mode !== 'command') return;
+  clearTimeout(vc.timer); vc.mode = 'input'; log('vc', `command mode left (${why}); back to input`);
+  recorder.beep('ready'); setVcState('dictating', 'say your reply');
+  armSessionTimer();
+}
+/** Words after the command word, executed in order: "next three back one switch to human manager". Unknown words are ignored; nothing here becomes text. */
+function runCommands(text) {
+  let tokens = normalize(text).split(' ').filter(Boolean).filter(t => !isCommandWord(t));
+  const done = [];
+  const tick = name => { done.push(name); recorder.beep('tick'); };
+  let navigated = false, left = false;
+  const finishSession = (discard = false) => { if (!vc) return; clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = discard ? vc.base : vc.base + (vc.text ? (vc.base ? ' ' : '') + vc.text : ''); autosize(); saveDraft(); vc = null; recorder.setReplyMode(false); };
+  while (tokens.length && vc) {
+    const t = tokens[0], two = tokens.slice(0, 2).join(' ');
+    if (SWITCH_BACK_RE.test(tokens.slice(0, 3).join(' ')) || SWITCH_BACK_RE.test(two)) { tokens.splice(0, SWITCH_BACK_RE.test(two) ? 2 : 3); log('vc', 'switch back to the previous agent'); tick('switch back'); finishSession(true); bargePaused = false; switchBack(); left = true; break; }
+    if (/^(switch|go)$/.test(t) && /^(to|agent|agents)$/.test(tokens[1] ?? '')) {   // the name is free-form: it takes the rest of the utterance and ends the chain
+      const name = tokens.slice(/^(agent|agents)$/.test(tokens[1]) && tokens[2] === 'to' ? 3 : 2).join(' ');
+      tick('switch'); finishSession(true); recorder.setReplyMode(false); voiceSwitch(name); left = true; break;
+    }
+    if (CANCEL_RE.test(tokens.slice(0, 2).join(' ')) || CANCEL_RE.test(t)) { cancelSession(); return done; }
+    const navTokens = []; let used = 0;   // longest prefix that is one navigation command ("next three", "previous message", "back")
+    for (const take of [3, 2, 1]) { const nav = navCommand(tokens.slice(0, take).join(' ')); if (nav) { used = take; navTokens.push(nav); break; } }
+    if (used) { tokens.splice(0, used); navigate(navTokens[0], true); tick('navigate'); navigated = true; continue; }
+    if (/^(stop|pause|wait)$/.test(t)) { tokens.shift(); player.pause(); tick('pause'); continue; }
+    if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play'); navigated = true; resumeAfterPause(); continue; }
+    log('vc', `command mode ignored "${t}"`); tokens.shift();
+  }
+  if (done.length) log('vc', `commands: ${done.join(', ')}`);
+  if (navigated && vc && !left) { finishSession(); vcIdle(); left = true; }
+  if (vc && !left) armCommandTimer();
+  return done;
+}
+
 /**
  * A whole utterance that is only navigation: "back", "previous", "back back", "previous message", "next", "again".
  * `{dir: -1|0|1, whole, count}` (dir 0 = replay the current chunk), or null.
@@ -901,7 +975,7 @@ function navCommand(words) {
   const tokens = words.split(' ').filter(Boolean);
   const whole = tokens.includes('message') || tokens.includes('messages');
   const rest = tokens.filter(t => t !== 'message' && t !== 'messages');
-  const NUMBERS = {one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10};
+  const NUMBERS = {to: 2, too: 2, won: 1, for: 4, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, '1': 1, '2': 2, '3': 3, '4': 4, '5': 5, '6': 6, '7': 7, '8': 8, '9': 9, '10': 10};
   const n = NUMBERS[rest.at(-1)];
   if (rest.length === 2 && n && !NUMBERS[rest[0]]) {   // "next three", "skip five", "back two"
     const d = ['back', 'previous', 'last'].includes(rest[0]) ? -1 : ['next', 'skip', 'forward'].includes(rest[0]) ? 1 : null;
@@ -958,12 +1032,7 @@ function openSession(rest) {
   recorder.setReplyMode(true); recorder.beep('ready');
   log('vc', `session opened by start word; rest "${rest}"`);
   const words = normalize(rest);
-  if (SWITCH_BACK_RE.test(words)) { log('vc', 'switch back to the previous agent'); vc = null; recorder.setReplyMode(false); bargePaused = false; switchBack(); vcIdle(); return; }
-  const sw = words.match(SWITCH_RE);
-  if (sw) { vc = null; recorder.setReplyMode(false); voiceSwitch(sw[1]); vcIdle(); return; }   // a switch phrase is never sent as a reply
   if (CANCEL_RE.test(words)) { log('vc', 'cancel right after the start word'); vc = null; recorder.setReplyMode(false); recorder.beep('cancel'); resumeAfterPause(); vcIdle(); return; }
-  const nav = navCommand(words);
-  if (nav) { vc = null; recorder.setReplyMode(false); navigate(nav); vcIdle(); return; }
   if (rest) addToSession(rest);
   else { setVcState('dictating', 'say your reply'); vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS); }
 }
@@ -982,6 +1051,8 @@ function cancelSession() {
 }
 const withoutStrayEndWords = t => removeControlWords(t.split(/\s+/).filter(Boolean)).join(' ');   // "Kangaroo." said mid-reply is a command, never text
 function addToSession(heard) {
+  { const words = (afterStartWord(heard) ?? heard).split(/\s+/).filter(Boolean), at = commandWordAt(words);   // the command word switches to COMMAND mode: what follows it is commands, what precedes it is reply text
+    if (at >= 0 && vc) { const before = words.slice(0, at).join(' '); if (before) { vc.text = [vc.text, withoutStrayEndWords(before)].filter(Boolean).join(' '); draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize(); } enterCommandMode(words.slice(at + 1).join(' ')); return; } }
   if (endsWithCancel(heard)) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
   clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
   if (stripResumePhrase(heard) !== null && !vc.sending) { vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' '); draftEl.value = [vc.base.trim(), vc.text].filter(Boolean).join(' '); autosize(); sendVoiceReplyNow('end word in the transcript'); return; }   // no quiet window
@@ -1075,6 +1146,8 @@ async function setVoiceControl(on) {
 $('set-phrase').value = store.get('voice2-resume-phrase', RESUME_DEFAULT);
 $('set-phrase').onchange = e => store.set('voice2-resume-phrase', e.target.value.trim() || RESUME_DEFAULT);
 $('set-start').value = store.get('voice2-start-word', START_DEFAULT);
+$('set-cmd').value = store.get('voice2-cmd-word', CMD_DEFAULT);
+$('set-cmd').onchange = e => store.set('voice2-cmd-word', e.target.value.trim().toLowerCase() || CMD_DEFAULT);
 $('set-start').onchange = e => store.set('voice2-start-word', e.target.value.trim().toLowerCase() || START_DEFAULT);
 $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
 $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
@@ -1155,14 +1228,14 @@ async function deliver(l) {
       if (found.ok && found.data.messages.some(m => m.sender_id === cfg.humanId && m.content === l.text && m.timestamp * 1000 > l.sentAtMs - 5000)) { log('send', 'uncertain send was delivered'); removeLocal(l); for (const m of found.data.messages) if (model.add(m) && l.topic === current) appendMessage(m); return; }
     }
     if (l.items) {   // a voice reply: the service joins the transcripts and posts it, so nothing here waits for text
-      const v = await voice.sendVoice({sendId: l.sendId, topic: l.topic, items: l.items});
+      const v = await voice.sendVoice({sendId: l.sendId, topic: topicOf(l.topic), streamId: streamOf(l.topic), items: l.items});
       if (v.ok) { lat.finish('send:' + l.localId, 'server-posted'); l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) toast('Nothing was recognised in that recording'); return; }
       l.attempts = (l.attempts ?? 0) + 1;
       if (l.attempts <= 12) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
       else { l.state = 'failed'; refreshLocal(l); toast(v.error); }
       return;
     }
-    const r = await zulip.call('POST', 'messages', {type: 'stream', to: cfg.streamId, topic: l.topic, content: l.text, queue_id: events.queueId() ?? '', local_id: l.localId});
+    const r = await zulip.call('POST', 'messages', {type: 'stream', to: streamOf(l.topic), topic: topicOf(l.topic), content: l.text, queue_id: events.queueId() ?? '', local_id: l.localId});
     if (r.ok) { lat.stage('send:' + l.localId, 'post'); l.state = 'sent'; l.sentId = r.data.id; saveOutbox(); setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
     l.uncertain = r.uncertain;
     l.attempts = (l.attempts ?? 0) + 1;

@@ -4,7 +4,7 @@
  * The detector hears the microphone directly, so a start word pauses playback with no upload and no server round trip.
  */
 const KWS_BASE = './kws/';   // build.mjs rewrites this to the hashed asset directory
-const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁K A NG AR O O @KANGAROO';
+const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁K A NG AR O O @KANGAROO\n▁K AT AN A @KATANA';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
 const THRESHOLD = 0.25;   // tuned in research-kws: 41/42 clips, no false hit in 35 minutes of agent speech
 
 const loadScript = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });

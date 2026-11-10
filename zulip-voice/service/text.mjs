@@ -181,3 +181,9 @@ export const DOMAIN_PROMPT = 'Claude, Codex, Haiku, Sonnet, Opus, quota, Zulip, 
 
 /** `words` without any word that sounds like the end word, wherever it stands: a stray "Kangaroo." in the middle of a dictation is never content. */
 export function removeControlWords(words, name = 'kangaroo') { return words.filter(w => !soundsLike(name, [w])); }
+
+/** Whether the spoken words `parts` sound like an arbitrary configured keyword (single words: one edit on the sound key; split forms: exact key). */
+export function soundsLikeWord(word, parts) {
+  const target = soundKey(word), k = soundKey(parts.join(''));
+  return target.length >= 3 && k.length >= 3 && distance(k, target) <= (parts.length > 1 ? 0 : target.length >= 5 ? 1 : 0);
+}

@@ -198,7 +198,7 @@ function createPool(limit) {
   return {add(priority, fn) { waiting.push({priority, fn, seq: seq++}); pump(); }, stats: () => ({running, waiting: waiting.length})};
 }
 
-export async function createRelay({api, humanId, botId, streamId, taskStreamId = 0, stateDir, workers = {stt: 'http://127.0.0.1:8771', tts: 'http://127.0.0.1:8770'}, fetchImpl = fetch, now = Date.now, ttlMs = 30 * 86400000, maxActive = 200, maxUploadBytes = 100 * 1024 * 1024, humanApi = null, orphanTtlMs = 120000}) {
+export async function createRelay({api, humanId, botId, streamId, taskStreamId = 0, extraStreamIds = [], stateDir, workers = {stt: 'http://127.0.0.1:8771', tts: 'http://127.0.0.1:8770'}, fetchImpl = fetch, now = Date.now, ttlMs = 30 * 86400000, maxActive = 200, maxUploadBytes = 100 * 1024 * 1024, humanApi = null, orphanTtlMs = 120000}) {
   if (!Number.isSafeInteger(streamId) || streamId <= 0) throw Error('Relay channel required');
   await mkdir(stateDir, {recursive: true, mode: 0o700});
   const statePath = resolve(stateDir, 'requests.json');
@@ -231,7 +231,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     if (typeof data.text !== 'string') throw Error('Invalid transcript');
     sttSamples.push(now() - t);
     const flat = t => t.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-    if (request.prompt && flat(data.text) && flat(data.text).includes(flat(request.prompt))) data.text = '';   // the model echoed its prompt back: that is noise
+    if (request.prompt && flat(data.text) && (flat(data.text).includes(flat(request.prompt)) || (flat(data.text).split(' ').length >= 2 && flat(data.text).split(' ').every(w => flat(request.prompt).split(' ').includes(w))))) data.text = '';   // the model echoed its prompt back: that is noise
     result.text = data.text;
     result.kws = data.kws;
     result.noSpeechProb = data.no_speech_prob;
@@ -295,7 +295,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     if (!text) await settled;   // nothing to post yet: wait for the first text
     const first = compose();
     if (!first) { result.empty = true; return 'empty message, nothing posted'; }
-    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: taskStreamId, topic: request.topic, content: first});
+    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: [taskStreamId, ...extraStreamIds].includes(request.streamId) ? request.streamId : taskStreamId, topic: request.topic, content: first});
     result.messageId = sent.id; result.text = first;
     if (timedOut) settled.then(async () => { const full = compose(); if (full && full !== first) await humanApi.call('PATCH', 'messages/' + sent.id, {content: full}).then(() => console.log(`send ${request.id}: late clips added by edit`), error => console.log('late edit failed: ' + error.message)); });
     const parts = texts;
@@ -419,10 +419,10 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
      * costs 2 bundles instead of 2N (3 Zulip calls per bundle: upload, temporary URL, result post).
      */
     async prepare(message, taskStreamId) {
-      if (message.type !== 'stream' || message.stream_id !== taskStreamId || message.sender_id !== botId) return;
+      if (message.type !== 'stream' || ![taskStreamId, ...extraStreamIds].includes(message.stream_id) || message.sender_id !== botId) return;
       const pieces = speechPieces(message.content);
       if (!pieces.length) return;
-      const topic = message.subject;
+      const topic = message.stream_id + ':' + message.subject;
       let burst = bursts.get(topic);
       if (!burst && pieces.length <= SHORT_MESSAGE_CHUNKS) {   // short: one bundle, no separate head (saves 3 Zulip calls; rendering it whole is already quick)
         await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}_0`, op: 'tts', texts: pieces, proactive: true, messageId: message.id, firstIdx: 0})});
@@ -538,17 +538,30 @@ export async function run(env = process.env) {
   if (!me.is_bot || me.user_id === humanId) throw Error('Expected separate bot identity');
   const streamId = Number(env.VOICE_RELAY_STREAM_ID);
   const taskStreamId = Number(env.VOICE_TASK_STREAM_ID);
+  const extraStreamIds = (env.VOICE_EXTRA_STREAM_IDS || '').split(',').map(Number).filter(Boolean);   // more channels whose agent messages are pre-rendered: the human's subscribed, non-muted channels (refreshed below)
+  async function refreshChannels() {
+    if (env.VOICE_EXTRA_STREAM_IDS || !humanApi) return;
+    const subs = await humanApi.call('GET', 'users/me/subscriptions');
+    const ids = subs.subscriptions.filter(x => !x.is_muted && x.stream_id !== taskStreamId && x.stream_id !== streamId && !/^(voice-|vtest)/i.test(x.name)).map(x => x.stream_id);
+    extraStreamIds.splice(0, extraStreamIds.length, ...ids);
+    console.log(`extra channels: ${ids.join(', ') || 'none'}`);
+  }
   const humanApi = await readHumanApi(env);
   console.log(humanApi ? 'human key loaded: orphan sweep covers client requests and recordings' : 'NO human key: client-owned messages and uploads are not swept');
-  const relay = await createRelay({api, humanId, botId: me.user_id, streamId, taskStreamId, stateDir: env.VOICE_RELAY_STATE, humanApi, ttlMs: 1000 * Number(env.VOICE_PROACTIVE_TTL_S || 6 * 3600), orphanTtlMs: 1000 * Number(env.VOICE_ORPHAN_TTL_S || 120), maxUploadBytes: 1048576 * Number(env.VOICE_MAX_UPLOAD_MB || 150)});
+  const relay = await createRelay({api, humanId, botId: me.user_id, streamId, taskStreamId, extraStreamIds, stateDir: env.VOICE_RELAY_STATE, humanApi, ttlMs: 1000 * Number(env.VOICE_PROACTIVE_TTL_S || 6 * 3600), orphanTtlMs: 1000 * Number(env.VOICE_ORPHAN_TTL_S || 120), maxUploadBytes: 1048576 * Number(env.VOICE_MAX_UPLOAD_MB || 150)});
+  await refreshChannels().catch(error => console.log('channel list failed: ' + error.message));
   const stats = {events: 0, errors: 0};
   let queue = null, backoffMs = 1000;
   const guard = (what, promise) => promise.catch(error => console.log(`${what} failed: ${error.message}`));
   /** Pre-renders every unread agent message (also the backlog after a restart); one listing call. */
   async function renderUnread() {
     if (!humanApi) return;
-    const r = await humanApi.call('GET', 'messages', {narrow: [{operator: 'stream', operand: taskStreamId}, {operator: 'is', operand: 'unread'}], anchor: 'newest', num_before: 100, num_after: 0, apply_markdown: false});
-    const mine = (r.messages ?? []).filter(m => m.sender_id === me.user_id);
+    await refreshChannels().catch(() => {});
+    const mine = [];
+    for (const [i, id] of [taskStreamId, ...extraStreamIds].entries()) {   // one listing per channel; the extra channels are news-like, so only their newest 20 unread are rendered ahead
+      const r = await humanApi.call('GET', 'messages', {narrow: [{operator: 'stream', operand: id}, {operator: 'is', operand: 'unread'}], anchor: 'newest', num_before: i === 0 ? 100 : 20, num_after: 0, apply_markdown: false});
+      mine.push(...(r.messages ?? []).filter(m => m.sender_id === me.user_id));
+    }
     relay.syncUnread(new Set(mine.map(m => m.id)));
     for (const m of mine) await relay.prepare(m, taskStreamId);
   }
