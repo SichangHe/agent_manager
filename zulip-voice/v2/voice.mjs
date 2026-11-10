@@ -91,6 +91,12 @@ export function createVoice({zulip, cfg, log}) {
     return r.ok ? {ok: true, messageId: r.result.messageId, empty: !!r.result.empty} : r;
   }
 
+  const sttTimes = [];   // recent clips: `{at, roundTrip, work}` (work = the relay's transcription time, i.e. GPU contention)
+  /** Median and p90 of the last 5 minutes of speech-to-text, for the debug sheet. */
+  function sttStats() {
+    const xs = sttTimes.filter(t => Date.now() - t.at < 300000), q = (k, f) => { const a = xs.map(f).sort((p, r) => p - r); return a.length ? a[Math.min(a.length - 1, Math.floor(a.length * k))] : 0; };
+    return {n: xs.length, p50: q(0.5, t => t.roundTrip), p90: q(0.9, t => t.roundTrip), workP50: q(0.5, t => t.work)};
+  }
   /** `{ok: true, text}` for a WAV blob. */
   async function stt(blob, prompt, kws) {
     const form = new FormData();
@@ -99,6 +105,7 @@ export function createVoice({zulip, cfg, log}) {
     if (!up.ok) return {ok: false, error: up.error};
     for (let attempt = 0; attempt < 3; attempt++) {
       const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {}), ...(kws ? {kws: true} : {})}, 60000);
+      if (r.ok) { sttTimes.push({at: Date.now(), roundTrip: r.totalMs, work: r.result.timings?.workMs ?? 0}); if (sttTimes.length > 30) sttTimes.shift(); }
       if (r.ok) return {ok: true, text: r.result.text.trim(), timings: {...r.result.timings, roundTripMs: r.totalMs}, noSpeechProb: r.result.noSpeechProb, avgLogprob: r.result.avgLogprob, kws: r.result.kws};
       if (attempt === 2) return r;
     }
@@ -129,5 +136,5 @@ export function createVoice({zulip, cfg, log}) {
     return r.ok ? {ok: true, ...r.result, totalMs: r.totalMs} : r;
   }
 
-  return {onMessage, backfill, sendVoice, bundleFor, chunkIndex, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
+  return {sttStats, onMessage, backfill, sendVoice, bundleFor, chunkIndex, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
 }

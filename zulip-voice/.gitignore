@@ -1,1 +1,5 @@
 node_modules/
+research-kws/trig/*.npy
+research-kws/trig/*.json
+research-kws/trig/*.log
+research-kws/trig/raw*/

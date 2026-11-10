@@ -843,7 +843,7 @@ async function handleCommandClip(blob, meta) {
     if (pendingChoice.confirm) { if (/^(yes|yeah|yep|sure|ok|okay|correct)$/.test(w)) pick = pendingChoice.names[0]; }
     else { const i = NUMBERS.findIndex(g => g.split(' ').includes(w)); if (i >= 0) pick = pendingChoice.names[i]; }
     const closeSession = () => { if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); draftEl.value = vc.base; autosize(); vc = null; } recorder.setReplyMode(false); };
-    if (pick) { pendingChoice = null; closeSession(); switchTopic(pick); vcIdle(); return; }   // the switch tone and "Now on X" follow; no voice state lingers
+    if (pick) { pendingChoice = null; lat.stage('switch', 'answer-heard'); closeSession(); switchTopic(pick); vcIdle(); return; }   // the switch tone and "Now on X" follow; no voice state lingers
     if (/^(no|nope|cancel|cancel that|none|never mind|scratch that|stop)$/.test(w)) { pendingChoice = null; closeSession(); recorder.beep('cancel'); vcIdle(); maybeAutoplay(); return; }
     if (!vc) { log('vc', `ignored during the switch question: "${heard}"`); vcIdle(); return; }   // "pause" must not open a reply while we wait for the answer
   }
@@ -939,6 +939,7 @@ function voiceSwitch(spoken) {
   const prompt = clear ? `Switch to ${readable(ranked[0].t.name)}?` : pendingChoice.names.map((n, i) => `${i + 1}, ${readable(n)}.`).join(' ');
   toast(prompt);
   sayAndMute(prompt);
+  lat.stage('switch', 'question-shown');
   return true;
 }
 
@@ -1002,10 +1003,17 @@ function closeEmptySession() {
 
 /** The resume phrase was followed by silence: drop it, send the reply if there is one, then resume reading. */
 /** The end word was heard: no quiet window, no waiting for transcripts. The clip in progress is cut here and the service transcribes whatever is not yet text. */
-function sendVoiceReplyNow(why) {
-  const reply = vc; if (!reply) return;
+const END_WAIT_MS = 2500;   // clips already being transcribed finish sooner than a fresh upload + transcription of the same audio would
+async function sendVoiceReplyNow(why) {
+  const reply = vc; if (!reply || reply.ending) return;
+  reply.ending = true;
   recorder.flush();   // hands the last clip to onCommandClip, which records it in reply.parts
   clearTimeout(reply.timer); clearTimeout(reply.emptyTimer);
+  const waitStart = performance.now();
+  while (performance.now() - waitStart < END_WAIT_MS && (reply.parts ?? []).some(p => p.text === null)) await new Promise(r => setTimeout(r, 40));
+  await new Promise(r => setTimeout(r, 0));   // lets the session take the text of the clip that just finished
+  if (vc !== reply) return;
+  if (performance.now() - waitStart > 50) log('vc', `waited ${Math.round(performance.now() - waitStart)}ms for clips already in transcription`);
   const items = [];
   if (reply.base.trim()) items.push({text: reply.base.trim()});
   if (reply.text.trim()) items.push({text: reply.text.trim()});   // everything already transcribed, in arrival order
@@ -1264,6 +1272,7 @@ function debugStatus() {
     `page: ${document.visibilityState}, navigator.onLine=${navigator.onLine}`,
     `events: ${info.state} queue=${info.queueId} lastOk=${info.lastOkAgoMs ?? '-'}ms fails=${info.failures} poll=${info.pollAgeMs ?? '-'}ms`,
     `on-device start word: setting ${store.get('voice2-kws', false) ? 'on' : 'OFF'}, ${kwsSpotter.state().status}${kwsSpotter.state().detail ? ' (' + kwsSpotter.state().detail + ')' : ''}`,
+    (st => `stt: n=${st.n} p50=${st.p50}ms p90=${st.p90}ms server-work p50=${st.workP50}ms${st.n >= 3 && st.p50 > 1500 ? '  WARNING: speech-to-text is slow (>1.5 s), the server GPU is probably busy' : ''}`)(voice.sttStats()),
     `voice: ${voiceState.text}; prepared=${voice.preparedCount()} pending=${voice.pendingCount()}`,
     `player: ${JSON.stringify(player.snapshot())}`,
     `api: ${zulip.callsLastMinute()} calls in the last minute${zulip.rateLimitedForMs() ? '; RATE LIMITED for ' + Math.ceil(zulip.rateLimitedForMs() / 1000) + 's' : ''}`,

@@ -14,6 +14,7 @@ const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
 const MAX_TAIL_BATCH = 60;       // chunks in one pre-rendered tail bundle (about 4 minutes of speech)
 const SHORT_MESSAGE_CHUNKS = 3;  // messages up to this many chunks are rendered as a single bundle
+const SEND_DEADLINE_MS = 6000;   // `send` posts what is transcribed by now; slower clips are added by an edit
 const COALESCE_MS = 1500;        // messages arriving within this window of the first share one tail bundle
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
 const MAX_DELETES_PER_SWEEP = 40;
@@ -208,6 +209,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   const save = () => { saving = saving.catch(() => {}).then(async () => { await writeFile(statePath + '.tmp', JSON.stringify(records), {mode: 0o600}); await rename(statePath + '.tmp', statePath); }); return saving; };
   const pools = {stt: createPool(2), tts: createPool(3)};
   const startedMs = now();
+  const sttSamples = [];   // transcription times (ms) since the last per-minute summary
   const bursts = new Map();   // topic -> messages arriving close together, rendered as one tail bundle
   let lastPruneMs = 0, lastOrphanMs = 0, lastSweepMs = now(), humanCleanups = [];
   /** Whether a cleanup call with the human's key may go out now (rate: HUMAN_CLEANUP_PER_MIN, reserve: HUMAN_RESERVE); counts it when it may. */
@@ -226,6 +228,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     if (!response.ok) throw Error('Transcription failed: HTTP ' + response.status);
     const data = await response.json();
     if (typeof data.text !== 'string') throw Error('Invalid transcript');
+    sttSamples.push(now() - t);
     result.text = data.text;
     result.kws = data.kws;
     result.noSpeechProb = data.no_speech_prob;
@@ -278,15 +281,23 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   /** `send`: joins the client's typed/transcribed text with the transcripts of its not-yet-transcribed clips, in order, and posts it to the topic as the human. */
   async function sendMessage(request, result) {
     if (!humanApi) throw Error('no human key on the server');
-    const parts = await Promise.all(request.items.map(async item => {
-      if (typeof item.text === 'string') return item.text;
-      const piece = {}; await transcribe({uri: item.uri, prompt: DOMAIN_PROMPT}, piece); return piece.text ?? '';
-    }));
-    const text = stripEndWord(stripStartWord(parts.map(p => p.trim()).filter(Boolean).join(' '))).trim();
-    if (!text) { result.empty = true; return 'empty message, nothing posted'; }
-    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: taskStreamId, topic: request.topic, content: text});
-    result.messageId = sent.id; result.text = text;
-    return `posted ${sent.id} (${text.length} chars from ${parts.length} parts)`;
+    // Every clip starts transcribing at once. Whatever is done by the deadline is posted; a slower clip's text is added to the message by an edit.
+    const texts = request.items.map(item => typeof item.text === 'string' ? item.text : null);
+    const jobs = request.items.map(async (item, i) => { if (texts[i] === null) { const piece = {}; await transcribe({uri: item.uri, prompt: DOMAIN_PROMPT}, piece); texts[i] = piece.text ?? ''; } });
+    const settled = Promise.allSettled(jobs);
+    const timedOut = await Promise.race([settled.then(() => false), new Promise(r => setTimeout(() => r(true), SEND_DEADLINE_MS))]);
+    const compose = () => stripEndWord(stripStartWord(texts.map(p => (p ?? '').trim()).filter(Boolean).join(' '))).trim();
+    const text = compose();
+    if (!text && !timedOut) { result.empty = true; return 'empty message, nothing posted'; }
+    if (!text) await settled;   // nothing to post yet: wait for the first text
+    const first = compose();
+    if (!first) { result.empty = true; return 'empty message, nothing posted'; }
+    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: taskStreamId, topic: request.topic, content: first});
+    result.messageId = sent.id; result.text = first;
+    if (timedOut) settled.then(async () => { const full = compose(); if (full && full !== first) await humanApi.call('PATCH', 'messages/' + sent.id, {content: full}).then(() => console.log(`send ${request.id}: late clips added by edit`), error => console.log('late edit failed: ' + error.message)); });
+    const parts = texts;
+    const textFinal = first;
+    return `posted ${sent.id} (${textFinal.length} chars from ${parts.length} parts${timedOut ? ', deadline hit' : ''})`;
   }
 
   /** Does the work for an accepted request, then posts the result message; never throws. */
@@ -468,6 +479,8 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       if (n || u) console.log(`swept ${n} orphan messages and ${u} uploads`);
     },
     /** Records which agent messages the human has read, so their clips are evicted first. */
+    /** p50/p90 of transcription time since the last call (one log line a minute); warns above 1.5 s: the GPU is contended. */
+    sttSummary() { if (!sttSamples.length) return; const a = sttSamples.splice(0).sort((x, y) => x - y), q = k => a[Math.min(a.length - 1, Math.floor(a.length * k))]; console.log(`stt last minute: n=${a.length} p50=${q(0.5)}ms p90=${q(0.9)}ms${q(0.5) > 1500 ? ' WARNING: slow, GPU contended' : ''}`); },
     markRead(ids) { for (const r of Object.values(records)) if (r.messageId && (r.messageIds ?? [r.messageId]).every(m => ids.includes(m))) r.read = true; },
     syncUnread(unreadIds) { for (const r of Object.values(records)) if (r.messageId) r.read = !(r.messageIds ?? [r.messageId]).some(m => unreadIds.has(m)); },
     /** Reconciles interrupted posts, then deletes acked or expired items. */
@@ -539,6 +552,7 @@ export async function run(env = process.env) {
   guard('unread render', renderUnread());
   setInterval(() => guard('unread render', renderUnread()), 10 * 60000);
   setInterval(() => guard('sweep', relay.expire()), 60000);
+  setInterval(() => relay.sttSummary(), 60000);
   setInterval(() => console.log(`api calls last 60s: bot=${JSON.stringify(api.takeCalls())} human=${JSON.stringify(humanApi?.takeCalls() ?? {})}`), 60000);
   console.log(`voice service up: bot=${me.user_id} human=${humanId} relay=${streamId} task=${taskStreamId}`);
   for (;;) {
