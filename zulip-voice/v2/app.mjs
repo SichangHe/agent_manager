@@ -769,7 +769,7 @@ function onKwsHit(word) {
     sendVoiceReplyNow('end word on device');
   }
 }
-const recorder = createRecorder({log, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
+const recorder = createRecorder({log, onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); if (vc?.mode === 'command') for (const tag of kwsSpotter.feedCommands(samples)) onCommandHit(tag); }, onClip, onLevel: drawLevel, onBarge, onCommandClip, onEarcon: kind => player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S)});
 let voiceControl = store.get('voice2-vc', false), voiceListening = false;   // a saved "on" needs one tap after load before the microphone may open
 
 const RESUME_DEFAULT = 'tomato';   // the human's pick from the end-word study: 99% on-device detection, 0 false accepts in 4.9 h of speech
@@ -855,6 +855,7 @@ function noteStartResult(useful) {
   if (emptyRun >= EMPTY_RUN_BACKOFF && Date.now() > backoffUntil) { backoffUntil = Date.now() + BACKOFF_MS; recorder.setBackoff(true); log('vc', `noisy room: ${emptyRun} useless clips in a row, stricter detection for 60 s`); setTimeout(() => { recorder.setBackoff(false); emptyRun = 0; }, BACKOFF_MS); }
 }
 async function handleCommandClip(blob, meta) {
+  if (Date.now() - lastLocalCommandMs < (meta.ms ?? 0) + 800 && lastLocalCommandMs) { log('vc', 'clip already handled on-device: not sent to the server'); if (vc?.mode === 'command') armCommandTimer(); return; }
   log('vc', `clip ${Math.round(meta.ms ?? 0)}ms (${Math.round(meta.speechMs ?? 0)}ms speech) ${vc ? 'in reply' : pendingChoice ? 'for the question' : 'for the start word'}`);
   lat.stage('sw', 'clip-end');
   if (!vc && !pendingChoice) {
@@ -917,6 +918,40 @@ async function handleCommandClip(blob, meta) {
   if (CANCEL_RE.test(body)) { cancelSession(); return; }   // discards this reply and carries on
   addToSession(heard);
 }
+
+// ---- On-device command phrases (command mode only). The study (research-kws/trig/cmdstudy.py) found only these reliable: "switch to <agent>" (78-98% hit, no confusions, 0 false accepts in 4.9 h),
+// "cancel" (98%), "stop" (82%). next/back/skip/again/play/yes/no and number chains are confused with each other, so the server transcript stays their path. ----
+const LOCAL_CMD_THRESHOLD = 0.3;
+const SPOKEN_EXPANSIONS = {mgr: 'manager', impl: 'implementation', cfg: 'config', dev: 'developer', eval: 'evaluation', exp: 'experiment', ops: 'operations'};
+/** How an agent name is said: underscores and dashes become spaces, abbreviations are spelled out ("human_mgr" -> "human manager"). */
+const spokenName = key => normalize(topicOf(key).replace(/[_-]/g, ' ')).split(' ').filter(Boolean).map(w => SPOKEN_EXPANSIONS[w] ?? w).join(' ');
+function commandPhrases() {
+  const names = model.topics().slice(0, 40).map(t => spokenName(t.name)).filter(Boolean);
+  const unique = [...new Set(names)].filter(n => !names.some(o => o !== n && o.startsWith(n + ' ')));   // "alpha" is left out while "alpha beta" exists: it would fire first
+  return [{tag: 'CANCEL', text: 'cancel', threshold: LOCAL_CMD_THRESHOLD}, {tag: 'STOP', text: 'stop', threshold: LOCAL_CMD_THRESHOLD},
+    ...unique.map(n => ({tag: 'SWITCH_TO_' + n.toUpperCase().replace(/[^A-Z0-9]+/g, '_'), text: 'switch to ' + n, threshold: LOCAL_CMD_THRESHOLD, say: 'switch to ' + n}))];
+}
+let lastLocalCommandMs = 0, lastLocalTag = '', lastLocalTagMs = 0, localPhrases = new Map();
+function onCommandHit(tag) {
+  if (!vc || vc.mode !== 'command' || (tag === lastLocalTag && Date.now() - lastLocalTagMs < 1000)) return;
+  lastLocalTag = tag; lastLocalTagMs = lastLocalCommandMs = Date.now();
+  const text = localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' ');
+  log('vc', `on-device command: ${text} (${Math.round(Date.now() - (lastCommandWindowMs || Date.now()))}ms into the window)`);
+  runCommands(text);
+}
+let lastCommandWindowMs = 0, prebuildTimer = 0;
+/** Rebuilds the command spotter ahead of time (about 0.7 s of work) whenever the agent list changes, so opening command mode never waits for it. */
+function prebuildCommands() {
+  clearTimeout(prebuildTimer);
+  prebuildTimer = setTimeout(() => { if (kwsSpotter.ready() && store.get('voice2-kws', false) && !vc) { const phrases = commandPhrases(); localPhrases = new Map(phrases.map(p => [p.tag, p.say ?? p.text])); kwsSpotter.setCommands(phrases); } }, 2500);
+}
+function armLocalCommands() {
+  lastCommandWindowMs = Date.now();
+  if (!kwsSpotter.ready() || !store.get('voice2-kws', false)) return;
+  const phrases = commandPhrases(); localPhrases = new Map(phrases.map(p => [p.tag, p.say ?? p.text]));
+  kwsSpotter.setCommands(phrases); kwsSpotter.resetCommands();
+}
+
 // ---- Command mode: start word -> INPUT mode (dictation) -> command word -> COMMAND mode (a closed list, chainable, never text) ----
 const CMD_DEFAULT = 'katana', COMMAND_SILENCE_MS = 4000, START_CHIME_DELAY_MS = 600, ATTENTION_COMMAND_WINDOW_MS = 1500;
 const commandWord = () => normalize(store.get('voice2-cmd-word', CMD_DEFAULT)) || CMD_DEFAULT;
@@ -928,7 +963,7 @@ function enterCommandMode(rest) {
   clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); clearTimeout(vc.readyTimer);
   const first = vc.mode !== 'command';
   vc.mode = 'command';
-  if (first) { recorder.beep('command'); log('vc', 'command mode'); log('lat', `command mode ready ${Math.round(Date.now() - (vc.openedAt ?? Date.now()))}ms after the session opened`); }
+  if (first) { armLocalCommands(); recorder.beep('command'); log('vc', 'command mode'); log('lat', `command mode ready ${Math.round(Date.now() - (vc.openedAt ?? Date.now()))}ms after the session opened`); }
   setVcState('command', 'command mode');
   toast('Command mode: ' + 'back, next, switch to…, cancel');
   armCommandTimer();
@@ -1137,6 +1172,7 @@ function finishVcReply() {
 }
 async function loadKws(retry = true) {
   const r = await kwsSpotter.load();
+  if (r.ok) prebuildCommands();
   if (!r.ok && retry && voiceControl && store.get('voice2-kws', false)) { setTimeout(() => { if (voiceControl && store.get('voice2-kws', false) && !kwsSpotter.ready()) loadKws(false); }, 8000); }
   if (!r.ok && voiceControl) { toast('On-device start word failed to load; using the server (slower)'); setTimeout(() => $('set-kws').checked = store.get('voice2-kws', false), 0); }
 }
@@ -1398,7 +1434,7 @@ async function checkVoice() {
   return voiceState;
 }
 
-function persist() { clearTimeout(persist.t); persist.t = setTimeout(() => store.set('voice2-cache', model.snapshot(current)), 800); }
+function persist() { prebuildCommands(); clearTimeout(persist.t); persist.t = setTimeout(() => store.set('voice2-cache', model.snapshot(current)), 800); }
 
 const events = createEvents({zulip, log, eventTypes: ['message', 'update_message_flags'], onInit, onEvent, onState: renderConn});
 

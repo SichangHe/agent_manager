@@ -5,7 +5,7 @@ import {resolve} from 'node:path';
 
 const output = process.argv[2];
 if (!output) throw Error('Usage: node build.mjs OUTPUT_DIRECTORY');
-const files = ['index.html', 'latency.mjs', 'kws.mjs', 'test.html', 'selftest.mjs', 'app.css', 'app.mjs', 'log.mjs', 'model.mjs', 'player.mjs', 'recorder.mjs', 'view.mjs', 'voice.mjs', 'zulip.mjs', 'text.mjs'];
+const files = ['index.html', 'latency.mjs', 'kws.mjs', 'test.html', 'selftest.mjs', 'app.css', 'app.mjs', 'log.mjs', 'model.mjs', 'player.mjs', 'recorder.mjs', 'view.mjs', 'voice.mjs', 'zulip.mjs', 'text.mjs', 'bpe.mjs'];
 const here = name => new URL('./' + name, import.meta.url);
 const nm = name => new URL('./node_modules/' + name, import.meta.url);
 const sources = Object.fromEntries(await Promise.all(files.map(async name => [name, await readFile(here(name), 'utf8')])));
@@ -14,7 +14,7 @@ const version = createHash('sha1').update(files.map(n => sources[n]).join('\0'))
 // The npm wasm build targets Node: the two patches below let it run in a browser with the in-memory file system.
 const kwsModel = new URL('../research-kws/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/', import.meta.url);
 const kwsFiles = [['kws-shim.js', 'shim.js', here('kws-shim.js')], ['sherpa-onnx-wasm-nodejs.wasm', 'sherpa-onnx-wasm.wasm', nm('sherpa-onnx/sherpa-onnx-wasm-nodejs.wasm')], ['sherpa-onnx-kws.js', 'sherpa-onnx-kws.js', nm('sherpa-onnx/sherpa-onnx-kws.js')],
-  ...['encoder', 'decoder', 'joiner'].map(n => [n, n + '.int8.onnx', new URL(`${n}-epoch-12-avg-2-chunk-16-left-64.int8.onnx`, kwsModel)]), ['tokens', 'tokens.txt', new URL('tokens.txt', kwsModel)]];
+  ...['encoder', 'decoder', 'joiner'].map(n => [n, n + '.int8.onnx', new URL(`${n}-epoch-12-avg-2-chunk-16-left-64.int8.onnx`, kwsModel)]), ['tokens', 'tokens.txt', new URL('tokens.txt', kwsModel)], ['bpe', 'bpe.model', new URL('bpe.model', kwsModel)]];
 let wasmJs = await readFile(nm('sherpa-onnx/sherpa-onnx-wasm-nodejs.js'), 'utf8');
 const rawFsGuard = 'if(!ENVIRONMENT_IS_NODE){throw new Error("NODERAWFS is currently only supported on Node.js environment.")}', rawFsLoop = 'for(var _key in NODERAWFS){FS[_key]=_wrapNodeError(NODERAWFS[_key])}';
 if (!wasmJs.includes(rawFsGuard) || !wasmJs.includes(rawFsLoop)) throw Error('sherpa-onnx wasm loader changed; the browser patch no longer applies');

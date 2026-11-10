@@ -1603,6 +1603,30 @@ const attentionCommand = onDevice => async ({srv}) => {
 scenarios.attentionKatana = attentionCommand(false);
 scenarios.attentionKatanaOnDevice = attentionCommand(true);
 
+scenarios.localCommand = async ({srv}) => {
+  // In command mode the on-device spotter hears "switch to terminal viz" and acts at once; the clip is not sent to the server.
+  await L.wipeTasks();
+  await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
+  await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Attention.', 'Katana.', 'Switch to terminal viz.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1500), pcm(ws[1]), gap(1800), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__lc.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__lc.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 2, 15000);
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'kws ready', () => /kws +ready/.test(window.__voice.log.text()), 40000);
+    await L.waitFor(p, 'local command', () => /on-device command: switch to terminal viz/.test(window.__voice.log.text()), 70000);
+    await L.waitFor(p, 'clip kept off the server', () => /clip already handled on-device/.test(window.__voice.log.text()), 20000);
+    const lines = (await p.evaluate(() => window.__voice.log.text())).split('\n'), tm = l => { const m = l?.match(/^(\d+):(\d+):(\d+)\.(\d+)/); return m ? ((+m[1] * 60 + +m[2]) * 60 + +m[3]) * 1000 + +m[4] : NaN; };
+    const hit = lines.find(l => /on-device command: switch to terminal viz/.test(l)), clip = lines.find(l => /clip already handled on-device/.test(l)), build = lines.find(l => /command spotter: \d+ phrases in/.test(l));
+    assert.match(lines.join('\n'), /vc +switch to "terminal viz"/, 'the switch question was asked');
+    return {hitToClipEndMs: tm(clip) - tm(hit), spotterBuild: build?.match(/phrases in (\d+)ms/)?.[1]};
+  } finally { await c.close(); await srv2.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {
