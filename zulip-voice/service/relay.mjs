@@ -224,11 +224,14 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   async function transcribe(request, result) {
     const audio = await api.download(request.uri);
     const t = now();
-    const response = await fetchImpl(workers.stt + '/stt', {method: 'POST', body: audio, headers: {...(request.prompt ? {'X-Prompt': encodeURIComponent(request.prompt)} : {}), ...(request.kws ? {'X-Kws': '1'} : {})}, signal: AbortSignal.timeout(15000)});
+    const sttCall = () => fetchImpl(workers.stt + '/stt', {method: 'POST', body: audio, headers: {...(request.prompt ? {'X-Prompt': encodeURIComponent(request.prompt)} : {}), ...(request.kws ? {'X-Kws': '1'} : {})}, signal: AbortSignal.timeout(15000)});
+    const response = await sttCall().catch(() => sttCall());   // one retry: the single-threaded speech service can drop a connection under load
     if (!response.ok) throw Error('Transcription failed: HTTP ' + response.status);
     const data = await response.json();
     if (typeof data.text !== 'string') throw Error('Invalid transcript');
     sttSamples.push(now() - t);
+    const flat = t => t.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (request.prompt && flat(data.text) && flat(data.text).includes(flat(request.prompt))) data.text = '';   // the model echoed its prompt back: that is noise
     result.text = data.text;
     result.kws = data.kws;
     result.noSpeechProb = data.no_speech_prob;

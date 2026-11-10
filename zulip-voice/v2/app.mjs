@@ -6,7 +6,7 @@ import {createZulip, createEvents} from './zulip.mjs';
 import {createVoice} from './voice.mjs';
 import {createPlayer} from './player.mjs';
 import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
-import {removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
+import {soundsLike, removeControlWords, stripTrailingControl, leadingControlCount, DOMAIN_PROMPT} from './text.mjs';
 import {createModel, parsed, itemsOf} from './model.mjs';
 import {hideAllAttachments, agentEl, mineEl, setUnread, topicRow, ago} from './view.mjs';
 
@@ -767,7 +767,6 @@ const START_ALIASES = {attention: ['attention', 'attension', 'attentions', 'atte
 /** A saved start word of "pause" (the old default) moves to the new default; a customised word stays. */
 if (store.get('voice2-start-word', null) === 'pause') store.set('voice2-start-word', START_DEFAULT);
 const startWord = () => normalize(store.get('voice2-start-word', START_DEFAULT));
-const VC_PROMPT = 'Attention. Attention. Kangaroo.';   // biases Whisper toward the control words
 const EMPTY_SESSION_MS = 8000;
 let vc = null;   // an open voice-control session: `{base, text, timer, emptyTimer}`
 const setVcState = (state, label) => { $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
@@ -826,14 +825,15 @@ async function handleCommandClip(blob, meta) {
   const listening = !!vc || (!!pendingChoice && Date.now() < pendingChoice.until);
   // The "Pause. Over." hint only helps inside an open reply or a question; for start-word detection it can make Whisper hear "Pause." in noise.
   sttInFlight++;
-  const r = await voice.stt(blob, listening ? VC_PROMPT : undefined, !listening).finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
+  const r = await voice.stt(blob, vc ? DOMAIN_PROMPT : undefined, !listening)   // never a prompt that names the control words: the model echoes it back on noise.finally(() => { sttInFlight--; });   // start-word clips also get keyword spotting on the server
   if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
     log('vc', `stt failed: ${r.error}`);
     if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute("Connection lost. Keep talking; I'll send when it's back."); }
     if (vc) armSessionTimer();
     resumeBarge(); vcIdle(); return;
   }
-  const heard = r.text.trim();
+  let heard = r.text.trim();
+  { const w = heard.split(/\s+/).filter(Boolean); if (w.length >= 2 && removeControlWords(removeControlWords(w, 'kangaroo'), 'attention').length === 0 && w.some(x => soundsLike('kangaroo', [x])) && w.some(x => soundsLike('attention', [x]))) { log('vc', `dropped "${heard}": only control words, an echo of noise`); heard = ''; } }
   if (meta.part) { if (meta.part.sentAway) return; meta.part.text = heard; }   // already sent from the audio: nothing more to do with this transcript
   lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
   log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
@@ -858,9 +858,10 @@ async function handleCommandClip(blob, meta) {
     if (kwsOn && !r.kws.includes('ATTENTION')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear the start word)`); resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
     let rest = afterStartWord(heard);
     // Whisper sometimes drops the leading start word but keeps the command after it: with a spotter hit, a bare command still counts.
-    const commandLike = t => { const n = normalize(t); return SWITCH_RE.test(n) || !!navCommand(n) || CANCEL_RE.test(n) || n === 'send'; };
+    const commandLike = t => { const n = normalize(t); return SWITCH_RE.test(n) || SWITCH_BACK_RE.test(n) || !!navCommand(n) || CANCEL_RE.test(n) || n === 'send'; };
     if (kwsOn && rest === null && commandLike(heard)) rest = heard;
     if (kwsOn && rest !== null && afterStartWord(heard) === null && !commandLike(heard)) { log('vc', `ignored: "${heard}" (transcript is not the start word)`); rest = null; resumeBarge(); recorder.setReplyMode(false); vcIdle(); return; }
+    if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS && commandLike(heard)) rest = heard;   // a command right after a send is still a command, never reply text
     if (rest === null && Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
     if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     noteStartResult(true);

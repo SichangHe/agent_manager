@@ -89,8 +89,9 @@ def study(w):
         for i in range(3):
             x, sr = sf.read(f"raw4/{v}__{w}__{i}.wav", dtype="float32")
             for c, y in conds(x, sr).items():
-                clips.append((c, y)); n += 1; asr_ok += norm(asr(y))[-len(tgt):] == tgt
-    res = {"asr_hit": asr_ok / n, "hours": hours, "by_threshold": {}}
+                clips.append((c, y)); n += 1
+                if c == 'normal' and v in VOICES[:3]: asr_n = locals().get('asr_n', 0) + 1; asr_ok += norm(asr(y))[-len(tgt):] == tgt   # transcript check on 9 clips only: the live STT service is shared
+    res = {"asr_hit": asr_ok / 9, "hours": hours, "by_threshold": {}}
     for thr in THRESHOLDS:
         sp = spotter(w, thr); per = {}
         for c, y in clips: p = per.setdefault(c, [0, 0]); p[0] += run(sp, y) > 0; p[1] += 1
@@ -102,7 +103,7 @@ def study(w):
 if __name__ == "__main__":
     from multiprocessing import Pool
     out = {}
-    with Pool(len(WORDS)) as pool:
+    with Pool(12) as pool:
         for w, r in pool.imap_unordered(study, WORDS):
             out[w] = r; json.dump(out, open("endstudy4.json", "w"))
     print("DONE", flush=True)

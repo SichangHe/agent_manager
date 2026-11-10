@@ -310,6 +310,7 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
 if __name__ == "__main__":
     port = int(os.environ.get("VOICE_AUDIO_PORT", "8770"))
     speech = Speech()
+    HTTPServer.request_queue_size = 128   # the default backlog of 5 refused connections ("fetch failed") when several clients arrived together
     server = HTTPServer(("127.0.0.1", port), handler(speech, port))
     print(f"Speech worker ready on loopback port {port}", flush=True)
     server.serve_forever()
