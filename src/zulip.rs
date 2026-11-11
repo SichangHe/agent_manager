@@ -301,6 +301,10 @@ pub fn send(
             path.display()
         ));
     }
+    // 🤖 manager request: "make amh refuse duplicate human messages from one task within a short window"
+    if sender != mail::WATCHER {
+        recent_duplicate(state, tag, subject, body)?;
+    }
     let recipient = settings::get(settings, "zulip.human_id");
     let id: u64 = recipient
         .parse()
@@ -640,6 +644,38 @@ pub fn own_text(body: &str) -> String {
         .join("\n")
 }
 
+const DUPLICATE_WINDOW_S: i64 = 30 * 60;
+
+/// Refuse an identical send from the same task within the window, and record this attempt.
+/// Attempts are logged before posting, so the guard holds even when a retained payload is moved away.
+fn recent_duplicate(state: &Path, tag: &str, subject: &str, body: &str) -> Result<(), String> {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    (tag, mail::bare(subject).trim(), body.trim()).hash(&mut hasher);
+    let digest = format!("{:016x}", hasher.finish());
+    let path = state.join("amh-zulip-recent.jsonl");
+    let now = chrono::Utc::now().timestamp();
+    let old = fs::read_to_string(&path).unwrap_or_default();
+    let mut kept: Vec<String> = Vec::new();
+    for line in old.lines() {
+        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        let at = entry["at"].as_i64().unwrap_or(0);
+        if now - at >= DUPLICATE_WINDOW_S {
+            continue;
+        }
+        if entry["digest"] == digest.as_str() {
+            return Err(format!(
+                "refused: this task already sent the human this exact message {} min ago; do not resend it. If it may not have arrived, ask your manager instead",
+                (now - at) / 60
+            ));
+        }
+        kept.push(line.to_owned());
+    }
+    kept.push(json!({"digest": digest, "at": now}).to_string());
+    fs::write(&path, kept.join("\n") + "\n")
+        .map_err(|error| format!("cannot record Zulip send attempt: {error}"))
+}
+
 /// The retained payload of an uncertain send with the same tag, subject and body, if any.
 fn pending_match(
     folder: &Path,
@@ -693,6 +729,17 @@ fn delivered(settings: &Settings, narrow: &Value, content: &str) -> Option<u64> 
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn identical_send_within_window_is_refused() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("amh-dup-{}", std::process::id()));
+        fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        recent_duplicate(&dir, "a", "s", "body")?;
+        assert!(recent_duplicate(&dir, "a", "s", "body").is_err());
+        recent_duplicate(&dir, "b", "s", "body")?;
+        recent_duplicate(&dir, "a", "s", "other")?;
+        fs::remove_dir_all(&dir).map_err(|e| e.to_string())
+    }
+
     #[test]
     fn pending_check_skips_folders_and_other_files() -> Result<(), Box<dyn std::error::Error>> {
         let folder = std::env::temp_dir().join(format!("amh-pending-{}", std::process::id()));
