@@ -223,6 +223,8 @@ pub fn parse_auth_files(answer: &Value, now: i64) -> Vec<Reading> {
                 .unwrap_or(&name);
             let principal = match (pool, account_id) {
                 ("codex", id) if !id.is_empty() => format!("codex:{id}"),
+                // Two Claude credentials with one email were seen with different weekly resets, so the email does not identify the quota.
+                ("claude", _) => format!("claude:{name}"),
                 _ => format!("{pool}:{who}"),
             };
             let mut sources = vec![&file["quota"]];
@@ -1510,6 +1512,16 @@ mod tests {
     }
 
     /// Replay of the 2026-11-04 Midas incident: the account was disabled at 7d 100%, and came back after its reset.
+
+    #[test]
+    fn claude_credentials_sharing_an_email_get_their_own_buckets() {
+        let mut a = claude_file("one", None, "1.0", 10);
+        let mut b = claude_file("two", None, "0.1", 10);
+        a["email"] = json!("same@x");
+        b["email"] = json!("same@x");
+        let (buckets, _) = run(&[], vec![a, b], NOW);
+        assert_eq!(buckets.len(), 2);
+    }
 
     #[test]
     fn json_round_trip() {
