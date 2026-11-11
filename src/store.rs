@@ -17,6 +17,32 @@ pub struct Store {
 /// A wait for the lock at least this long is logged with the holder's name.
 const LONG_LOCK_WAIT_S: u64 = 5;
 
+fn now_ns() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as i128)
+}
+
+/// The stamp the next lock compares against: now, less 2 s for clock and mtime coarseness.
+fn since_next() -> i128 {
+    now_ns() - 2_000_000_000
+}
+
+/// The start of the last complete full export, if recorded.
+fn stamp(database: &Database) -> Result<Option<i128>, String> {
+    Ok(database.record("export:stamp")?.and_then(|t| t.parse().ok()))
+}
+
+/// True when `path` exists and was last modified before `since`.
+fn untouched_since(path: &std::path::Path, since: Option<i128>) -> bool {
+    let Some(since) = since else { return false };
+    fs::metadata(path)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+        .is_some_and(|at| (at.as_nanos() as i128) < since)
+}
+
 /// Milliseconds spent acquiring the writer lock and repairing derived state.
 pub struct LockTiming {
     pub acquire_ms: f64,
@@ -142,7 +168,9 @@ impl Store {
                 }
             }
         }
-        self.take_in_edits(&database)?;
+        let next_stamp = since_next();
+        let since = self.export_since(&database)?;
+        self.take_in_edits(&database, since)?;
         if database.record("pending-block-queue-v1")?.is_none() {
             let mut snapshots = Vec::new();
             let mut events = Vec::new();
@@ -162,7 +190,8 @@ impl Store {
         }
         let import_ms = importing.elapsed().as_secs_f64() * 1000.0;
         let exporting = std::time::Instant::now();
-        self.export(&database)?;
+        self.export(&database, since)?;
+        database.set_record("export:stamp", &next_stamp.to_string())?;
         Ok((
             lock,
             LockTiming {
@@ -177,8 +206,11 @@ impl Store {
     ///
     /// A typed line is one in the file's body that is not in the text amh last exported there; it is appended to the task's body in the database.
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
-    fn take_in_edits(&self, database: &Database) -> Result<(), String> {
+    fn take_in_edits(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
         for (name, text) in database.tasks()? {
+            if untouched_since(&self.path_of(database, &name)?, since) {
+                continue;
+            }
             let Ok(file) = fs::read_to_string(self.path_of(database, &name)?) else {
                 continue;
             };
@@ -228,32 +260,86 @@ impl Store {
     }
 
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
-    fn export(&self, database: &Database) -> Result<(), String> {
+    fn export(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
         let mut git = None;
         for (name, text) in database.tasks()? {
             let path = self.settle(database, &name, &text, &mut git)?;
+            let key = format!("export:{name}");
+            let recorded = database.record(&key)?;
+            // A file untouched since the last complete export still holds what that export recorded.
+            if recorded.as_deref() == Some(&text) && untouched_since(&path, since) {
+                continue;
+            }
             if fs::read_to_string(&path).ok().as_deref() != Some(&text) {
                 taskfile::write(&path, &text)
                     .map_err(|error| format!("amh: cannot export {name}: {error}"))?;
             }
-            let key = format!("export:{name}");
-            if database.record(&key)?.as_deref() != Some(&text) {
+            if recorded.as_deref() != Some(&text) {
                 database.set_record(&key, &text)?;
             }
         }
-        let mut text =
-            "# AMH events\n\n(authored by agents unless marked 🧑)\n\n```json\n".to_owned();
-        text.push_str(&database.event_lines()?);
-        text.push_str("```\n");
+        self.export_events(database)
+    }
+
+    /// Keep `amh_views/events.md` current by appending only new events; rewrite it whole when it is not the file the last export left.
+    // 🤖 The main manager: every amh lock rebuilt and re-read the whole 166 MB view (~1.5 s), so 40 queued amh calls waited 60+ s each.
+    fn export_events(&self, database: &Database) -> Result<(), String> {
+        const HEAD: &str = "# AMH events\n\n(authored by agents unless marked 🧑)\n\n```json\n";
+        const FENCE: &str = "```\n";
         let folder = self.root.join("amh_views");
         fs::create_dir_all(&folder)
             .map_err(|error| format!("amh: cannot create view directory: {error}"))?;
         let path = folder.join("events.md");
-        if fs::read_to_string(&path).ok().as_deref() != Some(&text) {
-            taskfile::write(&path, &text)
-                .map_err(|error| format!("amh: cannot export events: {error}"))?;
+        let failed = |error: std::io::Error| format!("amh: cannot export events: {error}");
+        let recorded = database.record("export:events")?.and_then(|text| {
+            let (id, len) = text.split_once(' ')?;
+            Some((id.parse::<i64>().ok()?, len.parse::<u64>().ok()?))
+        });
+        let tail_is_fence = |len: u64| -> bool {
+            use std::io::{Read, Seek, SeekFrom};
+            let mut end = [0u8; 4];
+            len >= 4
+                && File::open(&path)
+                    .and_then(|mut file| {
+                        file.seek(SeekFrom::Start(len - 4))?;
+                        file.read_exact(&mut end)
+                    })
+                    .is_ok()
+                && end == *FENCE.as_bytes()
+        };
+        if let Some((last, len)) = recorded
+            && fs::metadata(&path).is_ok_and(|meta| meta.len() == len)
+            && tail_is_fence(len)
+        {
+            let (lines, newest) = database.event_lines_after(last)?;
+            if lines.is_empty() {
+                return Ok(());
+            }
+            let mut file = fs::OpenOptions::new().write(true).open(&path).map_err(failed)?;
+            file.set_len(len - 4).map_err(failed)?;
+            use std::io::{Seek, SeekFrom};
+            file.seek(SeekFrom::End(0)).map_err(failed)?;
+            file.write_all(format!("{lines}{FENCE}").as_bytes()).map_err(failed)?;
+            let len = file.metadata().map_err(failed)?.len();
+            return database.set_record("export:events", &format!("{newest} {len}"));
         }
-        Ok(())
+        let (lines, newest) = database.event_lines_after(0)?;
+        let text = format!("{HEAD}{lines}{FENCE}");
+        if fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+            taskfile::write(&path, &text).map_err(failed)?;
+        }
+        database.set_record("export:events", &format!("{newest} {}", text.len()))
+    }
+
+    /// The time before which an unchanged file needs no re-read: the start of the last complete export; none (read all) every 10 minutes or when unknown.
+    fn export_since(&self, database: &Database) -> Result<Option<i128>, String> {
+        let now = now_ns();
+        let full = database.record("export:full_at")?.and_then(|t| t.parse::<i128>().ok());
+        if full.is_none_or(|at| now - at > 600 * 1_000_000_000) {
+            database.set_record("export:full_at", &now.to_string())?;
+            return Ok(None);
+        }
+        Ok(database.record("export:stamp")?.and_then(|t| t.parse().ok()))
     }
 
     /// Where a task file lives now: its month folder once done, else the root.
@@ -444,7 +530,7 @@ impl Store {
 
     pub fn refresh_exports(&self) -> Result<(), String> {
         if let Some(database) = self.database()? {
-            self.export(&database)?;
+            self.export(&database, stamp(&database)?)?;
         }
         Ok(())
     }
@@ -497,7 +583,7 @@ impl Store {
                 ],
                 &events,
             )?;
-            return self.export(&database);
+            return self.export(&database, stamp(&database)?);
         }
         let data = serde_json::to_string(&[
             (to.name.clone(), to.render()),
@@ -528,7 +614,7 @@ impl Store {
         let (task, events) = self.prepare(task)?;
         if let Some(mut database) = self.database()? {
             database.commit(&[(task.name.clone(), task.render())], &events)?;
-            return self.export(&database);
+            return self.export(&database, stamp(&database)?);
         }
         self.write(&task.name, &task.render())?;
         for event in events {
@@ -550,7 +636,7 @@ impl Store {
         let (task, events) = self.prepare(task)?;
         let received =
             database.receive_mail(key, &[(task.name.clone(), task.render())], &events)?;
-        self.export(&database)?;
+        self.export(&database, stamp(&database)?)?;
         Ok(received)
     }
 
@@ -570,7 +656,7 @@ impl Store {
             Some(key) => database.receive_mail(key, &snapshots, &events)?,
             None => database.commit(&snapshots, &events).map(|()| true)?,
         };
-        self.export(&database)?;
+        self.export(&database, stamp(&database)?)?;
         Ok(queued)
     }
 
@@ -753,7 +839,7 @@ impl Store {
                 return self.save(&task);
             }
             database.commit(&[(name.to_owned(), text.to_owned())], &[])?;
-            return self.export(&database);
+            return self.export(&database, stamp(&database)?);
         }
         taskfile::write(&self.root.join(name), text)
             .map_err(|error| format!("amh: cannot write {name}: {error}"))

@@ -355,23 +355,26 @@ impl Database {
     }
 
     /// Render the event view directly from stored JSON without rebuilding each event as a Rust value.
-    pub fn event_lines(&self) -> Result<String, String> {
+    /// The JSON lines of events with an id above `after`, and the highest id seen (`after` when none).
+    pub fn event_lines_after(&self, after: i64) -> Result<(String, i64), String> {
         let mut query = self
             .0
             .prepare(
-                "SELECT json_object('actor', actor, 'data', json(data), 'id', id,
-                'kind', kind, 'subject', subject, 'time', time) FROM events ORDER BY id",
+                "SELECT id, json_object('actor', actor, 'data', json(data), 'id', id,
+                'kind', kind, 'subject', subject, 'time', time) FROM events WHERE id > ?1 ORDER BY id",
             )
             .map_err(error)?;
         let rows = query
-            .query_map([], |row| row.get::<_, String>(0))
+            .query_map([after], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
             .map_err(error)?;
-        let mut text = String::new();
+        let (mut text, mut last) = (String::new(), after);
         for row in rows {
-            text.push_str(&row.map_err(error)?);
+            let (id, line) = row.map_err(error)?;
+            text.push_str(&line);
             text.push('\n');
+            last = id;
         }
-        Ok(text)
+        Ok((text, last))
     }
 
     pub fn events(&self) -> Result<Vec<Value>, String> {
@@ -533,7 +536,7 @@ mod tests {
             serde_json::json!({"time":"later", "actor":"agent", "kind":"test", "subject":"second", "data":null}),
         ];
         db.commit(&[], &events)?;
-        let rendered = db.event_lines()?;
+        let rendered = db.event_lines_after(0)?.0;
         let values = rendered
             .lines()
             .map(serde_json::from_str::<Value>)
