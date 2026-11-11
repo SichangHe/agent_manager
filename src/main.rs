@@ -114,7 +114,7 @@ fn main() -> ExitCode {
             match detach() {
                 Ok(out) => {
                     println!(
-                        "queued: {ahead} start(s) ahead (2 agent starts per minute on the machine); it goes on in the background, output in {out}; check later with `amh agent status`"
+                        "queued: {ahead} start(s) ahead (machine-wide limit: launch.starts_per_minute in config.toml, default 2); it goes on in the background, output in {out}; check later with `amh agent status`"
                     );
                     log::record(&line, "detached");
                     return ExitCode::SUCCESS;

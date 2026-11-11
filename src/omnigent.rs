@@ -15,13 +15,22 @@ const WAIT: Duration = Duration::from_secs(90);
 // The main manager: "make amh enforce the safe rate itself: queue amh task start and session resumes (including the watcher's own retries) so the whole machine starts at most 2 agents per minute, whoever asks"
 const STARTS_PER_MIN: usize = 2;
 
+/// Starts allowed per minute: `launch.starts_per_minute` in config.toml, else `STARTS_PER_MIN`; read on every check so a change applies at once.
+fn starts_per_min() -> usize {
+    crate::settings::load()
+        .ok()
+        .and_then(|s| s.get("launch.starts_per_minute").and_then(|v| v.parse().ok()))
+        .filter(|n| *n > 0)
+        .unwrap_or(STARTS_PER_MIN)
+}
+
 /// Wait until starting one more agent keeps the machine within `STARTS_PER_MIN`, then record the start.
 ///
 /// The start times of the last minute live in `amh-starts.json` in the state folder, under a lock shared by every amh process.
 /// Set by the watcher: it must never sleep for a slot, since that would hold up the human's mail; a send over the limit fails and is retried on a later poll.
 /// The error a start over the per-minute limit gets when the caller does not wait; `fallback` matches it.
 pub const NO_SLOT: &str =
-    "no agent start slot free this minute (2 per minute on the machine); retried later";
+    "no agent start slot free this minute (launch.starts_per_minute, default 2); retried later";
 
 pub static NO_WAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -40,7 +49,7 @@ pub fn start_backlog() -> usize {
     let starts: Vec<i64> = read(&path)
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or_default();
-    let full = starts.iter().filter(|at| now_s - **at < 60).count() >= STARTS_PER_MIN;
+    let full = starts.iter().filter(|at| now_s - **at < 60).count() >= starts_per_min();
     waiting + usize::from(full)
 }
 
@@ -71,7 +80,7 @@ fn start_slot() -> Result<(), String> {
             .unwrap_or_default();
         starts.retain(|at| now_s - at < 60);
         let my_turn = queue.first().is_none_or(|head| *head == me);
-        let outcome = if starts.len() < STARTS_PER_MIN && my_turn {
+        let outcome = if starts.len() < starts_per_min() && my_turn {
             starts.push(now_s);
             queue.retain(|pid| *pid != me);
             crate::taskfile::write(&path, &json!(starts).to_string())
@@ -82,7 +91,7 @@ fn start_slot() -> Result<(), String> {
         } else if Instant::now() >= given_up {
             queue.retain(|pid| *pid != me);
             Err(
-                "waited 30 min for a start slot; the machine allows 2 agent starts per minute"
+                "waited 30 min for a start slot (launch.starts_per_minute, default 2)"
                     .to_owned(),
             )
         } else {
