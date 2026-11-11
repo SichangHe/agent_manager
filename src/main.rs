@@ -91,6 +91,10 @@ fn parsed(command: &Command, matches: &ArgMatches) -> Value {
 }
 
 fn main() -> ExitCode {
+    // The detached child launches agents; they must not inherit the marker, or their own starts would block again.
+    let detached = std::env::var_os("AMH_DETACHED").is_some();
+    // SAFETY: single-threaded at this point.
+    unsafe { std::env::remove_var("AMH_DETACHED") };
     let command = cli::command();
     let values = parsed(&command, &command.clone().get_matches());
     let line = values.to_string();
@@ -107,7 +111,7 @@ fn main() -> ExitCode {
     if matches!(
         (values["group"].as_str(), values["action"].as_str()),
         (Some("task"), Some("start")) | (Some("agent"), Some("replace")) | (Some("manager"), Some("rotate"))
-    ) && std::env::var_os("AMH_DETACHED").is_none()
+    ) && !detached
     {
         let ahead = omnigent::start_backlog();
         if ahead > 0 {

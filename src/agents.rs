@@ -474,10 +474,14 @@ pub fn replace(
 /// The model name that makes the proxy use only the accounts tagged with `account`; no account or `none` gives the plain model, which the proxy serves only from untagged accounts.
 // 🧑 "We need the ability to pin agent sessions to accounts, so burner sessions only burns the accounts. We want to use up and other accounts support that will be reserved for more important agents."
 pub fn pinned_model(account: Option<&str>, model: &str) -> String {
-    let plain = model.rsplit('/').next().unwrap_or(model);
-    match account.filter(|a| !a.is_empty() && *a != "none") {
-        Some(account) => format!("{account}/{plain}"),
-        None => plain.to_owned(),
+    let Some(account) = account.filter(|a| !a.is_empty()) else {
+        return model.to_owned();
+    };
+    let plain = model.split_once('/').map_or(model, |(_, rest)| rest);
+    if account.eq_ignore_ascii_case("none") || plain.is_empty() {
+        plain.to_owned()
+    } else {
+        format!("{account}/{plain}")
     }
 }
 
@@ -497,6 +501,9 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     let pinned = given(new.model).is_some() || given(new.effort).is_some();
     fields.push(("model_pinned".to_owned(), pinned.to_string()));
     if let Some(account) = given(new.account) {
+        if !account.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Err(format!("amh: account name {account:?} may only have letters, digits, - and _"));
+        }
         fields.push(("account".to_owned(), account.to_owned()));
     }
     if store.contains(new.name)? {
@@ -584,6 +591,7 @@ mod account_tests {
         assert_eq!(pinned_model(Some("burner"), "gpt-6.1-sol"), "burner/gpt-6.1-sol");
         assert_eq!(pinned_model(Some("burner"), "old/gpt-6.1-sol"), "burner/gpt-6.1-sol");
         assert_eq!(pinned_model(Some("none"), "burner/gpt-6.1-sol"), "gpt-6.1-sol");
-        assert_eq!(pinned_model(None, "claude-opus-5-5"), "claude-opus-5-5");
+        assert_eq!(pinned_model(None, "vendor/m"), "vendor/m");
+        assert_eq!(pinned_model(Some("None"), "burner/m"), "m");
     }
 }
