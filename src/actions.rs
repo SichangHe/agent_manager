@@ -200,9 +200,54 @@ fn report_items(
     Ok(BATCH_HINT)
 }
 
-/// Email the human on the caller's thread, then say which earlier emails of the caller the human has not read.
+/// Whether the agent of `task` may message the human: its tool is in `human.writers`, or its model is admitted for that tool.
+pub fn writes_to_human(settings: &Settings, task: &Task) -> Result<bool, String> {
+    let tool = task.field("tool").unwrap_or_default();
+    if settings::allows(settings, "human.writers", tool) {
+        return Ok(true);
+    }
+    // 🧑 (via the main manager) "Allow Codex Astra agents to message the human": an entry `TOOL:MODEL_PART` admits that tool on matching models only.
+    let listed = settings::get(settings, "human.writers");
+    let wanted: Vec<&str> = listed
+        .split(',')
+        .filter_map(|entry| entry.trim().strip_prefix(&format!("{tool}:")))
+        .collect();
+    let exception = settings::get(
+        settings,
+        &format!(
+            "human.writer_sessions.{}",
+            task.address()
+                .strip_prefix(omnigent::PREFIX)
+                .unwrap_or_default()
+        ),
+    );
+    // 🧑 (via the manager) "Pin the allowlist by task file, not session, so restarts don't break it": `human.writer_tasks.TAG = "TOOL:MODEL"`.
+    let by_task = settings::get(settings, &format!("human.writer_tasks.{}", task.tag()));
+    if wanted.is_empty() && exception.is_empty() && by_task.is_empty() {
+        return Ok(false);
+    }
+    let Some(id) = task.address().strip_prefix(omnigent::PREFIX) else {
+        return Ok(false);
+    };
+    // 🤖 human_mgr.md: a slow or failed session lookup used to read as "wrong model" and refuse the human-facing reporter; retry, then say what failed.
+    let path = format!("/v1/sessions/{id}?include_items=false");
+    let session = omnigent::api(settings, "GET", &path, None)
+        .or_else(|_| omnigent::api(settings, "GET", &path, None))
+        .map_err(|error| {
+            format!(
+                "amh: nothing sent: cannot check which model you run on ({error}); send it again"
+            )
+        })?;
+    let model = session["model_override"].as_str().unwrap_or_default();
+    Ok(wanted.iter().any(|part| model.contains(part))
+            // 🧑 "Try 6 Sol" for this direct-human writing role.
+            || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag()))
+            || (!model.is_empty() && by_task == format!("{tool}:{model}")))
+}
+
+/// Email the human on the caller's thread; returns the receipt and the reminder to merge the caller's earlier unread updates (empty when none).
 // 🧑 "Make the emailing script combine emails into one. ... Merge those, which also requires caller interface to change and encourage batched calling of amh tell human"
-fn tell_human(
+pub fn tell_human(
     settings: &Settings,
     task: &Task,
     subject: &str,
@@ -210,7 +255,7 @@ fn tell_human(
     replaces: &[String],
     attachments: &[PathBuf],
     report_label: Option<&str>,
-) -> Result<(), String> {
+) -> Result<(String, String), String> {
     let tag = report_label.unwrap_or_else(|| task.tag());
     let sent = mail::send(
         settings,
@@ -223,31 +268,32 @@ fn tell_human(
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
     if crate::zulip::enabled(settings) {
-        say(&format!("Zulip message sent.\nMessage-ID: {message_id}\n"));
-        match zulip_sent_followup(crate::zulip::replace(settings, replaces), || {
+        let receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n");
+        let reminder = zulip_sent_followup(crate::zulip::replace(settings, replaces), || {
             crate::zulip::consolidation_reminder(settings, tag, &message_id)
-        }) {
-            Ok(reminder) if !reminder.is_empty() => say(&reminder),
-            Ok(_) => {}
-            Err(error) => eprintln!("amh: message {message_id} was sent; {error}"),
-        }
-        return Ok(());
+        })
+        .unwrap_or_else(|error| {
+            eprintln!("amh: message {message_id} was sent; {error}");
+            String::new()
+        });
+        return Ok((receipt, reminder));
     }
     mail::replace_queued(&settings::state_dir(), &message_id, replaces)
         .map_err(|error| format!("amh: {error}"))?;
     if mail::is_queued(&settings::state_dir(), &message_id) {
         // The emails it replaces stay until it is really sent, so the human loses nothing meanwhile.
-        say(&format!(
-            "Email NOT sent yet: Gmail refused it, see the line above. It is queued and the watcher will send it when Gmail allows. Do not send it again.\nMessage-ID: {message_id}\n"
+        return Ok((
+            format!(
+                "Email NOT sent yet: Gmail refused it, see the line above. It is queued and the watcher will send it when Gmail allows. Do not send it again.\nMessage-ID: {message_id}\n"
+            ),
+            String::new(),
         ));
-        return Ok(());
     }
-    say(&format!("Email sent.\nMessage-ID: {message_id}\n"));
-    say(&match mail::unread(settings, tag, replaces) {
+    let reminder = match mail::unread(settings, tag, replaces) {
         Ok(unread) => mail::replace_reminder(&message_id, &unread),
         Err(error) => mail::unread_check_failed(&error),
-    });
-    Ok(())
+    };
+    Ok((format!("Email sent.\nMessage-ID: {message_id}\n"), reminder))
 }
 
 /// Cleanup failure never changes delivery success or requests another copy.
@@ -665,47 +711,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
             };
             let lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
-            let tool = task.field("tool").unwrap_or_default();
-            // 🧑 (via the main manager) "Allow Codex Astra agents to message the human": an entry `TOOL:MODEL_PART` admits that tool on matching models only.
-            let model_allowed = || -> Result<bool, String> {
-                let listed = settings::get(&settings, "human.writers");
-                let wanted: Vec<&str> = listed
-                    .split(',')
-                    .filter_map(|entry| entry.trim().strip_prefix(&format!("{tool}:")))
-                    .collect();
-                let exception = settings::get(
-                    &settings,
-                    &format!(
-                        "human.writer_sessions.{}",
-                        task.address()
-                            .strip_prefix(omnigent::PREFIX)
-                            .unwrap_or_default()
-                    ),
-                );
-                // 🧑 (via the manager) "Pin the allowlist by task file, not session, so restarts don't break it": `human.writer_tasks.TAG = "TOOL:MODEL"`.
-                let by_task =
-                    settings::get(&settings, &format!("human.writer_tasks.{}", task.tag()));
-                if wanted.is_empty() && exception.is_empty() && by_task.is_empty() {
-                    return Ok(false);
-                }
-                let Some(id) = task.address().strip_prefix(omnigent::PREFIX) else {
-                    return Ok(false);
-                };
-                // 🤖 human_mgr.md: a slow or failed session lookup used to read as "wrong model" and refuse the human-facing reporter; retry, then say what failed.
-                let path = format!("/v1/sessions/{id}?include_items=false");
-                let session = omnigent::api(&settings, "GET", &path, None)
-                    .or_else(|_| omnigent::api(&settings, "GET", &path, None))
-                    .map_err(|error| format!("amh: nothing sent: cannot check which model you run on ({error}); send it again"))?;
-                let model = session["model_override"].as_str().unwrap_or_default();
-                Ok(wanted.iter().any(|part| model.contains(part))
-                    // 🧑 "Try 6 Sol" for this direct-human writing role.
-                    || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag()))
-                    || (!model.is_empty() && by_task == format!("{tool}:{model}")))
-            };
-            if !settings::allows(&settings, "human.writers", tool) && !model_allowed()? {
+            if !writes_to_human(&settings, &task)? {
                 return Err(format!(
-                    "amh: nothing sent: the human reads only agents running on {}, and you run on {tool}. Send what the human should hear to your manager with `amh tell manager` (details in a file); your manager writes to the human. Change your items with `amh todo`.",
-                    settings::get(&settings, "human.writers")
+                    "amh: nothing sent: the human reads only agents running on {}, and you run on {}. Send what the human should hear to your manager with `amh tell manager` (details in a file); your manager writes to the human. Change your items with `amh todo`.",
+                    settings::get(&settings, "human.writers"),
+                    task.field("tool").unwrap_or_default()
                 ));
             }
             // 🧑 "fix the messages to come through pb new and pb urgent instead of this tag"
@@ -737,7 +747,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             // 🧑 "Send the news via email like done before instead of through Zulip"
             let mut by_email = settings.clone();
             by_email.insert("human.transport".to_owned(), "email".to_owned());
-            tell_human(
+            let (receipt, reminder) = tell_human(
                 if flag("email") { &by_email } else { &settings },
                 &task,
                 need("subject"),
@@ -746,6 +756,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 &attach,
                 text("report_label"),
             )?;
+            say(&receipt);
+            say(&reminder);
             let _lock = store.lock()?;
             request_effects(&store)?;
             match done.is_empty() {
@@ -783,7 +795,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 }
             };
             let message = work::envelope(&from, &message);
+            let sent_s = crate::replies::now_s();
             omnigent::send(&settings, &to, &message).map_err(failed)?;
+            if from.starts_with(omnigent::PREFIX)
+                && let Err(error) =
+                    crate::replies::expect(&settings::state_dir(), &to, &from, sent_s)
+            {
+                eprintln!("amh: sent; {error}");
+            }
             let _lock = store.lock()?;
             clear_stopped(&store, &to)?;
             // mdbook_pr3086.md: "routing ownership should match the task that handles them"

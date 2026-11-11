@@ -878,6 +878,7 @@ fn deliver_block(
             return false;
         }
     };
+    let sent_s = crate::replies::now_s();
     let outcome = attempt(
         settings,
         task,
@@ -886,6 +887,16 @@ fn deliver_block(
         reply.as_deref(),
         trace.as_ref(),
     );
+    if let (Outcome::Delivered, Source::Mail(_)) = (&outcome, decide::source_of(&block[0]))
+        && let Err(error) = crate::replies::expect(
+            &store.state_dir,
+            &plan.target,
+            crate::replies::HUMAN,
+            sent_s,
+        )
+    {
+        log(&error);
+    }
     let settled = decide::settle(task, plan, &block[0], &outcome);
     // 🧑 "log all the events (resolution requested, etc.) and who did those"
     let (kind, mut data) = match &outcome {
@@ -1541,6 +1552,11 @@ pub fn run() -> u8 {
         let phase = Instant::now();
         let scanned = watcher.deliver_pending(&settings, &store);
         log_elapsed("message delivery", phase);
+        let phase = Instant::now();
+        for line in crate::replies::forward(&settings, &store) {
+            log(&line);
+        }
+        log_elapsed("turn replies", phase);
         let phase = Instant::now();
         if let Err(error) = crate::actions::deliver_requests(&settings, &store) {
             log(&format!("request notifications failed: {error}"));
