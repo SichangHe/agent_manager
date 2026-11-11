@@ -201,6 +201,9 @@ pub fn run(settings: &Settings, store: &Store) -> Result<String, String> {
         Ok(entries) => entries
             .map(|entry| {
                 let path = entry.map_err(|e| e.to_string())?.path();
+                if path.is_dir() {
+                    return Ok(String::new());
+                }
                 fs::read_to_string(path).map_err(|e| e.to_string())
             })
             .collect::<Result<Vec<_>, String>>()?,

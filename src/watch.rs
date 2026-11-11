@@ -1556,6 +1556,11 @@ pub fn run() -> u8 {
             for line in mail::flush_outbox(&settings, &store.state_dir) {
                 log(&line);
             }
+            if crate::zulip::enabled(&settings) {
+                for line in crate::zulip::drain_pending(&settings, &store.state_dir) {
+                    log(&line);
+                }
+            }
             log_elapsed("outbox flush", phase);
         }
         let phase = Instant::now();

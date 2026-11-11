@@ -351,10 +351,8 @@ pub fn send(
     let stream = settings::get(settings, "zulip.stream_id");
     let mut fields = vec![("content", content)];
     // 🧑 "The PB news should be in its own channel. So is PB urgent."
-    let report_stream = settings::get(
-        settings,
-        &format!("zulip.report_streams.{}", mail::bare(subject).trim()),
-    );
+    let report_stream =
+        settings::get(settings, &format!("zulip.report_streams.{}", mail::bare(subject).trim()));
     if !report_stream.is_empty() {
         fields.extend([
             ("type", "stream".to_owned()),
@@ -380,32 +378,7 @@ pub fn send(
         .find(|(name, _)| *name == "content")
         .map(|(_, value)| value.clone())
         .unwrap_or_default();
-    let narrow = match fields
-        .iter()
-        .find(|(name, _)| *name == "type")
-        .map(|(_, value)| value.as_str())
-    {
-        Some("stream") => {
-            let value = |key| {
-                fields
-                    .iter()
-                    .find(|(name, _)| *name == key)
-                    .map(|(_, value)| value.clone())
-                    .unwrap_or_default()
-            };
-            {
-                let to = value("to");
-                let stream = to
-                    .parse::<u64>()
-                    .map(Value::from)
-                    .unwrap_or(Value::from(to));
-                json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":value("topic")}])
-            }
-        }
-        _ => {
-            json!([{"operator":"dm","operand":fields.iter().find(|(name, _)| *name == "to").map(|(_, value)| value.clone()).unwrap_or_default()}])
-        }
-    };
+    let narrow = narrow_for(&fields);
     let mut sent = api(settings, "POST", "messages", &fields);
     for wait_s in [5, 20] {
         let Err(error) = &sent else { break };
@@ -442,7 +415,7 @@ pub fn send(
                 .and_then(|mut file| file.write_all(pending.to_string().as_bytes()))
                 .map_err(|failure| format!("{error}; cannot preserve Zulip send: {failure}"))?;
             return Err(format!(
-                "{error}; payload retained at {}. Delivery may be uncertain; verify Zulip before retrying",
+                "{error}; payload retained at {}. The watcher will retry it automatically (and drop it after 24 h); do not resend it yourself",
                 path.display()
             ));
         }
@@ -456,6 +429,119 @@ pub fn send(
         eprintln!("amh: Zulip message {id} sent, but recording it failed: {error}");
     }
     Ok(format!("zulip:{id}"))
+}
+
+/// The search narrow matching where a send's `fields` post to.
+fn narrow_for(fields: &[(&str, String)]) -> Value {
+    let value = |key: &str| {
+        fields
+            .iter()
+            .find(|(name, _)| *name == key)
+            .map(|(_, value)| value.clone())
+            .unwrap_or_default()
+    };
+    if value("type") == "stream" {
+        let to = value("to");
+        let stream = to
+            .parse::<u64>()
+            .map(Value::from)
+            .unwrap_or(Value::from(to));
+        json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":value("topic")}])
+    } else {
+        json!([{"operator":"dm","operand":value("to")}])
+    }
+}
+
+const PENDING_MAX_AGE_S: u64 = 24 * 3600;
+
+fn is_rate_limited(error: &str) -> bool {
+    let error = error.to_lowercase();
+    error.contains("rate limit") || error.contains("rate-limit") || error.contains("429")
+}
+
+/// Age of a `<nanos>.json` payload from its name.
+fn pending_age_s(path: &Path, now_ns: i64) -> Option<u64> {
+    let stamp: i64 = path.file_stem()?.to_str()?.parse().ok()?;
+    Some((now_ns.saturating_sub(stamp) / 1_000_000_000).max(0) as u64)
+}
+
+/// Retry payloads that `send` retained. Returns log lines; stops the pass at the first rate limit.
+pub fn drain_pending(settings: &Settings, state: &Path) -> Vec<String> {
+    let folder = state.join("amh-zulip-pending");
+    let mut paths: Vec<_> = match fs::read_dir(&folder) {
+        Ok(entries) => entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file() && path.extension().is_some_and(|e| e == "json"))
+            .collect(),
+        Err(_) => return Vec::new(),
+    };
+    paths.sort();
+    let now_ns = chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default();
+    let mut log = Vec::new();
+    for path in paths {
+        let name = path.display().to_string();
+        if pending_age_s(&path, now_ns).is_some_and(|age| age > PENDING_MAX_AGE_S) {
+            let stale = folder.join("stale");
+            let moved = fs::create_dir_all(&stale)
+                .and_then(|()| fs::rename(&path, stale.join(path.file_name().unwrap_or_default())));
+            log.push(match moved {
+                Ok(()) => format!("Zulip pending {name} older than 24 h; moved to stale/"),
+                Err(error) => format!("Zulip pending {name}: cannot move to stale/: {error}"),
+            });
+            continue;
+        }
+        let Ok(pending) = fs::read(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|raw| serde_json::from_slice::<Value>(&raw).map_err(|e| e.to_string()))
+        else {
+            log.push(format!("Zulip pending {name}: unreadable; left in place"));
+            continue;
+        };
+        let owned: Vec<(String, String)> = pending["fields"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|pair| {
+                        Some((pair[0].as_str()?.to_owned(), pair[1].as_str()?.to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let fields: Vec<(&str, String)> = owned
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.clone()))
+            .collect();
+        let Some(content) = fields.iter().find(|(k, _)| *k == "content").map(|(_, v)| v.clone())
+        else {
+            log.push(format!("Zulip pending {name}: no content; left in place"));
+            continue;
+        };
+        if delivered(settings, &narrow_for(&fields), &content).is_some() {
+            let _ = forget(&path);
+            log.push(format!("Zulip pending {name}: already delivered; removed"));
+            continue;
+        }
+        match api(settings, "POST", "messages", &fields) {
+            Ok(result) => {
+                let _ = forget(&path);
+                let tag = pending["tag"].as_str().unwrap_or_default();
+                let sender = pending["sender"].as_str().unwrap_or_default();
+                if sender != mail::WATCHER
+                    && let Err(error) = mail::record_sent(settings, state, task_topic(tag))
+                {
+                    log.push(format!("Zulip pending {name}: sent, but recording failed: {error}"));
+                }
+                log.push(format!("Zulip pending {name}: resent as {}", result["id"]));
+            }
+            Err(error) if is_rate_limited(&error) => {
+                log.push(format!("Zulip pending: rate limited, backing off: {error}"));
+                break;
+            }
+            Err(error) => log.push(format!("Zulip pending {name}: retry failed: {error}")),
+        }
+    }
+    log
 }
 
 /// Drop a queued deletion; another amh process (or the watcher) draining the same queue may have dropped it first.
@@ -758,6 +844,39 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn pending_age_and_rate_limit_detection() {
+        let p = Path::new("/x/1000000000.json");
+        assert_eq!(pending_age_s(p, 3_000_000_000), Some(2));
+        assert_eq!(pending_age_s(Path::new("/x/note.json"), 5), None);
+        assert!(is_rate_limited("Zulip request failed: \"API usage exceeded rate limit\""));
+        assert!(!is_rate_limited("Zulip request failed: bad stream"));
+    }
+    #[test]
+    fn narrow_matches_destination() {
+        let dm = vec![("type", "direct".to_owned()), ("to", "[7]".to_owned())];
+        assert_eq!(narrow_for(&dm)[0]["operator"], "dm");
+        let st = vec![
+            ("type", "stream".to_owned()),
+            ("to", "5".to_owned()),
+            ("topic", "t".to_owned()),
+        ];
+        assert_eq!(narrow_for(&st)[0]["operand"], 5);
+        assert_eq!(narrow_for(&st)[1]["operand"], "t");
+    }
+    #[test]
+    fn stale_payloads_move_without_network() -> Result<(), Box<dyn std::error::Error>> {
+        let state = std::env::temp_dir().join(format!("amh-drain-{}", std::process::id()));
+        let folder = state.join("amh-zulip-pending");
+        fs::create_dir_all(&folder)?;
+        fs::write(folder.join("1000.json"), "{}")?;
+        let log = drain_pending(&Settings::new(), &state);
+        assert!(log[0].contains("moved to stale/"), "{log:?}");
+        assert!(folder.join("stale/1000.json").exists());
+        assert!(!folder.join("1000.json").exists());
+        fs::remove_dir_all(&state)?;
+        Ok(())
+    }
     use super::*;
     #[test]
     fn disabled_consolidation_needs_no_credentials() -> Result<(), String> {
