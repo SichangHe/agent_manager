@@ -20,6 +20,7 @@ mod quota;
 mod quota_core;
 mod quota_observer;
 mod requests;
+mod revive;
 mod settings;
 mod store;
 mod taskfile;

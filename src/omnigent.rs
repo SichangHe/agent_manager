@@ -605,7 +605,7 @@ pub fn end_scan() {
     SCAN.set(None);
 }
 
-fn fetched_status(settings: &Settings, address: &str) -> (&'static str, String) {
+pub fn fetched_status(settings: &Settings, address: &str) -> (&'static str, String) {
     let found = session(address).and_then(|id| {
         api(
             settings,
