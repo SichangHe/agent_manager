@@ -634,7 +634,7 @@ fn ensure_guest_agent(settings: &Settings, store: &Store, address: &str) -> Resu
         return Ok(());
     }
     let new = NewTask {
-                account: None,
+        account: None,
         name: &name,
         workdir: settings::get(settings, "guest.workdir"),
         goal: &guest::goal(address),
@@ -732,7 +732,12 @@ fn take_in_guest_mail(
 }
 
 /// The message for an agent from a pending block; a stored human email is inlined verbatim.
-fn delivery_text(settings: &Settings, store: &Store, block: &[String]) -> Result<String, String> {
+fn delivery_text(
+    settings: &Settings,
+    store: &Store,
+    task: &Task,
+    block: &[String],
+) -> Result<String, String> {
     // 🧑 "Pending blocks in task files should not be `manager_delegation`, they should be dispatched naked, randomly followed by a reminder to add to pending task items"
     // A fresh `RandomState` hashes with fresh random keys, which makes it a random number without another crate.
     let remind = RandomState::new().build_hasher().finish().is_multiple_of(8);
@@ -744,7 +749,7 @@ fn delivery_text(settings: &Settings, store: &Store, block: &[String]) -> Result
             let file = Path::new(name).file_name().unwrap_or_default();
             let stored = fs::read_to_string(store.root.join("manager_mail").join(file))
                 .map_err(|error| format!("{name}: {error}"))?;
-            decide::mail_text(name, &stored, remind)
+            decide::mail_text(name, &stored, !task.items.is_empty(), remind)
         }
         Source::Plain => decide::plain_text(block, remind),
     })
@@ -861,7 +866,7 @@ fn deliver_block(
         }
         _ => None,
     };
-    let text = match delivery_text(settings, store, block) {
+    let text = match delivery_text(settings, store, task, block) {
         Ok(text) => decide::addressed(task, plan, &text),
         Err(error) => {
             log(&format!(
@@ -1068,7 +1073,7 @@ impl Watcher {
                     settings,
                     store,
                     name,
-                    &decide::mail_text(mail, &stored, false),
+                    &decide::mail_text(mail, &stored, true, false),
                     None,
                     "on the human's order",
                 ) {

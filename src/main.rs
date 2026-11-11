@@ -110,7 +110,9 @@ fn main() -> ExitCode {
     // 🤖 A start that must wait for a slot (2 per minute on the machine) blocked its caller for many minutes during restart storms, and callers' tool timeouts killed them (exit 144). Such a start now goes on in the background and the caller gets an answer at once.
     if matches!(
         (values["group"].as_str(), values["action"].as_str()),
-        (Some("task"), Some("start")) | (Some("agent"), Some("replace")) | (Some("manager"), Some("rotate"))
+        (Some("task"), Some("start"))
+            | (Some("agent"), Some("replace"))
+            | (Some("manager"), Some("rotate"))
     ) && !detached
     {
         let ahead = omnigent::start_backlog();
@@ -123,7 +125,9 @@ fn main() -> ExitCode {
                     log::record(&line, "detached");
                     return ExitCode::SUCCESS;
                 }
-                Err(error) => eprintln!("amh: cannot run the start in the background ({error}); waiting here"),
+                Err(error) => {
+                    eprintln!("amh: cannot run the start in the background ({error}); waiting here")
+                }
             }
         }
     }

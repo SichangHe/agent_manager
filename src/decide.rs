@@ -14,7 +14,7 @@ pub const MAIL_SOURCE: &str = "(record and delegate manager_mail/";
 pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
-pub const ACCEPT: &str = "Immediately acknowledge acceptance to the Human and record every open item, in ONE call: `amh tell human --subject ... --add 'ITEM'` once per open item, quoting the human's words. Keep the Message-ID it prints: your next email replaces this acknowledgement with `--replaces ID` if the human has not read it by then:";
+pub const ACCEPT: &str = "from the human; acknowledge it and record each request as an open item in ONE call: `amh tell human --add 'ITEM'` per item, in the human's words";
 pub const ADD_REMINDER: &str = "\nAdd every still-open request to your open items.";
 
 /// Text in quotes as the watcher log shows it.
@@ -275,14 +275,34 @@ pub fn plain_text(block: &[String], remind: bool) -> String {
     block.join("\n").trim().to_owned() + if remind { ADD_REMINDER } else { "" }
 }
 
-/// The message for an agent from a stored human email, which is inlined verbatim.
+/// The message for an agent from a stored human email: the human's text bare, with at most one note after it.
+///
+/// The subject is kept only for an email that starts a thread; Zulip topics, `amh say` labels, and `Re:` subjects carry no words of the human's.
+/// `has_items`: the task already has open items, so the request is recorded and only the occasional `remind` is added; without items it gets `ACCEPT`.
 // 🧑 "human requests should be sent verbatim"
-pub fn mail_text(name: &str, stored: &str, remind: bool) -> String {
-    format!(
-        "{ACCEPT}\n<human_instruction authoritative=\"true\" source=\"manager_mail/{name}\">\n{}\n</human_instruction>{}",
-        work::unix_lines(stored).trim(),
-        if remind { ADD_REMINDER } else { "" }
-    )
+// 🧑 "Normal human messages should arrive without things around them, only sometimes with reminders of adding pending items etc."
+pub fn mail_text(name: &str, stored: &str, has_items: bool, remind: bool) -> String {
+    let stored = work::unix_lines(stored);
+    let (subject, body) = match stored.split_once("\n\n") {
+        Some((head, body)) => (head.strip_prefix("Subject: ").unwrap_or(head), body),
+        None => ("", stored.as_str()),
+    };
+    let generated = name.starts_with("zulip-") || name.contains("-edit-");
+    let reply = ["re:", "fwd:", "fw:"]
+        .iter()
+        .any(|prefix| subject.to_lowercase().starts_with(prefix));
+    let mut text = match subject.trim() {
+        "" => String::new(),
+        _ if generated || reply => String::new(),
+        subject => format!("Subject: {subject}\n\n"),
+    };
+    text += body.trim();
+    if !has_items {
+        text += &format!("\n\n({ACCEPT})");
+    } else if remind {
+        text += ADD_REMINDER;
+    }
+    text
 }
 
 /// What the human reads when an agent asks a question with choices.
@@ -642,6 +662,22 @@ pub enum Nudge {
     },
 }
 
+/// The reminder for an idle agent: its first `REMIND_LISTED` ready items and how many more there are.
+// 🧑 "Normal human messages should arrive without things around them"; the parent: "drop ... the long open-item reminder lists (80+ items)"
+fn remind_text(ready: &[&str]) -> String {
+    let listed = &ready[..ready.len().min(REMIND_LISTED)];
+    let more = match ready.len() - listed.len() {
+        0 => String::new(),
+        n => format!("\n- and {n} more"),
+    };
+    format!(
+        "Continue your ready items:\n- {}{more}\nSee all, with request IDs and dependencies, with `amh todo list`. This reminder is automatic: send nobody a message because of it.",
+        listed.join("\n- ")
+    )
+}
+
+const REMIND_LISTED: usize = 3;
+
 /// Decide what to do about the agent problems found, and which problem keys exist now.
 ///
 /// `reported` holds the keys already reported; a key that is no longer returned is forgotten, so the problem is reported again if it comes back.
@@ -679,10 +715,7 @@ pub fn nudges(
                 nudges.push(Nudge::Remind {
                     task: task.name.clone(),
                     address: task.address().to_owned(),
-                    text: format!(
-                        "Continue your ready items:\n- {}\nSee request IDs and dependencies with `amh todo list`. This reminder is automatic: send nobody a message because of it.",
-                        ready.join("\n- ")
-                    ),
+                    text: remind_text(&ready),
                 });
             }
             continue;
@@ -1443,21 +1476,68 @@ mod tests {
     }
 
     #[test]
+    fn an_idle_reminder_lists_few_ready_items() {
+        let ready: Vec<String> = (1..=80).map(|n| format!("item {n}")).collect();
+        let ready: Vec<&str> = ready.iter().map(String::as_str).collect();
+        let text = remind_text(&ready);
+        assert!(text.starts_with(
+            "Continue your ready items:\n- item 1\n- item 2\n- item 3\n- and 77 more\n"
+        ));
+        assert!(!text.contains("item 4"));
+        assert!(!remind_text(&["a", "b"]).contains("more"));
+    }
+
+    #[test]
     fn a_block_becomes_the_message_for_its_agent() {
         let body = "note\n\n(pending)\n(record and delegate manager_mail/m-11.txt)\n\n(pending)\nplain block line one\nline two\n";
         let blocks = taskfile::pending_blocks(body);
         assert_eq!(source_of(&blocks[0].1[0]), Source::Mail("m-11.txt"));
         assert_eq!(source_of(&blocks[1].1[0]), Source::Plain);
         assert_eq!(source_of("(guest mail d/guest-3.txt)"), Source::Guest);
+        let reply = "Subject: Re: [t_sub] do more\n\nPlease do Z.\r\n> old\r\n";
+        assert_eq!(
+            mail_text("m-11.txt", reply, true, false),
+            "Please do Z.\n> old"
+        );
+        assert_eq!(
+            mail_text("m-11.txt", reply, false, true),
+            format!("Please do Z.\n> old\n\n({ACCEPT})")
+        );
         assert_eq!(
             mail_text(
-                "m-11.txt",
-                "Subject: Re: [t_sub] do more\n\nPlease do Z.\r\n> old\r\n",
+                "zulip-7.txt",
+                "Subject: [t_sub] Zulip message\n\nStop it\n",
+                true,
                 false
             ),
-            format!(
-                "{ACCEPT}\n<human_instruction authoritative=\"true\" source=\"manager_mail/m-11.txt\">\nSubject: Re: [t_sub] do more\n\nPlease do Z.\n> old\n</human_instruction>"
-            )
+            "Stop it"
+        );
+        assert_eq!(
+            mail_text(
+                "h-edit-1.txt",
+                "Subject: [t_sub] said with amh say\n\nGo on.\n",
+                true,
+                false
+            ),
+            "Go on."
+        );
+        assert_eq!(
+            mail_text(
+                "m-12.txt",
+                "Subject: [t_sub] build X\n\nUse Rust.\n",
+                true,
+                false
+            ),
+            "Subject: [t_sub] build X\n\nUse Rust."
+        );
+        assert_eq!(
+            mail_text(
+                "zulip-8.txt",
+                "Subject: [t] Zulip message\n\nok\n",
+                true,
+                true
+            ),
+            format!("ok{ADD_REMINDER}")
         );
         assert_eq!(
             plain_text(&blocks[1].1, false),
@@ -1466,9 +1546,6 @@ mod tests {
         assert_eq!(
             plain_text(&["do it".to_owned()], true),
             format!("do it{ADD_REMINDER}")
-        );
-        assert!(
-            mail_text("m.txt", "x", true).ends_with(&format!("</human_instruction>{ADD_REMINDER}"))
         );
     }
 
@@ -1649,7 +1726,10 @@ mod tests {
         );
         // A send by a task the reminded one manages answers it; one before the email does not.
         assert_eq!(chased("99095 t_main.md m-11.txt 0", "99500 t_work\n"), []);
-        assert_eq!(chased("99095 t_main.md m-11.txt 0", "99000 t_work\n").len(), 1);
+        assert_eq!(
+            chased("99095 t_main.md m-11.txt 0", "99000 t_work\n").len(),
+            1
+        );
         let reminded = "99095 t_sub.md m-11.txt 1";
         assert_eq!(chased(reminded, ""), [Chase::Keep(reminded.to_owned())]);
         let late = chased("98195 t_sub.md m-11.txt 1", "");
@@ -1722,7 +1802,7 @@ mod tests {
                 Nudge::Remind {
                     task: "t_work.md".to_owned(),
                     address: "omnigent://s1".to_owned(),
-                    text: "Continue your ready items:\n- x\nSee request IDs and dependencies with `amh todo list`. This reminder is automatic: send nobody a message because of it.".to_owned(),
+                    text: "Continue your ready items:\n- x\nSee all, with request IDs and dependencies, with `amh todo list`. This reminder is automatic: send nobody a message because of it.".to_owned(),
                 },
             ]
         );

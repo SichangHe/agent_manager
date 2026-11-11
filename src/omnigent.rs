@@ -19,7 +19,10 @@ const STARTS_PER_MIN: usize = 2;
 fn starts_per_min() -> usize {
     crate::settings::load()
         .ok()
-        .and_then(|s| s.get("launch.starts_per_minute").and_then(|v| v.parse().ok()))
+        .and_then(|s| {
+            s.get("launch.starts_per_minute")
+                .and_then(|v| v.parse().ok())
+        })
         .filter(|n| *n > 0)
         .unwrap_or(STARTS_PER_MIN)
 }
@@ -90,10 +93,7 @@ fn start_slot() -> Result<(), String> {
             Err(NO_SLOT.to_owned())
         } else if Instant::now() >= given_up {
             queue.retain(|pid| *pid != me);
-            Err(
-                "waited 30 min for a start slot (launch.starts_per_minute, default 2)"
-                    .to_owned(),
-            )
+            Err("waited 30 min for a start slot (launch.starts_per_minute, default 2)".to_owned())
         } else {
             Ok(false)
         };

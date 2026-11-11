@@ -188,7 +188,7 @@ fn revive(settings: &Settings, store: &Store, table: &str, name: &str) -> Result
     let goal = fs::read_to_string(key("prompt"))
         .map_err(|error| format!("cannot read its prompt {}: {error}", key("prompt")))?;
     let new = NewTask {
-                account: None,
+        account: None,
         name,
         workdir: key("dir"),
         goal: &goal,

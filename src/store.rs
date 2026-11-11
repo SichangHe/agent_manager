@@ -30,7 +30,9 @@ fn since_next() -> i128 {
 
 /// The start of the last complete full export, if recorded.
 fn stamp(database: &Database) -> Result<Option<i128>, String> {
-    Ok(database.record("export:stamp")?.and_then(|t| t.parse().ok()))
+    Ok(database
+        .record("export:stamp")?
+        .and_then(|t| t.parse().ok()))
 }
 
 /// True when `path` exists and was last modified before `since`.
@@ -315,11 +317,15 @@ impl Store {
             if lines.is_empty() {
                 return Ok(());
             }
-            let mut file = fs::OpenOptions::new().write(true).open(&path).map_err(failed)?;
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .map_err(failed)?;
             file.set_len(len - 4).map_err(failed)?;
             use std::io::{Seek, SeekFrom};
             file.seek(SeekFrom::End(0)).map_err(failed)?;
-            file.write_all(format!("{lines}{FENCE}").as_bytes()).map_err(failed)?;
+            file.write_all(format!("{lines}{FENCE}").as_bytes())
+                .map_err(failed)?;
             let len = file.metadata().map_err(failed)?.len();
             return database.set_record("export:events", &format!("{newest} {len}"));
         }
@@ -334,12 +340,16 @@ impl Store {
     /// The time before which an unchanged file needs no re-read: the start of the last complete export; none (read all) every 10 minutes or when unknown.
     fn export_since(&self, database: &Database) -> Result<Option<i128>, String> {
         let now = now_ns();
-        let full = database.record("export:full_at")?.and_then(|t| t.parse::<i128>().ok());
+        let full = database
+            .record("export:full_at")?
+            .and_then(|t| t.parse::<i128>().ok());
         if full.is_none_or(|at| now - at > 600 * 1_000_000_000) {
             database.set_record("export:full_at", &now.to_string())?;
             return Ok(None);
         }
-        Ok(database.record("export:stamp")?.and_then(|t| t.parse().ok()))
+        Ok(database
+            .record("export:stamp")?
+            .and_then(|t| t.parse().ok()))
     }
 
     /// Where a task file lives now: its month folder once done, else the root.
@@ -495,7 +505,11 @@ impl Store {
                     filed.as_deref() == Some(text.as_bytes())
                         || (root_file.is_file() && filed == fs::read(&root_file).ok())
                 };
-                if let Some((found, _)) = self.month_files().into_iter().find(|(month, file)| file == name && same(month)) {
+                if let Some((found, _)) = self
+                    .month_files()
+                    .into_iter()
+                    .find(|(month, file)| file == name && same(month))
+                {
                     database.set_record(&key, &found)?;
                     let filed = self.root.join(&found).join(name);
                     if root_file.is_file() {
@@ -1143,7 +1157,10 @@ mod tests {
         fs::remove_file(root.join("190001").join("t.md"))?;
         fs::create_dir_all(root.join("190001"))?;
         drop(store.lock()?);
-        assert!(root.join("190001").join("t.md").exists(), "exported to the filed folder");
+        assert!(
+            root.join("190001").join("t.md").exists(),
+            "exported to the filed folder"
+        );
         assert!(!root.join("t.md").exists(), "not recreated at the root");
         let _ = fs::remove_dir_all(&root);
         Ok(())

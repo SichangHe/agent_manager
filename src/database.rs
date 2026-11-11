@@ -365,7 +365,9 @@ impl Database {
             )
             .map_err(error)?;
         let rows = query
-            .query_map([after], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .query_map([after], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(error)?;
         let (mut text, mut last) = (String::new(), after);
         for row in rows {

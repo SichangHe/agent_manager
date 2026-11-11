@@ -134,7 +134,11 @@ modules
     - delivery: each pending `human` row and each `(pending)` block (text typed into a task file, guest mail) -> the task's agent; then the row is marked sent or the marker line is deleted, the source line stays
         - a block in a task with no agent (done or retired) goes to that task's manager, else the main manager
         - an idle Omnigent session whose runner is offline is reachable: the next message brings the runner back
-        - stored email is inlined verbatim in `<human_instruction>`
+        - stored email arrives bare: the human's text, no wrapper
+            - subject kept only for an email starting a thread; not Zulip topics, `amh say` labels, `Re:`/`Fwd:`
+            - task without open items -> one `(from the human; acknowledge ... --add ...)` note after it
+            - else 1 in 8 deliveries end with the add-to-open-items reminder
+        - idle reminder lists 3 ready items plus `and N more`
         - 🧑 "if I message an agent and somehow they are not whatever state they are, I should get some sort of response"
             - delivery to the agent fails -> the block goes to its manager, else the main manager, and the human is emailed once that it was rerouted
             - nobody reachable -> the human is emailed once; retried after 10 min

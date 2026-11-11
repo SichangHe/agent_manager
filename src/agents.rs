@@ -195,7 +195,9 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
     }
     let account = match start.fields.iter().find(|(key, _)| key == "account") {
         Some((_, value)) => Some(value.clone()),
-        None if store.contains(start.name)? => store.load(start.name)?.field("account").map(str::to_owned),
+        None if store.contains(start.name)? => {
+            store.load(start.name)?.field("account").map(str::to_owned)
+        }
         None => None,
     };
     let model = &pinned_model(account.as_deref(), start.model);
@@ -501,8 +503,13 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     let pinned = given(new.model).is_some() || given(new.effort).is_some();
     fields.push(("model_pinned".to_owned(), pinned.to_string()));
     if let Some(account) = given(new.account) {
-        if !account.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(format!("amh: account name {account:?} may only have letters, digits, - and _"));
+        if !account
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(format!(
+                "amh: account name {account:?} may only have letters, digits, - and _"
+            ));
         }
         fields.push(("account".to_owned(), account.to_owned()));
     }
@@ -588,9 +595,18 @@ mod account_tests {
     #[test]
     fn pinned_model_tags_and_unpins() {
         use super::pinned_model;
-        assert_eq!(pinned_model(Some("burner"), "gpt-6.1-sol"), "burner/gpt-6.1-sol");
-        assert_eq!(pinned_model(Some("burner"), "old/gpt-6.1-sol"), "burner/gpt-6.1-sol");
-        assert_eq!(pinned_model(Some("none"), "burner/gpt-6.1-sol"), "gpt-6.1-sol");
+        assert_eq!(
+            pinned_model(Some("burner"), "gpt-6.1-sol"),
+            "burner/gpt-6.1-sol"
+        );
+        assert_eq!(
+            pinned_model(Some("burner"), "old/gpt-6.1-sol"),
+            "burner/gpt-6.1-sol"
+        );
+        assert_eq!(
+            pinned_model(Some("none"), "burner/gpt-6.1-sol"),
+            "gpt-6.1-sol"
+        );
         assert_eq!(pinned_model(None, "vendor/m"), "vendor/m");
         assert_eq!(pinned_model(Some("None"), "burner/m"), "m");
     }

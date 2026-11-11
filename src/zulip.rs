@@ -351,8 +351,10 @@ pub fn send(
     let stream = settings::get(settings, "zulip.stream_id");
     let mut fields = vec![("content", content)];
     // 🧑 "The PB news should be in its own channel. So is PB urgent."
-    let report_stream =
-        settings::get(settings, &format!("zulip.report_streams.{}", mail::bare(subject).trim()));
+    let report_stream = settings::get(
+        settings,
+        &format!("zulip.report_streams.{}", mail::bare(subject).trim()),
+    );
     if !report_stream.is_empty() {
         fields.extend([
             ("type", "stream".to_owned()),
@@ -512,7 +514,10 @@ pub fn drain_pending(settings: &Settings, state: &Path) -> Vec<String> {
             .iter()
             .map(|(key, value)| (key.as_str(), value.clone()))
             .collect();
-        let Some(content) = fields.iter().find(|(k, _)| *k == "content").map(|(_, v)| v.clone())
+        let Some(content) = fields
+            .iter()
+            .find(|(k, _)| *k == "content")
+            .map(|(_, v)| v.clone())
         else {
             log.push(format!("Zulip pending {name}: no content; left in place"));
             continue;
@@ -530,7 +535,9 @@ pub fn drain_pending(settings: &Settings, state: &Path) -> Vec<String> {
                 if sender != mail::WATCHER
                     && let Err(error) = mail::record_sent(settings, state, task_topic(tag))
                 {
-                    log.push(format!("Zulip pending {name}: sent, but recording failed: {error}"));
+                    log.push(format!(
+                        "Zulip pending {name}: sent, but recording failed: {error}"
+                    ));
                 }
                 log.push(format!("Zulip pending {name}: resent as {}", result["id"]));
             }
@@ -744,7 +751,9 @@ fn recent_duplicate(state: &Path, tag: &str, subject: &str, body: &str) -> Resul
     let old = fs::read_to_string(&path).unwrap_or_default();
     let mut kept: Vec<String> = Vec::new();
     for line in old.lines() {
-        let Ok(entry) = serde_json::from_str::<Value>(line) else { continue };
+        let Ok(entry) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
         let at = entry["at"].as_i64().unwrap_or(0);
         if now - at >= DUPLICATE_WINDOW_S {
             continue;
@@ -849,7 +858,9 @@ mod tests {
         let p = Path::new("/x/1000000000.json");
         assert_eq!(pending_age_s(p, 3_000_000_000), Some(2));
         assert_eq!(pending_age_s(Path::new("/x/note.json"), 5), None);
-        assert!(is_rate_limited("Zulip request failed: \"API usage exceeded rate limit\""));
+        assert!(is_rate_limited(
+            "Zulip request failed: \"API usage exceeded rate limit\""
+        ));
         assert!(!is_rate_limited("Zulip request failed: bad stream"));
     }
     #[test]
