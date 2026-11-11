@@ -283,9 +283,12 @@ pub fn plain_text(block: &[String], remind: bool) -> String {
 // 🧑 "Normal human messages should arrive without things around them, only sometimes with reminders of adding pending items etc."
 pub fn mail_text(name: &str, stored: &str, has_items: bool, remind: bool) -> String {
     let stored = work::unix_lines(stored);
-    let (subject, body) = match stored.split_once("\n\n") {
-        Some((head, body)) => (head.strip_prefix("Subject: ").unwrap_or(head), body),
-        None => ("", stored.as_str()),
+    let (subject, body) = match stored
+        .strip_prefix("Subject: ")
+        .and_then(|rest| rest.split_once("\n\n"))
+    {
+        Some((subject, body)) if !subject.contains('\n') => (subject.trim(), body),
+        _ => ("", stored.as_str()),
     };
     let generated = name.starts_with("zulip-") || name.contains("-edit-");
     let reply = ["re:", "fwd:", "fw:"]
@@ -1529,6 +1532,10 @@ mod tests {
                 false
             ),
             "Subject: [t_sub] build X\n\nUse Rust."
+        );
+        assert_eq!(
+            mail_text("zulip-9.txt", "first para\n\nsecond\n", true, false),
+            "first para\n\nsecond"
         );
         assert_eq!(
             mail_text(
