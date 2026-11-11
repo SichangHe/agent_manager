@@ -185,7 +185,6 @@ pub fn pass(
                 let fresh = store.load(name).ok();
                 let still = fresh.as_ref().is_some_and(|t| t.address() == seen.at)
                     && omnigent::held(&seen.at).is_none()
-                    && crate::quota_pause::paused(&seen.at).is_none()
                     && matches!(
                         omnigent::fetched_status(settings, &seen.at).0,
                         "missing" | "error"
