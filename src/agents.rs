@@ -48,6 +48,8 @@ pub struct NewTask<'a> {
     pub long_running: bool,
     pub email: Option<&'a str>,
     pub lines: Option<&'a str>,
+    /// Proxy account group the agent may use; `none` unpins.
+    pub account: Option<&'a str>,
 }
 
 /// The active tasks whose agent is gone, failed, stuck, or idle with open items, each with its evidence.
@@ -191,6 +193,12 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
             ));
         }
     }
+    let account = match start.fields.iter().find(|(key, _)| key == "account") {
+        Some((_, value)) => Some(value.clone()),
+        None if store.contains(start.name)? => store.load(start.name)?.field("account").map(str::to_owned),
+        None => None,
+    };
+    let model = &pinned_model(account.as_deref(), start.model);
     let agent = |error: String| format!("amh: {error}");
     let commands = [vec![]]
         .into_iter()
@@ -203,7 +211,7 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
     let address = omnigent::launch(
         settings,
         start.tool,
-        start.model,
+        model,
         start.effort,
         start.workdir,
         title,
@@ -463,6 +471,16 @@ pub fn replace(
     Ok(new)
 }
 
+/// The model name that makes the proxy use only the accounts tagged with `account`; no account or `none` gives the plain model, which the proxy serves only from untagged accounts.
+// 🧑 "We need the ability to pin agent sessions to accounts, so burner sessions only burns the accounts. We want to use up and other accounts support that will be reserved for more important agents."
+pub fn pinned_model(account: Option<&str>, model: &str) -> String {
+    let plain = model.rsplit('/').next().unwrap_or(model);
+    match account.filter(|a| !a.is_empty() && *a != "none") {
+        Some(account) => format!("{account}/{plain}"),
+        None => plain.to_owned(),
+    }
+}
+
 /// A value the caller gave; an empty one counts as not given.
 fn given(value: Option<&str>) -> Option<&str> {
     value.filter(|text| !text.is_empty())
@@ -478,6 +496,9 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     }
     let pinned = given(new.model).is_some() || given(new.effort).is_some();
     fields.push(("model_pinned".to_owned(), pinned.to_string()));
+    if let Some(account) = given(new.account) {
+        fields.push(("account".to_owned(), account.to_owned()));
+    }
     if store.contains(new.name)? {
         let old = store.load(new.name)?;
         let migrating = given(new.tool).is_some_and(|tool| old.field("tool") != Some(tool))
@@ -553,4 +574,16 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
             record: &request,
         },
     )
+}
+
+#[cfg(test)]
+mod account_tests {
+    #[test]
+    fn pinned_model_tags_and_unpins() {
+        use super::pinned_model;
+        assert_eq!(pinned_model(Some("burner"), "gpt-6.1-sol"), "burner/gpt-6.1-sol");
+        assert_eq!(pinned_model(Some("burner"), "old/gpt-6.1-sol"), "burner/gpt-6.1-sol");
+        assert_eq!(pinned_model(Some("none"), "burner/gpt-6.1-sol"), "gpt-6.1-sol");
+        assert_eq!(pinned_model(None, "claude-opus-5-5"), "claude-opus-5-5");
+    }
 }

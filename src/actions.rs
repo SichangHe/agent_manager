@@ -443,6 +443,7 @@ fn short(values: &Value) -> Result<u8, String> {
             let here = std::env::current_dir()
                 .map_err(|error| format!("amh: cannot tell the current directory: {error}"))?;
             let new = NewTask {
+                account: None,
                 name,
                 workdir: &here.to_string_lossy(),
                 goal: &goal,
@@ -981,6 +982,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 long_running: false,
                 email: text("email"),
                 lines: text("lines"),
+                account: text("account"),
             };
             agents::start_task(&settings, &store, &new)? + "\n"
         }
@@ -1166,6 +1168,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("agent", "replace") => {
             let name = work::task_name(need("who"));
             let message = text("message").unwrap_or_default();
+            if let Some(account) = text("account") {
+                let _lock = store.lock()?;
+                let mut task = store.load(&name)?;
+                task.fields.retain(|(key, _)| key != "account");
+                task.fields.push(("account".to_owned(), account.to_owned()));
+                store.save(&task)?;
+            }
             let new = agents::replace(
                 &settings,
                 &store,

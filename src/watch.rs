@@ -634,6 +634,7 @@ fn ensure_guest_agent(settings: &Settings, store: &Store, address: &str) -> Resu
         return Ok(());
     }
     let new = NewTask {
+                account: None,
         name: &name,
         workdir: settings::get(settings, "guest.workdir"),
         goal: &guest::goal(address),
