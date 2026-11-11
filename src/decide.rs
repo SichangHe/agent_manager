@@ -532,10 +532,16 @@ pub fn chase(
         };
         let (at_s, stage) = (at.parse::<f64>().ok()?, stage.parse::<u64>().ok()?);
         let task = active.iter().find(|task| task.name == name)?;
-        if sent
-            .iter()
-            .any(|(when, tag)| *tag == task.tag() && *when >= at_s)
-        {
+        // The task's own send, or a send by a task it manages (the one it delegated the email to), answers it.
+        let answers = |tag: &str| {
+            tag == task.tag()
+                || active.iter().any(|other| {
+                    other.tag() == tag
+                        && !task.address().is_empty()
+                        && other.field("managerat") == Some(task.address())
+                })
+        };
+        if sent.iter().any(|(when, tag)| *when >= at_s && answers(tag)) {
             return None;
         }
         if now_s - at_s < (ANSWER_S * (stage + 1)) as f64 {
@@ -1641,6 +1647,9 @@ mod tests {
             text,
             "The human's email manager_mail/m-11.txt was given to you at T99095 and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled m-11.txt --because 'THE HUMAN'S WORDS'` instead."
         );
+        // A send by a task the reminded one manages answers it; one before the email does not.
+        assert_eq!(chased("99095 t_main.md m-11.txt 0", "99500 t_work\n"), []);
+        assert_eq!(chased("99095 t_main.md m-11.txt 0", "99000 t_work\n").len(), 1);
         let reminded = "99095 t_sub.md m-11.txt 1";
         assert_eq!(chased(reminded, ""), [Chase::Keep(reminded.to_owned())]);
         let late = chased("98195 t_sub.md m-11.txt 1", "");
