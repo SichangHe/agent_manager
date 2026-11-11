@@ -103,12 +103,49 @@ fn main() -> ExitCode {
     ) {
         log::record(&line, "started");
     }
+    // 🤖 A start that must wait for a slot (2 per minute on the machine) blocked its caller for many minutes during restart storms, and callers' tool timeouts killed them (exit 144). Such a start now goes on in the background and the caller gets an answer at once.
+    if matches!(
+        (values["group"].as_str(), values["action"].as_str()),
+        (Some("task"), Some("start")) | (Some("agent"), Some("replace")) | (Some("manager"), Some("rotate"))
+    ) && std::env::var_os("AMH_DETACHED").is_none()
+    {
+        let ahead = omnigent::start_backlog();
+        if ahead > 0 {
+            match detach() {
+                Ok(out) => {
+                    println!(
+                        "queued: {ahead} start(s) ahead (2 agent starts per minute on the machine); it goes on in the background, output in {out}; check later with `amh agent status`"
+                    );
+                    log::record(&line, "detached");
+                    return ExitCode::SUCCESS;
+                }
+                Err(error) => eprintln!("amh: cannot run the start in the background ({error}); waiting here"),
+            }
+        }
+    }
     let code = actions::run(&values).unwrap_or_else(|message| {
         eprintln!("{message}");
         1
     });
     log::record(&line, &format!("exit={code}"));
     ExitCode::from(code)
+}
+
+/// Run this same command again in its own session, so the caller's exit or kill does not stop it; returns the output file.
+fn detach() -> Result<String, String> {
+    let out = std::env::temp_dir().join(format!("amh-start-{}.txt", std::process::id()));
+    let file = std::fs::File::create(&out).map_err(|e| e.to_string())?;
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    std::process::Command::new("setsid")
+        .arg(exe)
+        .args(std::env::args_os().skip(1))
+        .env("AMH_DETACHED", "1")
+        .stdin(std::process::Stdio::null())
+        .stdout(file.try_clone().map_err(|e| e.to_string())?)
+        .stderr(file)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    Ok(out.display().to_string())
 }
 
 #[cfg(test)]

@@ -25,6 +25,25 @@ pub const NO_SLOT: &str =
 
 pub static NO_WAIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// How many starts wait ahead of a new one, counting a full current minute as one; 0 means a start can go now.
+pub fn start_backlog() -> usize {
+    let path = crate::settings::state_dir().join("amh-starts.json");
+    let read = |p: &std::path::Path| std::fs::read_to_string(p).ok();
+    let queue: Vec<u32> = read(&path.with_extension("queue.json"))
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let waiting = queue
+        .iter()
+        .filter(|pid| std::path::Path::new(&format!("/proc/{pid}")).exists())
+        .count();
+    let now_s = chrono::Utc::now().timestamp();
+    let starts: Vec<i64> = read(&path)
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .unwrap_or_default();
+    let full = starts.iter().filter(|at| now_s - **at < 60).count() >= STARTS_PER_MIN;
+    waiting + usize::from(full)
+}
+
 fn start_slot() -> Result<(), String> {
     let path = crate::settings::state_dir().join("amh-starts.json");
     // 🤖 vl_catchup.md: a burst of wakes left `amh task start` waiting 5+ min; waiters are served in arrival order.
