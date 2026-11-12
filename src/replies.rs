@@ -15,7 +15,7 @@ pub const HUMAN: &str = "human";
 /// A turn that has not ended this long after its delivery is no longer answered.
 const EXPIRY_S: i64 = 12 * 3600;
 /// A session that stays `running` with an assistant text as its newest item for this long has ended its turn and waits on background work.
-const QUIET_S: i64 = 120;
+const QUIET_S: i64 = 180;
 /// A reply that keeps failing to send is given up this long after its delivery.
 const RETRY_S: i64 = 600;
 
@@ -41,11 +41,17 @@ pub fn expect(state_dir: &Path, address: &str, from: &str, since_s: i64) -> Resu
         HUMAN => dir.join(id),
         _ => dir.join(format!("{id}.agent")),
     };
-    if from == HUMAN && file.exists() {
-        return Ok(());
-    }
+    // A human expectation keeps its first message time and records the latest, so an earlier pending reply is never lost and the file always changes.
+    let first_s = match from {
+        HUMAN => fs::read_to_string(&file)
+            .ok()
+            .and_then(|row| parse(&row))
+            .filter(|(owner, first_s, _)| owner == HUMAN && since_s - first_s <= EXPIRY_S)
+            .map_or(since_s, |(_, first_s, _)| first_s),
+        _ => since_s,
+    };
     let temp = dir.join(format!(".{id}.{}", std::process::id()));
-    fs::write(&temp, format!("{from} {since_s}\n"))
+    fs::write(&temp, format!("{from} {first_s} {since_s}\n"))
         .and_then(|()| fs::rename(&temp, &file))
         .map_err(|error| format!("cannot record the reply expected from {address}: {error}"))
 }
@@ -78,13 +84,24 @@ fn tells(arguments: &str, recipients: &[&str]) -> bool {
     })
 }
 
-/// The reply of an ended turn from session items, newest first; `since_s` is the delivery time. Pure.
-pub fn reply(items: &[Value], since_s: i64, recipients: &[&str]) -> Reply {
-    let turn: Vec<&Value> = items
-        .iter()
-        .take_while(|item| item["created_at"].as_i64().is_some_and(|at| at >= since_s))
-        .collect();
-    let told = turn.iter().any(|item| {
+/// An expectation row: sender, first and latest delivery time; the old format has one time.
+fn parse(row: &str) -> Option<(String, i64, i64)> {
+    let mut words = row.split_whitespace();
+    let from = words.next()?.to_owned();
+    let first_s: i64 = words.next()?.parse().ok()?;
+    let latest_s = words.next().and_then(|s| s.parse().ok()).unwrap_or(first_s);
+    Some((from, first_s, latest_s))
+}
+
+/// The reply of an ended turn from session items, newest first: the newest text since `first_s`, unless `amh tell` reached a recipient since `latest_s`. Pure.
+pub fn reply(items: &[Value], first_s: i64, latest_s: i64, recipients: &[&str]) -> Reply {
+    let since = |from_s: i64| {
+        items
+            .iter()
+            .take_while(move |item| item["created_at"].as_i64().is_some_and(|at| at >= from_s))
+    };
+    let turn: Vec<&Value> = since(first_s).collect();
+    let told = since(latest_s).any(|item| {
         item["type"] == "function_call" && tells(&item["arguments"].to_string(), recipients)
     });
     let last = turn.iter().find_map(|item| {
@@ -114,7 +131,7 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
         let Some(id) = path
             .file_name()
             .and_then(|name| name.to_str())
-            .map(|name| name.trim_end_matches(".agent").to_owned())
+            .map(|name| name.strip_suffix(".agent").unwrap_or(name).to_owned())
         else {
             continue;
         };
@@ -124,8 +141,8 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
         let Ok(row) = fs::read_to_string(&path) else {
             continue;
         };
-        let (from, since_s) = row.trim().split_once(' ').unwrap_or_default();
-        let since_s: i64 = since_s.parse().unwrap_or_default();
+        let (from, first_s, since_s) = parse(&row).unwrap_or_default();
+        let from = from.as_str();
         let address = format!("{}{id}", omnigent::PREFIX);
         let done = |log: &mut Vec<String>, line: String| {
             // A delivery recorded meanwhile starts a new expectation, so keep it.
@@ -178,7 +195,7 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
         if state == "running" && !quiet {
             continue;
         }
-        match reply(&items, since_s, recipients) {
+        match reply(&items, first_s, since_s, recipients) {
             Reply::Wait => {}
             Reply::Told => done(
                 &mut log,
@@ -255,22 +272,33 @@ mod tests {
         let old = json!({"type":"message","role":"assistant","created_at":5,"content":[{"type":"output_text","text":"old"}]});
         let user = json!({"type":"message","role":"user","created_at":10,"content":[{"type":"input_text","text":"hi"}]});
         assert_eq!(
-            reply(&[user.clone(), old.clone()], 10, &["human"]),
+            reply(&[user.clone(), old.clone()], 10, 10, &["human"]),
             Reply::Wait
         );
         let said = json!({"type":"message","role":"assistant","created_at":12,"content":[{"type":"output_text","text":" done \n"}]});
         assert_eq!(
-            reply(&[said.clone(), user.clone(), old.clone()], 10, &["human"]),
+            reply(
+                &[said.clone(), user.clone(), old.clone()],
+                10,
+                10,
+                &["human"]
+            ),
             Reply::Send("done".to_owned())
         );
         let call = json!({"type":"function_call","created_at":11,"arguments":"{\"command\":\"amh tell --task-file x.md human --subject s 'hi'\"}"});
         assert_eq!(
-            reply(&[said.clone(), call.clone(), user.clone()], 10, &["human"]),
+            reply(
+                &[said.clone(), call.clone(), user.clone()],
+                10,
+                10,
+                &["human"]
+            ),
             Reply::Told
         );
         assert_eq!(
             reply(
-                &[said.clone(), call, user.clone()],
+                &[said.clone(), call.clone(), user.clone()],
+                10,
                 10,
                 &["manager", "agent"]
             ),
@@ -278,7 +306,13 @@ mod tests {
         );
         let other = json!({"type":"function_call","created_at":11,"arguments":"{\"command\":\"amh tell manager 'ask the human'\"}"});
         assert_eq!(
-            reply(&[said, other, user], 10, &["human"]),
+            reply(&[said.clone(), other, user.clone()], 10, 10, &["human"]),
+            Reply::Send("done".to_owned())
+        );
+        let later = json!({"type":"message","role":"user","created_at":12,"content":[]});
+        let first = json!({"type":"message","role":"user","created_at":9,"content":[]});
+        assert_eq!(
+            reply(&[said, later, call, first], 9, 12, &["human"]),
             Reply::Send("done".to_owned())
         );
     }

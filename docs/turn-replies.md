@@ -13,18 +13,20 @@ what
     - so explicit messages are never repeated
 
 how
-- expectation: file in `amh-replies/` in the state dir, `FROM EPOCH_S`
+- expectation: file in `amh-replies/` in the state dir, `FROM FIRST_S LATEST_S`
     - time taken before sending; written after it succeeds
     - 🧑 "the auto-forwarding should only trigger after messages from me, e.g., purely system message should not trigger it, but should also not cancel it if the previous message was from me"
-    - human: `SESSION_ID`, kept from the earliest unanswered human message; later human or system messages change nothing
+    - human: `SESSION_ID`; `FIRST_S` = earliest unanswered human message, `LATEST_S` = latest; system messages change nothing
+    - text window from `FIRST_S`; `amh tell human` cancels only if run since `LATEST_S`
     - agent: `SESSION_ID.agent`, overwritten: the turn's text goes to the latest sender
 - watcher poll `turn replies`: per file, when the turn ended
-    - ended = session `ready` (idle), or `running` with an assistant text as newest item for 120 s
+    - ended = session `ready` (idle), or `running` with an assistant text as newest item for 180 s
         - Claude sessions with background tasks stay `running` after the turn ends
     - items since `EPOCH_S`, newest 500: an assistant text means the turn ended
     - none yet → wait; after 12 h → drop
     - file removed after sending only if unchanged meanwhile
-    - failed send retried each poll until 10 min after delivery
+    - failed send retried each poll until 10 min after the latest delivery
+    - human and agent both owed → both get the text
 - human: same `actions::tell_human` path as `amh tell human`
     - recorded and replaceable with `--replaces`; checked against `human.writers`
     - consolidation reminder, when any, is sent to the agent with the Message-ID
