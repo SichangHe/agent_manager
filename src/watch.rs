@@ -1270,7 +1270,8 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
     });
     let awaiting = ready.join("\n");
     let mut keep: Vec<String> = held.into_iter().map(str::to_owned).collect();
-    for chase in decide::chase(&awaiting, &sent, &active, epoch_s(), hour_minute) {
+    let mail_dir = settings::work_logs(settings).join("manager_mail");
+    for chase in decide::chase(&awaiting, &sent, &active, epoch_s(), hour_minute, &mail_dir.to_string_lossy()) {
         let failed = |task: &str, error: String| {
             log(&format!("chasing an answer from {task} failed: {error}"));
         };
