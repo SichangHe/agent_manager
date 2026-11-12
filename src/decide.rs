@@ -279,9 +279,10 @@ pub fn plain_text(block: &[String], remind: bool) -> String {
 ///
 /// The subject is kept only for an email that starts a thread; Zulip topics, `amh say` labels, and `Re:` subjects carry no words of the human's.
 /// `has_items`: the task already has open items, so the request is recorded and only the occasional `remind` is added; without items it gets `ACCEPT`.
+/// A message typed in another task's thread than `to_tag` names that thread first.
 // 🧑 "human requests should be sent verbatim"
 // 🧑 "Normal human messages should arrive without things around them, only sometimes with reminders of adding pending items etc."
-pub fn mail_text(name: &str, stored: &str, has_items: bool, remind: bool) -> String {
+pub fn mail_text(name: &str, stored: &str, to_tag: &str, has_items: bool, remind: bool) -> String {
     let stored = work::unix_lines(stored);
     let (subject, body) = match stored
         .strip_prefix("Subject: ")
@@ -294,9 +295,13 @@ pub fn mail_text(name: &str, stored: &str, has_items: bool, remind: bool) -> Str
     let reply = ["re:", "fwd:", "fw:"]
         .iter()
         .any(|prefix| subject.to_lowercase().starts_with(prefix));
+    // 🧑 "amh is not telling you which thread that was? That is wrong"
+    let thread = crate::mail::tag_of(subject)
+        .filter(|tag| *tag != to_tag)
+        .map_or(String::new(), |tag| format!("In the {tag} thread:\n"));
     let mut text = match subject.trim() {
         "" => String::new(),
-        _ if generated || reply => String::new(),
+        _ if generated || reply => thread,
         subject => format!("Subject: {subject}\n\n"),
     };
     text += body.trim();
@@ -1499,17 +1504,18 @@ mod tests {
         assert_eq!(source_of("(guest mail d/guest-3.txt)"), Source::Guest);
         let reply = "Subject: Re: [t_sub] do more\n\nPlease do Z.\r\n> old\r\n";
         assert_eq!(
-            mail_text("m-11.txt", reply, true, false),
+            mail_text("m-11.txt", reply, "t_sub", true, false),
             "Please do Z.\n> old"
         );
         assert_eq!(
-            mail_text("m-11.txt", reply, false, true),
+            mail_text("m-11.txt", reply, "t_sub", false, true),
             format!("Please do Z.\n> old\n\n({ACCEPT})")
         );
         assert_eq!(
             mail_text(
                 "zulip-7.txt",
                 "Subject: [t_sub] Zulip message\n\nStop it\n",
+                "t_sub",
                 true,
                 false
             ),
@@ -1517,8 +1523,19 @@ mod tests {
         );
         assert_eq!(
             mail_text(
+                "zulip-7.txt",
+                "Subject: [toms_river] Zulip message\n\nTerminate this agent. Done\n",
+                "human_mgr",
+                true,
+                false
+            ),
+            "In the toms_river thread:\nTerminate this agent. Done"
+        );
+        assert_eq!(
+            mail_text(
                 "h-edit-1.txt",
                 "Subject: [t_sub] said with amh say\n\nGo on.\n",
+                "t_sub",
                 true,
                 false
             ),
@@ -1528,19 +1545,27 @@ mod tests {
             mail_text(
                 "m-12.txt",
                 "Subject: [t_sub] build X\n\nUse Rust.\n",
+                "t_sub",
                 true,
                 false
             ),
             "Subject: [t_sub] build X\n\nUse Rust."
         );
         assert_eq!(
-            mail_text("zulip-9.txt", "first para\n\nsecond\n", true, false),
+            mail_text(
+                "zulip-9.txt",
+                "first para\n\nsecond\n",
+                "t_sub",
+                true,
+                false
+            ),
             "first para\n\nsecond"
         );
         assert_eq!(
             mail_text(
                 "zulip-8.txt",
                 "Subject: [t] Zulip message\n\nok\n",
+                "t",
                 true,
                 true
             ),
