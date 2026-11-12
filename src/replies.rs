@@ -14,6 +14,8 @@ use crate::{actions, agents, omnigent, work};
 pub const HUMAN: &str = "human";
 /// A turn that has not ended this long after its delivery is no longer answered.
 const EXPIRY_S: i64 = 12 * 3600;
+/// A session that stays `running` with an assistant text as its newest item for this long has ended its turn and waits on background work.
+const QUIET_S: i64 = 120;
 /// A reply that keeps failing to send is given up this long after its delivery.
 const RETRY_S: i64 = 600;
 
@@ -27,14 +29,24 @@ pub fn now_s() -> i64 {
 }
 
 /// Remember that `from` (`HUMAN` or an agent address) sent the agent at `address` a message at `since_s`, so its end-of-turn text goes back to `from`.
+///
+/// A reply owed to the human stays owed from the earliest unanswered human message; one owed to an agent goes to the latest sender.
+// 🧑 "the auto-forwarding should only trigger after messages from me, e.g., purely system message should not trigger it, but should also not cancel it if the previous message was from me"
 pub fn expect(state_dir: &Path, address: &str, from: &str, since_s: i64) -> Result<(), String> {
     let id = omnigent::session(address)?;
     let dir = folder(state_dir);
     fs::create_dir_all(&dir)
         .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
+    let file = match from {
+        HUMAN => dir.join(id),
+        _ => dir.join(format!("{id}.agent")),
+    };
+    if from == HUMAN && file.exists() {
+        return Ok(());
+    }
     let temp = dir.join(format!(".{id}.{}", std::process::id()));
     fs::write(&temp, format!("{from} {since_s}\n"))
-        .and_then(|()| fs::rename(&temp, dir.join(id)))
+        .and_then(|()| fs::rename(&temp, &file))
         .map_err(|error| format!("cannot record the reply expected from {address}: {error}"))
 }
 
@@ -99,7 +111,11 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
     };
     let mut log = Vec::new();
     for path in entries.flatten().map(|entry| entry.path()) {
-        let Some(id) = path.file_name().and_then(|name| name.to_str()) else {
+        let Some(id) = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name.trim_end_matches(".agent").to_owned())
+        else {
             continue;
         };
         if id.starts_with('.') {
@@ -127,7 +143,8 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
             );
             continue;
         }
-        if omnigent::fetched_status(settings, &address).0 != "ready" {
+        let state = omnigent::fetched_status(settings, &address).0;
+        if state != "ready" && state != "running" {
             continue;
         }
         let recipients: &[&str] = if from == HUMAN {
@@ -150,6 +167,17 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
                 continue;
             }
         };
+        let newest = items
+            .first()
+            .filter(|item| item["type"] == "message" && item["role"] == "assistant");
+        let quiet = newest.is_some_and(|item| {
+            item["created_at"]
+                .as_i64()
+                .is_some_and(|at| now_s() - at >= QUIET_S)
+        });
+        if state == "running" && !quiet {
+            continue;
+        }
         match reply(&items, since_s, recipients) {
             Reply::Wait => {}
             Reply::Told => done(

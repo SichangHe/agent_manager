@@ -814,7 +814,11 @@ fn unrestricted(tool: &str) -> Vec<String> {
 /// Where an agent starts: `workdir`, except that one inside the work logs starts in its own scratch directory beside them.
 // 🧑 "Why are you editing work log files? Aren't those read-only and manipulated using amh?"
 // 🤖 The Omnigent UI shows file writes under a session's workspace as that agent's edits, so amh's own work-log writes looked like the agent's.
-fn workspace(settings: &BTreeMap<String, String>, workdir: &str, title: &str) -> Result<String, String> {
+fn workspace(
+    settings: &BTreeMap<String, String>,
+    workdir: &str,
+    title: &str,
+) -> Result<String, String> {
     let logs = crate::settings::work_logs(settings);
     let logs = std::fs::canonicalize(&logs).unwrap_or(logs);
     let dir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.into());
@@ -1069,10 +1073,14 @@ mod workspace_tests {
         let root = std::env::temp_dir().join(format!("amh-ws-{}", std::process::id()));
         let logs = root.join("work_logs");
         std::fs::create_dir_all(logs.join("202611")).unwrap();
-        let settings = BTreeMap::from([("work_logs".to_owned(), logs.to_string_lossy().into_owned())]);
+        let settings =
+            BTreeMap::from([("work_logs".to_owned(), logs.to_string_lossy().into_owned())]);
         let scratch = root.join("agent_scratch").join("t");
         for inside in [logs.clone(), logs.join("202611")] {
-            assert_eq!(workspace(&settings, &inside.to_string_lossy(), "t").unwrap(), scratch.to_string_lossy());
+            assert_eq!(
+                workspace(&settings, &inside.to_string_lossy(), "t").unwrap(),
+                scratch.to_string_lossy()
+            );
         }
         assert!(scratch.is_dir());
         let other = root.to_string_lossy().into_owned();

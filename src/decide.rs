@@ -1759,7 +1759,8 @@ mod tests {
         let tasks: Vec<Task> = tasks().into_iter().filter(Task::is_active).collect();
         let given = |at_s: f64| format!("T{at_s}");
         let now = 100_000.0;
-        let chased = |awaiting: &str, sent: &str| chase(awaiting, sent, &tasks, now, given, "manager_mail");
+        let chased =
+            |awaiting: &str, sent: &str| chase(awaiting, sent, &tasks, now, given, "manager_mail");
         let fresh = format!("{} t_sub.md m-11.txt 0", now - 899.0);
         assert_eq!(chased(&fresh, ""), [Chase::Keep(fresh.clone())]);
         let silent = chased("99095 t_sub.md m-11.txt 0\n", "99000 t_sub\n99500 t_work\n");
