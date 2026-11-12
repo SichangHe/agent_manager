@@ -296,7 +296,11 @@ pub fn mail_text(name: &str, stored: &str, to_tag: &str, has_items: bool, remind
         .iter()
         .any(|prefix| subject.to_lowercase().starts_with(prefix));
     // 🧑 "amh is not telling you which thread that was? That is wrong"
-    let thread = crate::mail::tag_of(subject)
+    let topic = subject
+        .strip_prefix('[')
+        .and_then(|rest| rest.strip_suffix("] Zulip message"));
+    let thread = topic
+        .or_else(|| crate::mail::tag_of(subject))
         .filter(|tag| *tag != to_tag)
         .map_or(String::new(), |tag| format!("In the {tag} thread:\n"));
     let mut text = match subject.trim() {
@@ -1530,6 +1534,16 @@ mod tests {
                 false
             ),
             "In the toms_river thread:\nTerminate this agent. Done"
+        );
+        assert_eq!(
+            mail_text(
+                "zulip-7.txt",
+                "Subject: [toms river] Zulip message\n\nhi\n",
+                "m",
+                true,
+                false
+            ),
+            "In the toms river thread:\nhi"
         );
         assert_eq!(
             mail_text(
