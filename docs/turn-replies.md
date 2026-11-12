@@ -24,6 +24,7 @@ how
 - human: same `actions::tell_human` path as `amh tell human`
     - recorded and replaceable with `--replaces`; checked against `human.writers`
     - consolidation reminder, when any, is sent to the agent with the Message-ID
+    - 🧑 "We allow 2 messages, one from previous turn, one from this end message, right?": reminders fire only with 2+ earlier unread updates
     - not a writer → goes to its manager instead
 - agent: clipped to the manager message limit, labeled `TASK (end of turn):`
 

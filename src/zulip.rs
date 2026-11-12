@@ -179,7 +179,8 @@ pub fn consolidation_reminder(
             ids.push(format!("zulip:{id}"));
         }
     }
-    if ids.is_empty() {
+    // 🧑 "We allow 2 messages, one from previous turn, one from this end message, right?"
+    if ids.len() < 2 {
         return Ok(String::new());
     }
     Ok(format!(

@@ -225,7 +225,8 @@ pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
         .iter()
         .filter(|header| header.message_id != message_id && header.is_own() && !news(header))
         .collect();
-    if others.is_empty() {
+    // 🧑 "We allow 2 messages, one from previous turn, one from this end message, right?"
+    if others.len() < 2 {
         return String::new();
     }
     let listed: String = others
