@@ -130,7 +130,8 @@ pub fn stored_mail(subject: &str, body: &str) -> String {
 ///
 /// `entries` are the stored mail files as name, modification time (Unix seconds) and text. Only the human's Zulip messages (`zulip-*.txt`) and emails (`HASH-N.txt`) count; routed notifications and other files do not. Quoted lines (`>`) are skipped, so a reply shows what the human added.
 // 🧑 "maybe we need to strengthen tooling + prompts for human manager so they always get all the recent stuffs the human has sent for context before compiling the list?"
-pub fn recent_human(entries: &[(String, i64, String)], since_unix: i64) -> String {
+/// `mail_dir`: the absolute manager_mail directory, so agents started outside the work logs can open the files.
+pub fn recent_human(entries: &[(String, i64, String)], since_unix: i64, mail_dir: &str) -> String {
     let human = |name: &str| {
         let stem = name.strip_suffix(".txt").unwrap_or("");
         let email = stem.split_once('-').is_some_and(|(hash, n)| {
@@ -172,7 +173,7 @@ pub fn recent_human(entries: &[(String, i64, String)], since_unix: i64) -> Strin
                         .to_string()
                 })
                 .unwrap_or_default();
-            format!("{time} [{tag}] manager_mail/{name}: {first}\n")
+            format!("{time} [{tag}] {mail_dir}/{name}: {first}\n")
         })
         .collect()
 }
@@ -552,6 +553,7 @@ pub fn chase(
     active: &[Task],
     now_s: f64,
     given: impl Fn(f64) -> String,
+    mail_dir: &str,
 ) -> Vec<Chase> {
     let sent: Vec<(f64, &str)> = sent
         .lines()
@@ -585,7 +587,7 @@ pub fn chase(
                 task: name.to_owned(),
                 address: task.address().to_owned(),
                 text: format!(
-                    "The human's email manager_mail/{mail} was given to you at {given} and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled {mail} --because 'THE HUMAN'S WORDS'` instead."
+                    "The human's email {mail_dir}/{mail} was given to you at {given} and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled {mail} --because 'THE HUMAN'S WORDS'` instead."
                 ),
                 row: format!("{at} {name} {mail} 1"),
             }
@@ -594,7 +596,7 @@ pub fn chase(
                 task: name.to_owned(),
                 manager: task.field("managerat").unwrap_or_default().to_owned(),
                 text: format!(
-                    "The agent of {name} was given the human's email manager_mail/{mail} at {given}, was reminded, and still has not emailed the human. Find out why and make sure the human gets an answer."
+                    "The agent of {name} was given the human's email {mail_dir}/{mail} at {given}, was reminded, and still has not emailed the human. Find out why and make sure the human gets an answer."
                 ),
                 human: (stage == 1).then(|| {
                     (
@@ -1342,7 +1344,7 @@ mod tests {
                 "Subject: [t] x\n\nedit file",
             ),
         ];
-        let out = recent_human(&entries, 120);
+        let out = recent_human(&entries, 120, "manager_mail");
         let lines: Vec<&str> = out.lines().collect();
         assert_eq!(lines.len(), 2, "{out}");
         assert!(
@@ -1747,7 +1749,7 @@ mod tests {
         let tasks: Vec<Task> = tasks().into_iter().filter(Task::is_active).collect();
         let given = |at_s: f64| format!("T{at_s}");
         let now = 100_000.0;
-        let chased = |awaiting: &str, sent: &str| chase(awaiting, sent, &tasks, now, given);
+        let chased = |awaiting: &str, sent: &str| chase(awaiting, sent, &tasks, now, given, "manager_mail");
         let fresh = format!("{} t_sub.md m-11.txt 0", now - 899.0);
         assert_eq!(chased(&fresh, ""), [Chase::Keep(fresh.clone())]);
         let silent = chased("99095 t_sub.md m-11.txt 0\n", "99000 t_sub\n99500 t_work\n");

@@ -1249,7 +1249,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 let text = fs::read_to_string(entry.path()).unwrap_or_default();
                 entries.push((name, at, text));
             }
-            let out = decide::recent_human(&entries, since);
+            let mail_dir = settings::work_logs(&settings).join("manager_mail");
+            let out = decide::recent_human(&entries, since, &mail_dir.to_string_lossy());
             if out.is_empty() {
                 format!("nothing from the human in the last {hours} h\n")
             } else {
