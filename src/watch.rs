@@ -1082,40 +1082,28 @@ impl Watcher {
                 && decide::terminate_order(&own)
                 && plan.target == task.address()
                 && task.address().starts_with(omnigent::PREFIX)
+                && task.address() != settings::get(settings, "main_manager")
             {
+                // Dropping the open work also marks this message sent, so a failed close is reported, never retried.
                 let why = format!("the human ordered it terminated ({mail})");
                 let closed = crate::actions::drop_open_work(store, name, &why).and_then(|()| {
                     crate::agents::close_task(settings, store, name, true, false, false)
                 });
-                match closed {
-                    Ok(at) => {
-                        log(&format!(
-                            "{name}: closed and stopped {at} on the human's order {mail}"
-                        ));
-                        let manager = task.field("managerat").unwrap_or_default();
-                        let text = crate::work::envelope(
-                            "amh",
-                            &format!(
-                                "{name} was closed and its agent stopped on the human's order in its thread: \"{}\"",
-                                own.trim()
-                            ),
-                        );
-                        if let Err(error) = omnigent::send(settings, manager, &text) {
-                            log(&format!(
-                                "{name}: telling its manager about the termination failed: {error}"
-                            ));
-                        }
-                        let _lock = store.lock()?;
-                        if let Err(error) = database.finish_message(id, true, "") {
-                            log(&error);
-                        }
-                    }
-                    Err(error) => {
-                        log(&format!(
-                            "{name}: terminating on {mail} failed, retried later: {error}"
-                        ));
-                        self.failed_at.insert(name.to_owned(), Instant::now());
-                    }
+                let said = match &closed {
+                    Ok(at) => format!(
+                        "{name} was closed and its agent {at} stopped on the human's order in its thread"
+                    ),
+                    Err(error) => format!(
+                        "{name}: the human ordered its agent terminated in its thread, but closing it failed: {error}. Close it yourself"
+                    ),
+                };
+                log(&format!("{said} ({mail})"));
+                let manager = task.field("managerat").unwrap_or_default();
+                let text = crate::work::envelope("amh", &format!("{said}: \"{}\"", own.trim()));
+                if let Err(error) = omnigent::send(settings, manager, &text) {
+                    log(&format!(
+                        "{name}: telling its manager about the termination failed: {error}"
+                    ));
                 }
                 continue;
             }
