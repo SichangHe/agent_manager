@@ -18,7 +18,11 @@ const OVERVIEW: &str = "What managers need to know:
 - Messages: `amh tell manager`, `amh tell human --subject S`, `amh tell agent WHO`. The watcher delivers queued messages and human email, routes mail addressed `for manager` to the manager, and reminds idle agents of ready items.
 - Watching agents: `amh agent problems`, `amh agent status TASK`, `amh agent replace`, `amh agent compact`.
 - Main manager: `amh manager watchers` restarts the watcher after amh changes; `amh manager worktree` lists uncommitted changes in manager-owned repositories.
-- The watcher archives events and resolved requests older than 30 days and commits work-log Markdown hourly.";
+- The watcher archives events and resolved requests older than 30 days, and commits and pushes work-log Markdown hourly; you need not commit task files.
+
+What every agent needs to know:
+- The text you end a turn with goes to whoever started that turn, unless you already ran `amh tell` to them in that turn; write it as a message to them.
+- Work logs change only through amh; never edit them directly.";
 
 /// Build the whole command tree.
 pub fn command() -> Command {
