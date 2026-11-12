@@ -811,6 +811,22 @@ fn unrestricted(tool: &str) -> Vec<String> {
     args
 }
 
+/// Where an agent starts: `workdir`, except that one inside the work logs starts in its own scratch directory beside them.
+// 🧑 "Why are you editing work log files? Aren't those read-only and manipulated using amh?"
+// 🤖 The Omnigent UI shows file writes under a session's workspace as that agent's edits, so amh's own work-log writes looked like the agent's.
+fn workspace(settings: &BTreeMap<String, String>, workdir: &str, title: &str) -> Result<String, String> {
+    let logs = crate::settings::work_logs(settings);
+    let logs = std::fs::canonicalize(&logs).unwrap_or(logs);
+    let dir = std::fs::canonicalize(workdir).unwrap_or_else(|_| workdir.into());
+    if !dir.starts_with(&logs) {
+        return Ok(workdir.to_owned());
+    }
+    let scratch = logs.with_file_name("agent_scratch").join(title);
+    std::fs::create_dir_all(&scratch)
+        .map_err(|error| format!("cannot create {}: {error}", scratch.display()))?;
+    Ok(scratch.to_string_lossy().into_owned())
+}
+
 /// Start an agent with no prompt and return its address.
 pub fn launch(
     settings: &Settings,
@@ -846,7 +862,7 @@ pub fn launch(
     let request = json!({
         "agent_id": agent["id"],
         "host_id": host["host_id"],
-        "workspace": workdir,
+        "workspace": workspace(settings, workdir, title)?,
         "title": title,
         "model_override": if tool == "cursor" { format!("{model}-{effort}") } else { model.to_owned() },
         "reasoning_effort": effort,
@@ -1041,5 +1057,26 @@ mod tests {
         ));
         assert!(!has_running_terminal(&json!({"data": []})));
         assert!(!has_running_terminal(&Value::Null));
+    }
+}
+
+#[cfg(test)]
+mod workspace_tests {
+    use super::*;
+
+    #[test]
+    fn work_logs_start_in_scratch_others_unchanged() {
+        let root = std::env::temp_dir().join(format!("amh-ws-{}", std::process::id()));
+        let logs = root.join("work_logs");
+        std::fs::create_dir_all(logs.join("202611")).unwrap();
+        let settings = BTreeMap::from([("work_logs".to_owned(), logs.to_string_lossy().into_owned())]);
+        let scratch = root.join("agent_scratch").join("t");
+        for inside in [logs.clone(), logs.join("202611")] {
+            assert_eq!(workspace(&settings, &inside.to_string_lossy(), "t").unwrap(), scratch.to_string_lossy());
+        }
+        assert!(scratch.is_dir());
+        let other = root.to_string_lossy().into_owned();
+        assert_eq!(workspace(&settings, &other, "t").unwrap(), other);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
