@@ -209,11 +209,15 @@ impl Store {
     /// A typed line is one in the file's body that is not in the text amh last exported there; it is appended to the task's body in the database.
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
     fn take_in_edits(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
-        for (name, text) in database.tasks()? {
-            if untouched_since(&self.path_of(database, &name)?, since) {
+        for (name, month, _) in database.export_states(false)? {
+            let path = self.root.join(&month).join(&name);
+            if untouched_since(&path, since) {
                 continue;
             }
-            let Ok(file) = fs::read_to_string(self.path_of(database, &name)?) else {
+            let Ok(file) = fs::read_to_string(&path) else {
+                continue;
+            };
+            let Some(text) = database.task(&name)? else {
                 continue;
             };
             let Some(last) = database.record(&format!("export:{name}"))? else {
@@ -264,7 +268,18 @@ impl Store {
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
     fn export(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
         let mut git = None;
-        for (name, text) in database.tasks()? {
+        for (name, month, exported) in database.export_states(true)? {
+            // A task unchanged since the last export, whose file (and any stray root copy of a filed one) is untouched since, needs nothing; full passes (no `since`) still check all.
+            let stray = self.root.join(&name);
+            if exported
+                && untouched_since(&self.root.join(&month).join(&name), since)
+                && (month.is_empty() || !stray.exists() || untouched_since(&stray, since))
+            {
+                continue;
+            }
+            let Some(text) = database.task(&name)? else {
+                continue;
+            };
             let path = self.settle(database, &name, &text, &mut git)?;
             let key = format!("export:{name}");
             let recorded = database.record(&key)?;
@@ -350,14 +365,6 @@ impl Store {
         Ok(database
             .record("export:stamp")?
             .and_then(|t| t.parse().ok()))
-    }
-
-    /// Where a task file lives now: its month folder once done, else the root.
-    fn path_of(&self, database: &Database, name: &str) -> Result<PathBuf, String> {
-        Ok(match database.record(&format!("month:{name}"))? {
-            Some(month) if !month.is_empty() => self.root.join(month).join(name),
-            _ => self.root.join(name),
-        })
     }
 
     /// The `YYYYMM` folders of the root and the task files in them, as `(month, name)`.

@@ -41,6 +41,9 @@ correlation
     - failed lock preparation retains existing errors without a timing breakdown
 - event export uses SQLite JSON rendering instead of reconstructing every event as a Rust JSON value
     - retains all rows and ordering, full export comparison/repair, and external-edit import under the existing lock
+- task export compares each task text with its `export:` record inside SQLite (`export_states`)
+    - incremental passes load and settle only changed tasks or files touched since the last export; full passes every 10 min still check all
+    - SQLite reads via mmap; with ~7,500 tasks a lock's preparation fell from ~600 ms to ~145 ms, a `todo add` from ~1,050 ms to ~250 ms
 - IMAP intake owns its connections on one separate thread
     - measured serial intake took 25.5 seconds before Zulip pickup
     - existing receipt locks, deduplication, retries and database wakeups are retained

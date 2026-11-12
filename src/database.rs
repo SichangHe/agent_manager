@@ -40,6 +40,7 @@ impl Database {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
+             PRAGMA mmap_size=1073741824;
              CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (name TEXT PRIMARY KEY, text TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS events (
@@ -137,6 +138,25 @@ impl Database {
             .map_err(error)?;
         query
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+
+    /// Every task's name, filed month (empty at the root), and, when `compare`, whether its text equals what the last export recorded.
+    ///
+    /// Compares inside SQLite so a lock need not copy every task text and export record into Rust; skipping the comparison skips reading the texts.
+    pub fn export_states(&self, compare: bool) -> Result<Vec<(String, String, bool)>, String> {
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT t.name, COALESCE(m.text, ''), ?1 AND e.text IS t.text FROM tasks t
+                 LEFT JOIN records e ON e.name = 'export:' || t.name
+                 LEFT JOIN records m ON m.name = 'month:' || t.name ORDER BY t.name",
+            )
+            .map_err(error)?;
+        query
+            .query_map([compare], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
