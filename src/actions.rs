@@ -200,6 +200,40 @@ fn report_items(
     Ok(BATCH_HINT)
 }
 
+/// Resolve every open item and drop every undelivered message of `name`, so it can be closed; `why` is recorded as the evidence.
+pub fn drop_open_work(store: &Store, name: &str, why: &str) -> Result<(), String> {
+    let _lock = store.lock()?;
+    let mut task = store.load(name)?;
+    let mut records = requests::sync(&mut task)?;
+    for request in &mut records {
+        request.stage = requests::Stage::Resolved;
+        request.resolved_at = Some(chrono::Utc::now().to_rfc3339());
+        request.evidence = why.to_owned();
+        request.blockers.clear();
+    }
+    requests::write(&mut task, &records);
+    for item in task.items.clone() {
+        tasks::remove_item(&mut task, &item, why)?;
+    }
+    // An undelivered block keeps its text in the file; only its marker goes, so nothing tries to deliver it later.
+    let markers: Vec<usize> = taskfile::pending_blocks(&task.body)
+        .into_iter()
+        .map(|(at, _)| at)
+        .collect();
+    let kept: Vec<&str> = task
+        .body
+        .split('\n')
+        .enumerate()
+        .filter(|(at, _)| !markers.contains(at))
+        .map(|(_, line)| line)
+        .collect();
+    task.body = kept.join("\n");
+    store.save(&task)?;
+    store.drop_queued_mail(name)?;
+    request_effects(store)?;
+    Ok(())
+}
+
 /// Whether the agent of `task` may message the human: its tool is in `human.writers`, or its model is admitted for that tool.
 pub fn writes_to_human(settings: &Settings, task: &Task) -> Result<bool, String> {
     let tool = task.field("tool").unwrap_or_default();
@@ -530,39 +564,7 @@ fn short(values: &Value) -> Result<u8, String> {
                 if !answer.trim().to_lowercase().starts_with('y') {
                     return Err("amh: nothing was closed".to_owned());
                 }
-                let _lock = store.lock()?;
-                let mut task = store.load(name)?;
-                let mut records = requests::sync(&mut task)?;
-                for request in &mut records {
-                    request.stage = requests::Stage::Resolved;
-                    request.resolved_at = Some(chrono::Utc::now().to_rfc3339());
-                    request.evidence = "the human closed the task with amh stop".to_owned();
-                    request.blockers.clear();
-                }
-                requests::write(&mut task, &records);
-                for item in task.items.clone() {
-                    tasks::remove_item(
-                        &mut task,
-                        &item,
-                        "the human closed the task with amh stop",
-                    )?;
-                }
-                // An undelivered block keeps its text in the file; only its marker goes, so nothing tries to deliver it later.
-                let markers: Vec<usize> = taskfile::pending_blocks(&task.body)
-                    .into_iter()
-                    .map(|(at, _)| at)
-                    .collect();
-                let kept: Vec<&str> = task
-                    .body
-                    .split('\n')
-                    .enumerate()
-                    .filter(|(at, _)| !markers.contains(at))
-                    .map(|(_, line)| line)
-                    .collect();
-                task.body = kept.join("\n");
-                store.save(&task)?;
-                store.drop_queued_mail(name)?;
-                request_effects(&store)?;
+                drop_open_work(&store, name, "the human closed the task with amh stop")?;
             }
             let at = agents::close_task(&settings, &store, name, true, false, false)?;
             say(&format!("closed {name} at {at}\n"));

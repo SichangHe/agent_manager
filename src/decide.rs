@@ -65,19 +65,29 @@ pub fn for_manager(body: &str) -> bool {
             || last
                 .strip_suffix(phrase)
                 .is_some_and(|rest| word_edge(rest.chars().next_back()))
-    }) || first.starts_with("terminate this agent")
-        || first.starts_with("replace this agent")
+    }) || first.starts_with("replace this agent")
 }
 
 /// Whether the human's own text starts by asking to replace the agent.
 pub fn replace_order(body: &str) -> bool {
+    starts_with_order(body, "replace this agent")
+}
+
+/// Whether the human's own text starts by asking to terminate the agent.
+// 🧑 "Things like \"replace this agent\" and \"terminate this agent\" should immediately cause the system to do them, no?"
+pub fn terminate_order(body: &str) -> bool {
+    starts_with_order(body, "terminate this agent")
+}
+
+/// Whether the human's first own (unquoted) line starts with `order`.
+fn starts_with_order(body: &str, order: &str) -> bool {
     body.lines()
         .map(str::trim)
         .find(|line| !line.is_empty() && !line.starts_with('>'))
         .is_some_and(|line| {
             line.trim_start_matches(['*', '_'])
                 .to_lowercase()
-                .starts_with("replace this agent")
+                .starts_with(order)
         })
 }
 
@@ -106,7 +116,7 @@ pub fn route<'a>(
         // 🧑 "\"replace this agent\" ... should trigger automatic replacement": amh replaces the agent when delivering to its own task.
         Some(tagged)
             if staffed(tagged)
-                && replace_order(body)
+                && (replace_order(body) || terminate_order(body))
                 && tagged.address().starts_with(crate::omnigent::PREFIX) =>
         {
             Some(tagged)
@@ -1443,7 +1453,7 @@ mod tests {
                 "please\n> quoted\n**for manager**\n> for worker",
                 "t_work.md",
             ),
-            ("[t_sub] hello", "Terminate this agent now", "t_work.md"),
+            ("[t_sub] hello", "Terminate this agent now", "t_sub.md"),
             (
                 "[t_sub] hello",
                 "replace this agent, it is stuck",

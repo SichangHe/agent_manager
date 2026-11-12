@@ -1079,6 +1079,47 @@ impl Watcher {
                 own.to_owned()
             };
             if message["channel"] == "human"
+                && decide::terminate_order(&own)
+                && plan.target == task.address()
+                && task.address().starts_with(omnigent::PREFIX)
+            {
+                let why = format!("the human ordered it terminated ({mail})");
+                let closed = crate::actions::drop_open_work(store, name, &why).and_then(|()| {
+                    crate::agents::close_task(settings, store, name, true, false, false)
+                });
+                match closed {
+                    Ok(at) => {
+                        log(&format!(
+                            "{name}: closed and stopped {at} on the human's order {mail}"
+                        ));
+                        let manager = task.field("managerat").unwrap_or_default();
+                        let text = crate::work::envelope(
+                            "amh",
+                            &format!(
+                                "{name} was closed and its agent stopped on the human's order in its thread: \"{}\"",
+                                own.trim()
+                            ),
+                        );
+                        if let Err(error) = omnigent::send(settings, manager, &text) {
+                            log(&format!(
+                                "{name}: telling its manager about the termination failed: {error}"
+                            ));
+                        }
+                        let _lock = store.lock()?;
+                        if let Err(error) = database.finish_message(id, true, "") {
+                            log(&error);
+                        }
+                    }
+                    Err(error) => {
+                        log(&format!(
+                            "{name}: terminating on {mail} failed, retried later: {error}"
+                        ));
+                        self.failed_at.insert(name.to_owned(), Instant::now());
+                    }
+                }
+                continue;
+            }
+            if message["channel"] == "human"
                 && decide::replace_order(&own)
                 && plan.target == task.address()
                 && task.address().starts_with(omnigent::PREFIX)
