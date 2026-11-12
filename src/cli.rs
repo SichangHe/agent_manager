@@ -4,9 +4,25 @@
 
 use clap::{Arg, ArgAction, Command};
 
+// 🧑 "The top-level amh --help should already give most things managers should know so they don't have to run more help commands"
+const OVERVIEW: &str = "What managers need to know:
+- amh owns task state. Task files and the task list `TODO.md` are generated from its database: read them, change them only with amh; direct edits are overwritten. Run `amh task check` if anything else touched them.
+- `amh task start TASK.md --dir DIR --prompt FILE` creates a task and its agent and sets its status: `running`, or `long_running` with --as-manager. No `amh task status` call is needed after it.
+- Statuses, set with `amh task status TASK STATUS`:
+  - `running`: the agent works its open items.
+  - `long_running`: the agent is kept even with zero open items, e.g. managers and persistent human-facing agents. --on WHAT records what it waits for; its ready items are still reminded about.
+  - `blocked --on WHAT`: the whole task pauses; no reminders. WHAT is the thing awaited, e.g. `human reviewing docs/plan.md` or `other_task.md`, never just `human`. Set it back as soon as the blocker clears.
+  - done: only via `amh task close TASK.md`, which refuses while open items remain, stops the agent, moves the task to `previous`, and tells the human.
+- Open items: `amh todo` for your own; `amh task give` for an agent you manage. When only some items wait, use `amh todo wait` instead of blocking the task; waiting items are not reminded about.
+- Where a row sits in `TODO.md` follows its status; `amh task place TASK --under SECTION` pins it elsewhere when the human says so.
+- Messages: `amh tell manager`, `amh tell human --subject S`, `amh tell agent WHO`. The watcher delivers queued messages and human email, routes mail addressed `for manager` to the manager, and reminds idle agents of ready items.
+- Watching agents: `amh agent problems`, `amh agent status TASK`, `amh agent replace`, `amh agent compact`.
+- Main manager: `amh manager watchers` restarts the watcher after amh changes; `amh manager worktree` lists uncommitted changes in manager-owned repositories.
+- The watcher archives events and resolved requests older than 30 days and commits work-log Markdown hourly.";
+
 /// Build the whole command tree.
 pub fn command() -> Command {
-    Command::new("amh").about("Agent manager helper: one command for agents and managers.\n\nStart at `amh --help` and follow the groups down; every level has its own `--help`.").subcommand_required(true).arg_required_else_help(true)
+    Command::new("amh").about("Agent manager helper: one command for agents and managers.\n\nStart at `amh --help` and follow the groups down; every level has its own `--help`.").after_help(OVERVIEW).subcommand_required(true).arg_required_else_help(true)
         .arg(Arg::new("task_file").long("task-file").global(true).value_name("NAME.md").help("your task file; accepted before or after subcommands"))
         // 🧑 "there needs to be sane short commands for common tasks like spawning agents, without needing tons of flags"
     .subcommand(Command::new("new").about("The human: start an agent on a new task, in the directory you are in.").long_about("The human: start an agent on a new task, in the directory you are in.\n\nIt runs Claude at the default model and effort and reports to the main manager. Without GOAL your editor opens for it.")
