@@ -1490,9 +1490,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 let waiting = crate::zulip::unread(&settings, &store.state_dir).map_err(failed)?;
                 let shown = waiting
                     .iter()
-                    .filter(|(_, topic, _)| flag("all") || topic == task.tag());
+                    .filter(|(_, topic, _, _)| flag("all") || topic == task.tag());
                 shown
-                    .map(|(id, topic, body)| format!("== zulip:{id} topic {topic}\n{body}\n"))
+                    .map(|(id, topic, body, _)| format!("== zulip:{id} topic {topic}\n{body}\n"))
                     .collect()
             } else {
                 let unread = mail::unread(&settings, task.tag(), &[]).map_err(failed)?;

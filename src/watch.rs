@@ -1403,11 +1403,14 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
             let body = content.split_once("\n\n").map_or("", |(_, body)| body);
             body.starts_with("pending item ")
         };
-        let counted = waiting
-            .into_iter()
-            .filter(|(_, _, content)| !notice(content));
+        // The human manager may archive only messages over 24 h old without attachments (`scripts/mail_compression/zarchive.py`), so only those count.
+        // The main manager: "the hourly 'compression due' nudge ... counts all unread agent messages toward its 16-message trigger, but human_mgr may archive only those over 24 h old without attachments. So it nags every hour with nothing to do."
+        let old_s = epoch_s() as i64 - 24 * 3600;
+        let counted = waiting.into_iter().filter(|(_, _, content, sent_s)| {
+            !notice(content) && *sent_s < old_s && !content.contains("/user_uploads/")
+        });
         counted
-            .map(|(_, topic, _)| topic)
+            .map(|(_, topic, _, _)| topic)
             .filter(|topic| !mail::REPORT_LABELS.contains(&topic.as_str()))
             .collect()
     } else {

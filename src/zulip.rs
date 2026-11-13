@@ -66,7 +66,10 @@ fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
 ///
 /// A message once read stays read, so read IDs are remembered in SQLite record `amh-zulip-read.txt` and not asked about again.
 // 🧑 "I think I do have more than 16 unread messages. And so why is not the global message compression happening?"
-pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String, String)>, String> {
+pub fn unread(
+    settings: &Settings,
+    state_dir: &Path,
+) -> Result<Vec<(u64, String, String, i64)>, String> {
     const CHECKED: usize = 150;
     let bot = api(settings, "GET", "users/me", &[])?["user_id"]
         .as_u64()
@@ -105,7 +108,12 @@ pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String,
         if known.contains(&id) || !unread_by_human(settings, id)? {
             read.push(id);
         } else {
-            waiting.push((id, text(&message["subject"]), text(&message["content"])));
+            waiting.push((
+                id,
+                text(&message["subject"]),
+                text(&message["content"]),
+                message["timestamp"].as_i64().unwrap_or_default(),
+            ));
         }
     }
     let read = crate::database::Database::open(&state_dir.join("amh.sqlite3"))?.remember_ids(
@@ -113,7 +121,7 @@ pub fn unread(settings: &Settings, state_dir: &Path) -> Result<Vec<(u64, String,
         &read,
         CHECKED,
     )?;
-    waiting.retain(|(id, _, _)| !read.contains(id));
+    waiting.retain(|(id, _, _, _)| !read.contains(id));
     Ok(waiting)
 }
 
