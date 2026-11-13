@@ -310,7 +310,8 @@ pub fn send(
     let id: u64 = recipient
         .parse()
         .map_err(|_| "zulip.human_id must be the human's numeric user ID")?;
-    let mut content = format!("[{tag}] {}\n\n{body}", mail::bare(subject));
+    let header = format!("[{tag}] {}", mail::bare(subject));
+    let mut content = format!("{}\n\n{body}", header.trim_end());
     let mut total_bytes = 0u64;
     for path in attachments {
         let size = fs::metadata(path)

@@ -15,7 +15,7 @@ const OVERVIEW: &str = "What managers need to know:
   - done: only via `amh task close TASK.md`, which refuses while open items remain, stops the agent, moves the task to `previous`, and tells the human.
 - Open items: `amh todo` for your own; `amh task give` for an agent you manage. When only some items wait, use `amh todo wait` instead of blocking the task; waiting items are not reminded about.
 - Where a row sits in `TODO.md` follows its status; `amh task place TASK --under SECTION` pins it elsewhere when the human says so.
-- Messages: `amh tell manager`, `amh tell human --subject S`, `amh tell agent WHO`. The watcher delivers queued messages and human email, routes mail addressed `for manager` to the manager, and reminds idle agents of ready items.
+- Messages: `amh tell manager`, `amh tell human`, `amh tell agent WHO`. The watcher delivers queued messages and human email, routes mail addressed `for manager` to the manager, and reminds idle agents of ready items.
 - Watching agents: `amh agent problems`, `amh agent status TASK`, `amh agent replace`, `amh agent compact`.
 - Main manager: `amh manager watchers` restarts the watcher after amh changes; `amh manager worktree` lists uncommitted changes in manager-owned repositories.
 - The watcher archives events and resolved requests older than 30 days, and commits and pushes work-log Markdown hourly; you need not commit task files.
@@ -67,7 +67,7 @@ pub fn command() -> Command {
             )
             .subcommand(Command::new("human").about("Message the human through the configured transport.").long_about("Message the human through the configured transport.\n\nWith human.transport=zulip, sends a private Zulip bot message; otherwise sends email.\nThe body comes from TEXT, --file, or standard input. Batch the acknowledgement, answer, and item changes (--add, --done) in one call.\nThe task tag is added for you. Zulip Message-IDs are zulip:ID; pass --replaces zulip:ID to delete your earlier bot message after its replacement is sent. Uploaded attachments appear as links.\nFor email, --replaces MESSAGE_ID trashes the earlier message if unread; `amh mail unread` lists them.")
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
-                .arg(Arg::new("subject").long("subject").required(true).help("plain English; a new subject must be under 60 characters, a reply reuses the subject of its thread"))
+                .arg(Arg::new("subject").long("subject").hide(true).help("ignored: the thread is your task"))
                 .arg(Arg::new("report_label").long("report-label").value_parser(crate::mail::REPORT_LABELS).help("stock_news_watch only: display label/topic; replies retain the actual task owner"))
                 .arg(Arg::new("email").long("email").action(ArgAction::SetTrue).help("send this one message by email even when human.transport=zulip; Markdown links `[label](url)` show as the label"))
                 .arg(Arg::new("text").value_name("TEXT").conflicts_with("file").help("message body; omit to read standard input"))

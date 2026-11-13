@@ -756,10 +756,18 @@ pub fn run(values: &Value) -> Result<u8, String> {
             // 🧑 "Send the news via email like done before instead of through Zulip"
             let mut by_email = settings.clone();
             by_email.insert("human.transport".to_owned(), "email".to_owned());
+            // 🧑 "Zulip does not need a title, it just needs a thread. And the thread is basically determined, on the agent name or file name. And we can do the same for emails."
+            // --subject stays accepted for old callers; only a report label that names a report stream (PB news) is kept.
+            let given = text("subject").unwrap_or_default();
+            let report_stream = format!("zulip.report_streams.{}", mail::bare(given).trim());
+            let subject = match settings::get(&settings, &report_stream).is_empty() {
+                true => "",
+                false => given,
+            };
             let (receipt, reminder) = tell_human(
                 if flag("email") { &by_email } else { &settings },
                 &task,
-                need("subject"),
+                subject,
                 &body,
                 &replaces,
                 &attach,

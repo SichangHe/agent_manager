@@ -238,7 +238,7 @@ pub fn replace_reminder(message_id: &str, unread: &[Header]) -> String {
         .map(|header| format!("--replaces '{}'", header.message_id))
         .collect();
     format!(
-        "The human has {} earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n{listed}Do this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --subject SAME_SUBJECT --file MERGED_FILE {} --replaces '{message_id}'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n",
+        "The human has {} earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n{listed}Do this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --file MERGED_FILE {} --replaces '{message_id}'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n",
         others.len(),
         flags.join(" ")
     )
@@ -1139,7 +1139,7 @@ mod tests {
         assert_eq!(unread[0].listed(), "<old@x> '[t_work] Earlier' Mon");
         assert_eq!(
             replace_reminder("<sent@x>", &unread),
-            "The human has 2 earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n  <old@x> '[t_work] Earlier' Mon\n  <older@x> '[t_work] it\\'s \"x\"' Mon\nDo this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --subject SAME_SUBJECT --file MERGED_FILE --replaces '<old@x>' --replaces '<older@x>' --replaces '<sent@x>'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n"
+            "The human has 2 earlier unread email(s) of yours besides the one just sent. The human wants at most 1 unread email from you:\n  <old@x> '[t_work] Earlier' Mon\n  <older@x> '[t_work] it\\'s \"x\"' Mon\nDo this now: write ONE email that keeps everything the human still needs from those emails and from the one just sent, and send it with\n  amh tell human --file MERGED_FILE --replaces '<old@x>' --replaces '<older@x>' --replaces '<sent@x>'\nThe replaced unread emails go to the trash. Skip this only if those earlier emails must stay separate.\n"
         );
         assert_eq!(replace_reminder("<sent@x>", &unread[2..]), "");
         let news = [
