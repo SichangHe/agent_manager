@@ -780,6 +780,31 @@ pub fn has_running_terminal(resources: &Value) -> bool {
 
 /// The command-line arguments that make a tool run with no sandbox and no permission prompts.
 // 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
+/// The model a session runs: the `--model` amh launched it with, else Omnigent's `model_override`.
+///
+/// Omnigent 0.21 launches Codex on its default model and clears `model_override` when the pick is missing from Codex's model catalog (e.g. `gpt-6.1-terra`); `--model` in the launch arguments still reaches Codex.
+pub fn session_model(session: &Value) -> Option<&str> {
+    let args = session["terminal_launch_args"].as_array();
+    let given = args.and_then(|args| {
+        args.windows(2)
+            .find(|pair| pair[0] == "--model")
+            .and_then(|pair| pair[1].as_str())
+    });
+    given
+        .or_else(|| session["model_override"].as_str())
+        .filter(|model| !model.is_empty())
+}
+
+/// The launch arguments: no prompts and no sandbox, and for Codex the model itself, which Omnigent cannot drop.
+// The main manager: "terra_trial.md can't do its job ... I restarted it with 'amh task start --tool codex --model gpt-6.1-terra', but Omnigent reports the new session bafb3705 as gpt-5.6-sol."
+fn launch_args(tool: &str, model: &str) -> Vec<String> {
+    let mut args = unrestricted(tool);
+    if tool == "codex" && !model.is_empty() {
+        args.extend(["--model".to_owned(), model.to_owned()]);
+    }
+    args
+}
+
 fn unrestricted(tool: &str) -> Vec<String> {
     let args: &[&str] = match tool {
         "cursor" => &[
@@ -870,7 +895,7 @@ pub fn launch(
         "title": title,
         "model_override": if tool == "cursor" { format!("{model}-{effort}") } else { model.to_owned() },
         "reasoning_effort": effort,
-        "terminal_launch_args": unrestricted(tool),
+        "terminal_launch_args": launch_args(tool, model),
         "labels": if tool == "codex" { json!({"omnigent.codex_native.bypass_sandbox": "1"}) } else { json!({}) },
     });
     let created = api(settings, "POST", "/v1/sessions", Some(&request))?;
@@ -964,6 +989,23 @@ pub fn launch_default(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_launched_model_wins_over_a_cleared_override() {
+        use serde_json::json;
+        // bafb3705: Omnigent cleared the override; the launch argument shows what Codex runs.
+        let cleared = json!({"model_override": null, "llm_model": "gpt-5.6-sol",
+            "terminal_launch_args": ["--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-6.1-terra"]});
+        assert_eq!(super::session_model(&cleared), Some("gpt-6.1-terra"));
+        let listed = json!({"model_override": "gpt-6.1-sol", "terminal_launch_args": []});
+        assert_eq!(super::session_model(&listed), Some("gpt-6.1-sol"));
+        assert_eq!(super::session_model(&json!({"model_override": ""})), None);
+        assert_eq!(
+            super::launch_args("codex", "m")[super::launch_args("codex", "m").len() - 2..],
+            ["--model", "m"]
+        );
+        assert!(!super::launch_args("claude", "m").contains(&"--model".to_owned()));
+    }
+
     #[test]
     fn dispatch_correlates_http_and_events() -> Result<(), Box<dyn std::error::Error>> {
         use std::io::{Read, Write};

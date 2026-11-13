@@ -362,7 +362,7 @@ pub fn refusal(task: &Task, session: &Value, default_model: &str) -> Option<Stri
             );
         }
     }
-    match session["model_override"].as_str() {
+    match omnigent::session_model(session) {
         Some(model) if model == default_model => None,
         other => Some(format!(
             "it runs {}, not the default {default_model}",

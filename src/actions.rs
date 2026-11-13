@@ -412,7 +412,7 @@ pub fn writes_to_human(settings: &Settings, task: &Task) -> Result<bool, String>
                 "amh: nothing sent: cannot check which model you run on ({error}); send it again"
             )
         })?;
-    let model = session["model_override"].as_str().unwrap_or_default();
+    let model = omnigent::session_model(&session).unwrap_or_default();
     Ok(wanted.iter().any(|part| model.contains(part))
             // 🧑 "Try 6 Sol" for this direct-human writing role.
             || (!model.is_empty() && exception == format!("{}:{tool}:{model}", task.tag()))

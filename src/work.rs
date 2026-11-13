@@ -397,7 +397,12 @@ pub fn relaunch(
             .strip_suffix("-native")
             .unwrap_or(&harness)
             .to_owned(),
-        kept(model, "model_override")?,
+        match model.filter(|asked| !asked.is_empty()) {
+            Some(asked) => asked.to_owned(),
+            None => crate::omnigent::session_model(session)
+                .map(str::to_owned)
+                .ok_or("amh: the manager's session has no `model_override`; name it with an option of `amh manager rotate`")?,
+        },
         kept(effort, "reasoning_effort")?,
         kept(None, "workspace")?,
     ])
