@@ -70,12 +70,12 @@ fn text_of(item: &Value) -> Option<String> {
     Some(text.trim().to_owned()).filter(|text| !text.is_empty())
 }
 
-/// The reply owed for human messages at `asked_s` from session items, newest first; `None` while the newest message has no natural end of turn yet. Pure.
+/// The reply owed for human messages at `asked_s` from session items, newest first, and the times it answers; `None` while none has a natural end of turn yet. Pure.
 ///
 /// A natural end of turn is an assistant text the agent stopped on by itself: the next item is a user message (the agent was idle when it came), or it is the newest item and `newest_ended`.
 /// A message that interrupts a turn comes after a tool result, so the text before it is no natural end.
 /// Each human message is answered by the first natural end after it; the distinct answers go out oldest first.
-pub fn reply(items: &[Value], asked_s: &[i64], newest_ended: bool) -> Option<String> {
+pub fn reply(items: &[Value], asked_s: &[i64], newest_ended: bool) -> Option<(String, Vec<i64>)> {
     // Other kinds, e.g. `resource_event`, say nothing about turns.
     let items: Vec<&Value> = items
         .iter()
@@ -94,15 +94,20 @@ pub fn reply(items: &[Value], asked_s: &[i64], newest_ended: bool) -> Option<Str
         .filter_map(|(at, item)| Some((at, item["created_at"].as_i64()?, text_of(item)?)))
         .collect();
     let mut answers: Vec<&(usize, i64, String)> = Vec::new();
+    let mut answered = Vec::new();
     for asked in asked_s {
-        let first = ends.iter().rev().find(|(_, end_s, _)| end_s >= asked)?;
+        // Strictly later: a text in the same second as the delivery is the previous turn's.
+        let Some(first) = ends.iter().rev().find(|(_, end_s, _)| end_s > asked) else {
+            continue;
+        };
+        answered.push(*asked);
         if !answers.iter().any(|known| known.0 == first.0) {
             answers.push(first);
         }
     }
     answers.sort_by_key(|answer| std::cmp::Reverse(answer.0));
     let texts: Vec<&str> = answers.iter().map(|answer| answer.2.as_str()).collect();
-    Some(texts.join("\n\n"))
+    (!answered.is_empty()).then(|| (texts.join("\n\n"), answered))
 }
 
 /// Send each owed reply whose turn ended naturally; called by the watcher every poll.
@@ -179,12 +184,30 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
                         .as_i64()
                         .is_some_and(|at| now_s() - at >= QUIET_S)
             });
-        let Some(text) = reply(&items, &asked_s, state == "ready" || quiet) else {
+        let Some((text, answered)) = reply(&items, &asked_s, state == "ready" || quiet) else {
             continue;
         };
+        // Times recorded meanwhile stay owed.
+        let settle = |log: &mut Vec<String>, line: String| {
+            let left: Vec<String> = fs::read_to_string(&path)
+                .map(|now| parse(&now))
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|at| !answered.contains(at))
+                .map(|at| at.to_string())
+                .collect();
+            let kept = match left.is_empty() {
+                true => fs::remove_file(&path),
+                false => fs::write(&path, format!("human {}\n", left.join(" "))),
+            };
+            if let Err(error) = kept {
+                log.push(format!("cannot update {}: {error}", path.display()));
+            }
+            log.push(line);
+        };
         match send(settings, store, &address, &text) {
-            Ok(to) => done(&mut log, format!("turn reply of {address} sent to {to}")),
-            Err(error) if now_s() - latest_s > RETRY_S => done(
+            Ok(to) => settle(&mut log, format!("turn reply of {address} sent to {to}")),
+            Err(error) if now_s() - latest_s > RETRY_S => settle(
                 &mut log,
                 format!("turn reply of {address} failed; dropped: {error}"),
             ),
@@ -253,7 +276,10 @@ mod tests {
         // A mid-turn `amh tell human` does not cancel the reply.
         let event = json!({"type":"resource_event","created_at":15});
         let ended = [event, said(14, " done \n"), output(13), tool(12), user(10)];
-        assert_eq!(reply(&ended, &asked, true), Some("done".to_owned()));
+        assert_eq!(
+            reply(&ended, &asked, true),
+            Some(("done".to_owned(), vec![10]))
+        );
         // uiclient_steer.md: the answer ended the turn; a notification started another turn, whose text is not owed.
         let steer = [
             said(30, "later"),
@@ -263,7 +289,10 @@ mod tests {
             tool(12),
             user(10),
         ];
-        assert_eq!(reply(&steer, &asked, true), Some("answer".to_owned()));
+        assert_eq!(
+            reply(&steer, &asked, true),
+            Some(("answer".to_owned(), vec![10]))
+        );
         // A message interrupting a turn after a tool result is no end; the text before it is not sent.
         let interrupted = [
             said(30, "final"),
@@ -273,18 +302,26 @@ mod tests {
             said(20, "mid"),
             user(10),
         ];
-        assert_eq!(reply(&interrupted, &asked, true), Some("final".to_owned()));
+        assert_eq!(
+            reply(&interrupted, &asked, true),
+            Some(("final".to_owned(), vec![10]))
+        );
         // Two human messages answered by two natural ends, oldest first.
         let two = [said(40, "second"), user(35), said(20, "first"), user(10)];
         assert_eq!(
             reply(&two, &[10, 35], true),
-            Some("first\n\nsecond".to_owned())
+            Some(("first\n\nsecond".to_owned(), vec![10, 35]))
         );
-        assert_eq!(reply(&two[1..], &[10, 35], false), None);
+        assert_eq!(
+            reply(&two[1..], &[10, 35], false),
+            Some(("first".to_owned(), vec![10]))
+        );
+        // A text in the same second as the delivery belongs to the previous turn.
+        assert_eq!(reply(&[user(10), said(10, "old")], &asked, true), None);
         // Both asked before one natural end: one answer.
         assert_eq!(
             reply(&[said(40, "both"), user(12), user(10)], &[10, 12], true),
-            Some("both".to_owned())
+            Some(("both".to_owned(), vec![10, 12]))
         );
     }
 }

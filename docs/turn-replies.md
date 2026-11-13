@@ -20,8 +20,8 @@ what
 how
 - record `amh-replies/SESSION_ID` in the state dir: `human T1 T2 ...`, unanswered human message times
     - time taken before sending; appended after it succeeds; times over 12 h old dropped
-- watcher poll `turn replies`: reads newest 500 items; sends once the latest time has an answer
-    - file removed after sending only if unchanged meanwhile
+- watcher poll `turn replies`: reads newest 500 items; sends the answers that exist
+    - answered times removed after sending; unanswered and newly recorded ones stay
     - failed send retried until 10 min after the latest human message; no answer within 12 h → dropped
 - human path = `actions::tell_human`: recorded, replaceable with `--replaces`; consolidation reminder, when any, goes to the agent
 
@@ -31,4 +31,4 @@ why the 180 s rule stays
 - risk: a text followed by over 180 s of generating the next tool call is taken as the end
 
 limits
-- items only carry second timestamps; a natural end in the same second as a human message counts as after it
+- items only carry second timestamps; a natural end must be strictly later than the human message
