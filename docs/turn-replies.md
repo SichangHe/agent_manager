@@ -17,7 +17,7 @@ how
     - time taken before sending; written after it succeeds
     - 🧑 "the auto-forwarding should only trigger after messages from me, e.g., purely system message should not trigger it, but should also not cancel it if the previous message was from me"
     - human: `SESSION_ID`; `FIRST_S` = earliest unanswered human message, `LATEST_S` = latest; system messages change nothing
-    - text = every turn-final assistant text since `FIRST_S`, oldest first, joined; a turn-final text is followed by a user item or nothing
+    - text = turn-final assistant texts since `FIRST_S` and after the newest `amh tell human`, newest 3, oldest first, joined; turn-final = followed by a user item or nothing
     - text window from `FIRST_S`; `amh tell human` cancels only if run since `LATEST_S`
     - agent: `SESSION_ID.agent`, overwritten: the turn's text goes to the latest sender
 - watcher poll `turn replies`: per file, when the turn ended

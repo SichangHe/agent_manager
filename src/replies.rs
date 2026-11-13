@@ -116,13 +116,21 @@ pub fn reply(items: &[Value], first_s: i64, latest_s: i64, recipients: &[&str]) 
     };
     // uiclient_steer.md: a harness-started turn followed the answer at once, and only the newer turn's text was sent.
     // Every turn's final text since `first_s` goes out, oldest first: an assistant text whose next item is a user message or none.
-    let ends: Vec<String> = turn
+    // Texts before the agent's own newest `amh tell` were already told; at most the newest 3 turns go out.
+    let told_at = turn
+        .iter()
+        .position(|item| {
+            item["type"] == "function_call" && tells(&item["arguments"].to_string(), recipients)
+        })
+        .unwrap_or(turn.len());
+    let ends: Vec<String> = turn[..told_at]
         .iter()
         .enumerate()
         .filter(|(at, _)| {
             *at == 0 || (turn[at - 1]["type"] == "message" && turn[at - 1]["role"] == "user")
         })
         .filter_map(|(_, item)| text_of(item))
+        .take(3)
         .collect();
     let last = (!ends.is_empty()).then(|| ends.into_iter().rev().collect::<Vec<_>>().join("\n\n"));
     match (told, last) {
@@ -329,9 +337,10 @@ mod tests {
         let answer = json!({"type":"message","role":"assistant","created_at":11,"content":[{"type":"output_text","text":"answer"}]});
         let mid = json!({"type":"message","role":"assistant","created_at":10,"content":[{"type":"output_text","text":"working"}]});
         let notice = json!({"type":"message","role":"user","created_at":12,"content":[]});
-        let tool = json!({"type":"function_call","created_at":10,"arguments":"ls"});
+        let tool =
+            json!({"type":"function_call","created_at":9,"arguments":"amh tell human early"});
         assert_eq!(
-            reply(&[said, notice, answer, tool, mid, user], 10, 10, &["human"]),
+            reply(&[said, notice, answer, tool, mid, user], 9, 10, &["human"]),
             Reply::Send("answer\n\ndone".to_owned())
         );
     }
