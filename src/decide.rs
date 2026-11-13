@@ -15,7 +15,7 @@ pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
 // 🧑 "I think amh should say to add TODO and attach, if any, additional ack" ... "let agents answer quick questions directly immediately instead of adding to TODO"
-pub const ACCEPT: &str = "from the human; at once, add each request as an open item in the human's words, in ONE call: `amh tell human --add 'ITEM'` per item, with any acknowledgement as the message text. Answer a quick question directly instead. A standing instruction with no end goes to `amh rule add 'RULE'`, not an item";
+pub const ACCEPT: &str = "from the human; at once, add each request as an open item in the human's words, in ONE call: `amh tell human --add 'ITEM'` per item, with any acknowledgement as the message text. Answer a quick question directly instead. A standing rule with no end is no item: write it into the suitable instructions (the project's AGENTS.md), or ask your manager for a rule in the shared agent instructions";
 pub const ADD_REMINDER: &str =
     "\nAdd every still-open request to your open items; answer a quick question directly instead.";
 
@@ -708,7 +708,7 @@ fn remind_text(ready: &[&str], open: usize, old: &[(String, String, i64)]) -> St
             .map(|(id, item, days)| format!("{id} ({days} d): {item}"))
             .collect();
         text += &format!(
-            "\nYou have {open} open items, {} of them ready for over {} days. For each, oldest first: finish it (`amh todo done`), wait with an end (`amh todo wait ID --on WHAT --until 3d`), or, if it is a standing instruction, make it a rule (`amh rule from ID`).",
+            "\nYou have {open} open items, {} of them ready for over {} days. For each, oldest first: finish it (`amh todo done`), make it wait on what it waits for (`amh todo wait ID --on WHAT` or `--for ID`), or, if it is a standing rule, write it into the suitable instructions and resolve it.",
             old.len(),
             crate::requests::OLD_S / 86400
         );

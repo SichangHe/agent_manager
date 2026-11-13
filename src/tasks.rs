@@ -117,66 +117,6 @@ pub fn add_item(task: &mut Task, item: &str, from_human: bool) -> Result<Option<
     Ok(Some(marked))
 }
 
-/// Where a task keeps its standing rules: instructions with no end, never open items.
-const RULES: &str = "standing_rules";
-
-/// The task's standing rules, oldest first.
-pub fn rules(task: &Task) -> Vec<String> {
-    task.field(RULES)
-        .and_then(|raw| serde_json::from_str(raw).ok())
-        .unwrap_or_default()
-}
-
-fn set_rules(task: &mut Task, rules: &[String]) {
-    task.fields.retain(|(key, _)| key != RULES);
-    if !rules.is_empty() {
-        task.fields
-            .push((RULES.to_owned(), serde_json::json!(rules).to_string()));
-    }
-}
-
-/// Add a standing rule, marked as the human's when `from_human`; false when it is already there.
-// 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
-pub fn add_rule(task: &mut Task, rule: &str, from_human: bool) -> Result<bool, String> {
-    let marked = taskfile::mark(rule, from_human)?;
-    let mut rules = rules(task);
-    if rules.contains(&marked) {
-        return Ok(false);
-    }
-    rules.push(marked);
-    set_rules(task, &rules);
-    Ok(true)
-}
-
-/// Drop a standing rule given by its text, with or without the human mark.
-pub fn drop_rule(task: &mut Task, given: &str) -> Result<String, String> {
-    let bare = |rule: &str| {
-        rule.strip_prefix(HUMAN_MARK)
-            .unwrap_or(rule)
-            .trim()
-            .to_owned()
-    };
-    let mut rules = rules(task);
-    let at = rules
-        .iter()
-        .position(|rule| bare(rule) == bare(given))
-        .ok_or("amh: no such rule; copy its text from `amh rule list`")?;
-    let dropped = rules.remove(at);
-    set_rules(task, &rules);
-    Ok(dropped)
-}
-
-/// The rules as the agent reads them at start and in `amh todo list`; empty without rules.
-pub fn rules_text(task: &Task) -> String {
-    match rules(task).as_slice() {
-        [] => String::new(),
-        rules => format!(
-            "Standing rules (always follow; they are never open items):\n- {}\n",
-            rules.join("\n- ")
-        ),
-    }
-}
-
 /// The record left in a task file when an open item is removed: the item itself, then how it is known to be finished when that was said.
 pub fn removal_note(item: &str, evidence: &str) -> String {
     match evidence.trim() {
@@ -303,10 +243,38 @@ pub fn pin(task: &mut Task, section: &str) -> Result<(), String> {
     })
 }
 
-/// When a whole-task `blocked` ends (RFC 3339); the watcher then sets the task running again.
-pub const BLOCKED_UNTIL: &str = "blocked_until";
+/// The human's own task: items the human owns, which agents wait on with `--for human.md#N`; no agent runs it.
+// 🧑 "First they need to create a task and let that someone own it, and block on this task, e.g. the human should have 67 tasks or something like that"
+pub const HUMAN_TASK: &str = "human.md";
 
-/// Set the status and what a blocked task waits for; a status change unpins the task's row and drops the block's end.
+/// What a block names: a task file `NAME.md`, a request ID `NAME.md#N`, or a date `until RFC3339`; `None` for free text.
+pub enum Block<'a> {
+    Task(&'a str),
+    Item(&'a str),
+    Date(chrono::DateTime<chrono::Utc>),
+}
+
+pub fn block_of(on: &str) -> Option<Block<'_>> {
+    let on = on.trim();
+    if let Some(at) = on.strip_prefix("until ") {
+        return chrono::DateTime::parse_from_rfc3339(at)
+            .ok()
+            .map(|at| Block::Date(at.with_timezone(&chrono::Utc)));
+    }
+    if on.contains(char::is_whitespace) {
+        return None;
+    }
+    match on.split_once(".md#") {
+        Some((_, n)) if n.parse::<u64>().is_ok() => Some(Block::Item(on)),
+        _ if on.ends_with(".md") => Some(Block::Task(on)),
+        _ => None,
+    }
+}
+
+/// The next reminder of a task blocked on something that is no task: `RFC3339 #N` (`requests::schedule_text`).
+pub const BLOCK_REMIND: &str = "block_reminder";
+
+/// Set the status and what a blocked task waits for; a status change unpins the task's row and drops the block's reminder schedule.
 pub fn set_status(task: &mut Task, status: &str, blocked_on: Option<&str>) -> Result<(), String> {
     let waits = blocked_on.is_some_and(|on| !on.is_empty());
     if (status == "blocked") != waits && status != "long_running" {
@@ -316,7 +284,7 @@ pub fn set_status(task: &mut Task, status: &str, blocked_on: Option<&str>) -> Re
         );
     }
     task.fields
-        .retain(|(key, _)| key != "blocked_on" && key != BLOCKED_UNTIL && key != PIN);
+        .retain(|(key, _)| key != "blocked_on" && key != BLOCK_REMIND && key != PIN);
     match task.fields.iter_mut().find(|(key, _)| key == "status") {
         Some(field) => field.1 = status.to_owned(),
         None => task.fields.push(("status".to_owned(), status.to_owned())),

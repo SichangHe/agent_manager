@@ -556,12 +556,12 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
 }
 
 #[test]
-fn rules_expiring_waits_and_duplicate_adds() -> Result<(), Box<dyn std::error::Error>> {
+fn waits_need_an_item_or_date_and_the_human_owns_items() -> Result<(), Box<dyn std::error::Error>> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)?
         .as_nanos();
     let workspace =
-        Workspace(std::env::temp_dir().join(format!("amh-rules-{}-{now}", std::process::id())));
+        Workspace(std::env::temp_dir().join(format!("amh-waits-{}-{now}", std::process::id())));
     fs::create_dir_all(workspace.0.join("state"))?;
     let root = workspace.0.join("records");
     fs::create_dir_all(&root)?;
@@ -576,10 +576,14 @@ fn rules_expiring_waits_and_duplicate_adds() -> Result<(), Box<dyn std::error::E
         root.join("TODO.md"),
         "current:\na.md omnigent://a\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
     )?;
+    let old_wait = r#"[{"added_at":null,"blockers":["on: human deciding on the draft"],"creator":"human","evidence":"","id":"a.md#2","resolved_at":null,"source":"test","stage":"added","text":"🧑 Post the draft"}]"#;
     fs::write(
         root.join("a.md"),
-        "---\nstatus: running\nrunat: omnigent://a\nmanagerat: omnigent://manager\nis_manager: false\npending_task_items:\n  - 🧑 Minimize diffs\n  - 🧑 Never file issues upstream\n---\n",
+        format!(
+            "---\nstatus: running\nrunat: omnigent://a\nmanagerat: omnigent://manager\nis_manager: false\npending_task_items:\n  - 🧑 Minimize diffs\n  - 🧑 Post the draft\nrequest_records: '{old_wait}'\nrequest_next: 2\n---\n"
+        ),
     )?;
+    // Exact duplicates, up to quotes, are skipped.
     let duplicate = workspace.run(&[
         "todo",
         "add",
@@ -588,7 +592,6 @@ fn rules_expiring_waits_and_duplicate_adds() -> Result<(), Box<dyn std::error::E
         "--task-file",
         "a",
     ])?;
-    assert!(duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already open"));
     assert_eq!(
         fs::read_to_string(root.join("a.md"))?
@@ -597,72 +600,82 @@ fn rules_expiring_waits_and_duplicate_adds() -> Result<(), Box<dyn std::error::E
         1
     );
     let listed = workspace.ok(&["todo", "list", "--task-file", "a"])?;
-    let rule_id = listed
-        .lines()
-        .find(|line| line.contains("Never file"))
-        .and_then(|line| line.split_whitespace().next())
-        .ok_or("no rule item")?
-        .to_owned();
-    workspace.ok(&["rule", "from", &rule_id, "--task-file", "a"])?;
-    workspace.ok(&["rule", "add", "Keep things private", "--task-file", "a"])?;
-    let listed = workspace.ok(&["todo", "list", "--task-file", "a"])?;
-    assert!(listed.contains("Standing rules"));
-    assert!(listed.contains("- 🧑 Never file issues upstream\n- Keep things private"));
-    assert!(!listed.contains("[added] 🧑 Never file"));
-    let wait_id = listed
+    let id = listed
         .lines()
         .find(|line| line.contains("Minimize"))
         .and_then(|line| line.split_whitespace().next())
         .ok_or("no item")?
         .to_owned();
+    // Waiting on someone in words is refused.
+    let refused = workspace.run(&[
+        "todo",
+        "wait",
+        &id,
+        "--on",
+        "human review",
+        "--task-file",
+        "a",
+    ])?;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("amh todo ask-human"));
+    let refused = workspace.run(&["task", "status", "a", "blocked", "--on", "human review"])?;
+    assert!(!refused.status.success());
+    // The human owns an item; the agent waits for it; the human resolves it.
+    let asked = workspace.ok(&["todo", "ask-human", "Review the plan", "--task-file", "a"])?;
+    let human_item = asked.lines().next().ok_or("no ID")?.to_owned();
+    assert_eq!(human_item, "human.md#1");
     workspace.ok(&[
         "todo",
         "wait",
-        &wait_id,
-        "--on",
-        "human review",
+        &id,
+        "--for",
+        &human_item,
+        "--task-file",
+        "a",
+    ])?;
+    assert!(
+        workspace
+            .ok(&["human"])?
+            .contains("human.md#1 [added] Review the plan (asked by a.md)")
+    );
+    workspace.ok(&["task", "status", "a", "blocked", "--on", &human_item])?;
+    workspace.ok(&["human", "--done", &human_item])?;
+    assert!(
+        !workspace
+            .ok(&["todo", "list", "--task-file", "a"])?
+            .contains("waits for human.md#1")
+    );
+    // An old wait in words on the human becomes the human's item and a dependency.
+    let converted = workspace.ok(&["todo", "wait", "a.md#2", "--ask-human", "--task-file", "a"])?;
+    assert!(converted.contains("human.md#2: human deciding on the draft"));
+    assert!(
+        workspace
+            .ok(&["todo", "list", "--task-file", "a"])?
+            .contains("🧑 Post the draft (waits for human.md#2)")
+    );
+    // Dates.
+    workspace.ok(&[
+        "todo",
+        "wait",
+        "a.md#2",
         "--until",
-        "2d",
+        "2099-01-01",
         "--task-file",
         "a",
     ])?;
     assert!(
         workspace
             .ok(&["todo", "list", "--task-file", "a"])?
-            .contains("on: human review [until ")
-    );
-    assert!(
-        !workspace
-            .run(&[
-                "todo",
-                "wait",
-                &wait_id,
-                "--on",
-                "x",
-                "--until",
-                "2",
-                "--task-file",
-                "a"
-            ])?
-            .status
-            .success()
+            .contains("until: 2099-01-0")
     );
     workspace.ok(&[
         "task",
         "status",
         "a",
         "blocked",
-        "--on",
-        "human review",
         "--until",
-        "1h",
+        "2099-01-01 09:00",
     ])?;
-    assert!(fs::read_to_string(root.join("a.md"))?.contains("blocked_until"));
-    workspace.ok(&["rule", "drop", "Keep things private", "--task-file", "a"])?;
-    assert!(
-        !workspace
-            .ok(&["rule", "list", "--task-file", "a"])?
-            .contains("private")
-    );
+    assert!(fs::read_to_string(root.join("a.md"))?.contains("blocked_on: until 2099-01-01"));
     Ok(())
 }

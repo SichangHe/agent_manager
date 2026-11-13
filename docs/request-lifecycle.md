@@ -83,17 +83,23 @@ validation
 
 keeping lists short
 - 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
-    - study: 185 items hid behind free-text `--on` waits, 208 behind whole-task `blocked`, ≥21 were standing rules
-- outside waits end: `amh todo wait ID --on WHAT --until DURATION` (default 3d), stored as `on: WHAT [until RFC3339]`
-    - whole-task `blocked` ends too: field `blocked_until`, set by `amh task status ... --until` (default 3d)
-    - watcher `actions::maintain` every 5 min, under the lock: ended waits drop and the task is told; an ended block sets the task `running`
-    - legacy waits and blocks without an end get one 3 d after the first pass
-- records carry `added_at`; legacy ones take their first `request added` event, else the first pass's time
-- standing rules: frontmatter `standing_rules`, JSON list; `amh rule add|from|list|drop`
-    - shown in the first prompt and `amh todo list`; never reminded, counted open, or blocking close
-    - `amh rule from ID` resolves the request quietly (evidence `made a standing rule`) and keeps its text
-    - ACCEPT sends standing instructions to `amh rule add`
+- 🧑 "Standing rules should be documented instead of being recorded as tasks. This should be in the suitable instructions"
+    - ACCEPT: a standing rule is no item; write it into the suitable instructions or ask the manager
+- 🧑 "I think tasks can block on other tasks, a date, or else should cause reminders to the responsible agent. Let's disallow blocking on someone. First they need to create a task and let that someone own it, and block on this task"
+- waits name a dependency, never someone
+    - item: `amh todo wait ID --for OTHER_ID` (request IDs, incl. the human's) or `--until DATE` (blocker `until: RFC3339`)
+    - task: `amh task status T blocked --on OTHER.md | --on NAME.md#N | --until DATE` (`blocked_on: until RFC3339`)
+    - free text refused with `WAIT_HOW` (actions.rs): give that someone an item and wait for it
+- the human's items: task `human.md` (`tasks::HUMAN_TASK`, runat `retired`, no agent)
+    - agents add with `amh todo ask-human WHAT` → prints `human.md#N`; text `WHAT (asked by TASK)`
+    - the human lists with `amh human`, resolves with `amh human --done ID`; resolving is final whoever asked (`requests::finish`)
+- watcher `actions::maintain` every 5 min, under the lock
+    - releases a task blocked on a closed task, a resolved item, or a passed date: `running` (long_running stays) and its agent is told
+    - drops passed `until:` item waits and tells the task
+    - 🧑 "Maybe 1hr, base 1.5?": old free-text waits (`on: WHAT [remind RFC3339 #N]`) and old free-text task blocks (`block_reminder`) are reminded after 1 h, then ×1.5 each time
+    - `amh todo wait ID --ask-human` turns an old free-text wait into the human's item plus a dependency
+    - dates `added_at` on records: first `request added` event, else the pass time
 - flags: over 15 open items or ready items over 7 d old
-    - idle reminder adds the counts and the 3 oldest with the choice: done, wait with an end, or make a rule
+    - idle reminder adds the counts and the 3 oldest with the choice: done, wait on a dependency, or move a standing rule into instructions
     - `amh ls` rows show `(N open, M ready over 7 d)`
-- adding an item that matches an open one, ignoring the human mark, quotes and spacing, is refused
+- adding an item that matches an open one, ignoring the human mark, quotes and spacing, is skipped with a note

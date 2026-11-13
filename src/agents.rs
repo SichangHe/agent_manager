@@ -208,11 +208,7 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
     let guides: Vec<(String, String)> = commands
         .map(|args| shown(&args))
         .collect::<Result<_, _>>()?;
-    let rules = match store.contains(start.name)? {
-        true => crate::tasks::rules_text(&store.load(start.name)?),
-        false => String::new(),
-    };
-    let prompt = work::first_prompt(start.name, &guides, &format!("{rules}{}", start.request));
+    let prompt = work::first_prompt(start.name, &guides, start.request);
     let title = start.name.strip_suffix(".md").unwrap_or(start.name);
     let address = omnigent::launch(
         settings,

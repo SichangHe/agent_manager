@@ -53,8 +53,35 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
-/// End outside waits and whole-task blocks that are over, and date undated requests; the watcher calls this every few minutes under the store lock.
-// 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
+/// What to wait on instead of someone.
+// 🧑 "Let's disallow blocking on someone. First they need to create a task and let that someone own it, and block on this task"
+const WAIT_HOW: &str = "amh: wait only on a task file (OTHER.md), an item ID (NAME.md#N), or a date (--until 2026-11-20). To wait on the human, give them an item with `amh todo ask-human 'WHAT YOU NEED'` and wait for the ID it prints; to wait on another agent, add an item to its task with `amh task give OTHER.md 'WHAT YOU NEED'` and wait for that item. Without a dependency, do not block: keep the item open.";
+
+/// Add an item the human owns, asked by `asker`, to the human's task (made on first use); returns its ID.
+fn ask_human(store: &Store, asker: &str, what: &str) -> Result<String, String> {
+    let mut human = match store.contains(tasks::HUMAN_TASK)? {
+        true => store.load(tasks::HUMAN_TASK)?,
+        false => crate::tasks::Task::parse(
+            tasks::HUMAN_TASK,
+            "---\nstatus: long_running\nrunat: retired\nis_manager: false\npending_task_items: []\n---\nItems the human owns. Agents add them with `amh todo ask-human` and wait for them; the human resolves them with `amh human --done ID`.\n",
+        )?,
+    };
+    let text = format!("{} (asked by {asker})", what.trim());
+    let item = tasks::add_item(&mut human, &text, false)?.unwrap_or(text);
+    requests::register(&mut human, &item, asker, "amh todo ask-human")?;
+    let id = requests::read(&human)?
+        .into_iter()
+        .find(|r| r.text == item && r.stage != requests::Stage::Resolved)
+        .map(|r| r.id)
+        .ok_or("amh: the human's item has no request")?;
+    store.save(&human)?;
+    store.place(&human)?;
+    Ok(id)
+}
+
+/// Release tasks blocked on a task that closed, remind about other blocks and outside waits with backoff, and date undated requests; the watcher calls this every few minutes under the store lock.
+// 🧑 "What are the waiting on? Previously I asked for the task blocked on to block on other tasks, was that ever implemented?"
+// 🧑 "Blocked tasks that are not blocked on other tasks should have long reminders with exponential backoff. Maybe 1hr, base 1.5?"
 pub fn maintain(store: &Store) -> Result<(), String> {
     let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let now = chrono::Utc::now();
@@ -65,31 +92,66 @@ pub fn maintain(store: &Store) -> Result<(), String> {
                 .ok()
                 .flatten()
         };
-        let mut changed = requests::expire_waits(&mut task, now, added)?;
-        if task.status() == "blocked" {
-            let end = task
-                .field(tasks::BLOCKED_UNTIL)
-                .and_then(|end| chrono::DateTime::parse_from_rfc3339(end).ok());
-            match end {
-                None => {
-                    let end = now + chrono::Duration::seconds(requests::WAIT_DEFAULT_S);
-                    task.fields.retain(|(key, _)| key != tasks::BLOCKED_UNTIL);
-                    task.fields
-                        .push((tasks::BLOCKED_UNTIL.to_owned(), end.to_rfc3339()));
-                    changed = true;
-                }
-                Some(end) if end <= now => {
-                    let on = task.field("blocked_on").unwrap_or_default().to_owned();
-                    tasks::set_status(&mut task, "running", None)?;
-                    let name = task.name.clone();
-                    let text = format!(
-                        "Your task's block ended (it waited on: {on}), so it runs again and its ready items are reminded. If it still waits, set it again with an end: `amh task status {name} blocked --on WHAT --until 3d`."
-                    );
-                    requests::queue(&mut task, &name, &text)?;
-                    changed = true;
-                }
-                Some(_) => {}
+        let mut changed = requests::remind_waits(&mut task, now, added)?;
+        let on = task.field("blocked_on").unwrap_or_default().to_owned();
+        let name = task.name.clone();
+        // What a block on a task, an item or a date waits for, and whether it is over; `None` for free text.
+        let over = match tasks::block_of(&on) {
+            Some(tasks::Block::Task(other)) if store.contains(other)? => {
+                Some((store.load(other)?.status() == "done").then(|| format!("{other} is closed")))
             }
+            Some(tasks::Block::Item(id)) => {
+                let open = store.all()?.iter().any(|owner| {
+                    requests::read(owner).is_ok_and(|records| {
+                        records
+                            .iter()
+                            .any(|r| r.id == id && r.stage != requests::Stage::Resolved)
+                    })
+                });
+                Some((!open).then(|| format!("{id} is resolved")))
+            }
+            Some(tasks::Block::Date(at)) => Some((at <= now).then(|| format!("{on} has come"))),
+            _ => None,
+        };
+        match over {
+            Some(Some(why)) => {
+                let status = match task.status() {
+                    "long_running" => "long_running",
+                    _ => "running",
+                };
+                tasks::set_status(&mut task, status, None)?;
+                let text = format!(
+                    "Your task's block is over ({why}), so it runs again; continue its open items."
+                );
+                requests::queue(&mut task, &name, &text)?;
+                changed = true;
+            }
+            Some(None) => {}
+            None if task.status() == "blocked" => {
+                let schedule = task
+                    .field(tasks::BLOCK_REMIND)
+                    .and_then(requests::parse_schedule);
+                let next = match schedule {
+                    None => Some(requests::schedule_text(requests::next_reminder(now, 0), 0)),
+                    Some((at, n)) if at <= now => {
+                        let text = format!(
+                            "Your task is still blocked on: {on}. If that is over, set it running (`amh task status {name} running`) and continue; if it waits on another task, block it on that task file instead (`amh task status {name} blocked --on OTHER.md`). Otherwise nothing is needed; the next reminder comes later."
+                        );
+                        requests::queue(&mut task, &name, &text)?;
+                        Some(requests::schedule_text(
+                            requests::next_reminder(now, n + 1),
+                            n + 1,
+                        ))
+                    }
+                    Some(_) => None,
+                };
+                if let Some(next) = next {
+                    task.fields.retain(|(key, _)| key != tasks::BLOCK_REMIND);
+                    task.fields.push((tasks::BLOCK_REMIND.to_owned(), next));
+                    changed = true;
+                }
+            }
+            None => {}
         }
         if changed {
             store.save(&task)?;
@@ -542,10 +604,30 @@ fn short(values: &Value) -> Result<u8, String> {
             let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
             let store = Store::new(&settings);
             let _lock = store.lock()?;
+            let owned = store.contains(tasks::HUMAN_TASK)?;
             match (text("text"), values["done"] == true) {
+                (Some(item), true)
+                    if owned
+                        && requests::read(&store.load(tasks::HUMAN_TASK)?)?
+                            .iter()
+                            .any(|r| {
+                                r.stage == requests::Stage::Added
+                                    && (r.id == item || r.text == item)
+                            }) =>
+                {
+                    let mut human = store.load(tasks::HUMAN_TASK)?;
+                    requests::finish(&mut human, item, "the human resolved it")?;
+                    store.save(&human)?;
+                    request_effects(&store)?;
+                }
                 (Some(item), true) => store.list_remove(item)?,
                 (Some(item), false) => store.list_add(item, "human pending")?,
-                (None, _) => say(&store.list_entries("human pending")?),
+                (None, _) => {
+                    say(&store.list_entries("human pending")?);
+                    if owned {
+                        say(&requests::listed(&mut store.load(tasks::HUMAN_TASK)?)?);
+                    }
+                }
             }
             Ok(0)
         }
@@ -887,38 +969,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if task.render() != before {
                 store.save(&task)?;
             }
-            listed + &tasks::rules_text(&task)
-        }
-        ("rule", "add") => {
-            let _lock = store.lock()?;
-            let mut task = store.own(text("task_file"))?;
-            let mut said = String::new();
-            for rule in many("rule") {
-                if !tasks::add_rule(&mut task, rule, flag("from_human"))? {
-                    said += &format!("already a rule: {rule}\n");
-                }
-            }
-            store.save(&task)?;
-            said
-        }
-        ("rule", "from") => {
-            let _lock = store.lock()?;
-            let mut task = store.own(text("task_file"))?;
-            let mut said = String::new();
-            for item in many("item") {
-                said += &format!("now a rule: {}\n", requests::to_rule(&mut task, item)?);
-            }
-            store.save(&task)?;
-            request_effects(&store)?;
-            said
-        }
-        ("rule", "list") => tasks::rules_text(&store.own(text("task_file"))?),
-        ("rule", "drop") => {
-            let _lock = store.lock()?;
-            let mut task = store.own(text("task_file"))?;
-            let dropped = tasks::drop_rule(&mut task, need("rule"))?;
-            store.save(&task)?;
-            format!("dropped: {dropped}\n")
+            listed
         }
         ("todo", "add") | ("task", "give") => {
             let lock = store.lock()?;
@@ -1042,16 +1093,44 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if !blockers.is_empty() {
                 requests::wait(&mut task, need("id"), &blockers, &store.all()?)?;
             }
-            if text("on").is_some() || flag("clear_on") {
-                let wait_s = match text("until") {
-                    Some(until) => requests::duration_s(until)?,
-                    None => requests::WAIT_DEFAULT_S,
-                };
-                let end = chrono::Utc::now() + chrono::Duration::seconds(wait_s);
-                requests::wait_on(&mut task, need("id"), text("on").map(|on| (on, end)))?;
+            if text("on").is_some() {
+                return Err(WAIT_HOW.to_owned());
+            }
+            if flag("clear_on") {
+                requests::wait_on(&mut task, need("id"), None)?;
+            }
+            if let Some(at) = text("until") {
+                requests::wait_until(&mut task, need("id"), requests::parse_date(at)?)?;
+            }
+            let mut said = String::new();
+            if flag("ask_human") {
+                let reason = requests::read(&task)?
+                    .into_iter()
+                    .find(|r| r.id == need("id"))
+                    .and_then(|r| {
+                        r.blockers
+                            .iter()
+                            .find_map(|b| b.starts_with(requests::EXTERNAL).then(|| requests::wait_schedule(b).0.to_owned()))
+                    })
+                    .ok_or("amh: that request waits on nothing in words; give the human an item with `amh todo ask-human`")?;
+                let item = ask_human(&store, &task.name, &reason)?;
+                requests::wait_to_item(&mut task, need("id"), &item)?;
+                said = format!(
+                    "{} now waits for the human's item {item}: {reason}\n",
+                    need("id")
+                );
             }
             store.save(&task)?;
-            String::new()
+            said
+        }
+        ("todo", "ask-human") => {
+            let _lock = store.lock()?;
+            let task = store.own(text("task_file"))?;
+            let item = ask_human(&store, &task.name, need("text"))?;
+            format!(
+                "{item}\nWait for it with `amh todo wait YOUR_ID --for {item}` or `amh task status {} blocked --on {item}`. It does not message the human; tell them with `amh tell human`.\n",
+                task.name
+            )
         }
         ("todo", "take") => {
             let _lock = store.lock()?;
@@ -1160,16 +1239,30 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("task", "status") => {
             let _lock = store.lock()?;
             let mut task = store.load(need("task"))?;
-            tasks::set_status(&mut task, need("status"), text("on"))?;
-            if need("status") == "blocked" {
-                let wait_s = match text("until") {
-                    Some(until) => requests::duration_s(until)?,
-                    None => requests::WAIT_DEFAULT_S,
-                };
-                let end = chrono::Utc::now() + chrono::Duration::seconds(wait_s);
-                task.fields
-                    .push((tasks::BLOCKED_UNTIL.to_owned(), end.to_rfc3339()));
+            // 🧑 "Previously I asked for the task blocked on to block on other tasks, was that ever implemented?"
+            // 🧑 "Let's disallow blocking on someone."
+            let until = text("until")
+                .map(requests::parse_date)
+                .transpose()?
+                .map(|at| {
+                    format!(
+                        "until {}",
+                        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+                    )
+                });
+            let on = until.as_deref().or(text("on"));
+            let known = match on.and_then(tasks::block_of) {
+                Some(tasks::Block::Task(other)) => store.contains(other)?,
+                Some(tasks::Block::Item(id)) => store.all()?.iter().any(|owner| {
+                    requests::read(owner).is_ok_and(|records| records.iter().any(|r| r.id == id))
+                }),
+                Some(tasks::Block::Date(_)) => true,
+                None => on.is_none(),
+            };
+            if !known {
+                return Err(WAIT_HOW.to_owned());
             }
+            tasks::set_status(&mut task, need("status"), on)?;
             store.save(&task)?;
             store.place(&task)?;
             String::new()
@@ -1473,6 +1566,76 @@ pub fn run(values: &Value) -> Result<u8, String> {
     };
     say(&output);
     Ok(0)
+}
+
+#[cfg(test)]
+mod maintain_tests {
+    use crate::store::Store;
+    use crate::taskfile;
+
+    #[test]
+    fn closing_a_task_releases_tasks_blocked_on_it_and_other_blocks_get_reminders()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "amh-maintain-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        let file = |name: &str, status: &str, on: &str| {
+            taskfile::write(
+                &root.join(name),
+                &format!(
+                    "---\nstatus: {status}\nrunat: omnigent://{name}\nblocked_on: {on}\n---\n"
+                ),
+            )
+        };
+        file("other.md", "running", "")?;
+        file("waiter.md", "blocked", "other.md")?;
+        file("standing.md", "long_running", "other.md")?;
+        file("human.md", "blocked", "human reviewing docs/plan.md")?;
+        taskfile::write(
+            &root.join("TODO.md"),
+            "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+        )?;
+        let _lock = store.lock()?;
+        super::maintain(&store)?;
+        assert_eq!(store.load("waiter.md")?.status(), "blocked");
+        let human = store.load("human.md")?;
+        assert!(
+            human
+                .field(crate::tasks::BLOCK_REMIND)
+                .is_some_and(|at| at.ends_with(" #0"))
+        );
+        let mut other = store.load("other.md")?;
+        crate::tasks::set_status(&mut other, "done", None)?;
+        store.save(&other)?;
+        super::maintain(&store)?;
+        let waiter = store.load("waiter.md")?;
+        assert_eq!(
+            (waiter.status(), waiter.field("blocked_on")),
+            ("running", None)
+        );
+        let standing = store.load("standing.md")?;
+        assert_eq!(
+            (standing.status(), standing.field("blocked_on")),
+            ("long_running", None)
+        );
+        let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        let queued = database.pending_messages("agent")?;
+        assert!(queued.iter().any(|m| {
+            m["target"] == "waiter.md"
+                && m["text"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("block is over (other.md is closed)"))
+        }));
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 }
 
 #[cfg(test)]

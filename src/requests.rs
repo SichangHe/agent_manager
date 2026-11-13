@@ -187,7 +187,8 @@ pub fn finish(task: &mut Task, given: &str, evidence: &str) -> Result<Request, S
         return Err("amh: request still has unresolved dependencies".to_owned());
     }
     request.evidence = evidence.to_owned();
-    request.stage = if request.creator == "human" {
+    // Items on the human's own task are the human's to resolve, whoever asked.
+    request.stage = if request.creator == "human" || task.name == crate::tasks::HUMAN_TASK {
         Stage::Resolved
     } else {
         Stage::Requested
@@ -200,34 +201,6 @@ pub fn finish(task: &mut Task, given: &str, evidence: &str) -> Result<Request, S
     }
     write(task, &records);
     Ok(result)
-}
-
-/// Turn the added request `given` (ID or text) into a standing rule: the request resolves quietly and the rule keeps its text; returns the text.
-pub fn to_rule(task: &mut Task, given: &str) -> Result<String, String> {
-    let mut records = sync(task)?;
-    let bare = |s: &str| s.strip_prefix(HUMAN_MARK).unwrap_or(s).trim().to_owned();
-    let request = records
-        .iter_mut()
-        .find(|r| r.stage == Stage::Added && (r.id == given || bare(&r.text) == bare(given)))
-        .ok_or("amh: no such open request; copy its ID or text from `amh todo list`")?;
-    // Another agent's request resolves only by its creator's decision.
-    if request.creator != "human" && request.creator != task.name {
-        return Err(format!(
-            "amh: {} was created by {}; only the human's and your own requests become rules",
-            request.id, request.creator
-        ));
-    }
-    let evidence = "made a standing rule";
-    request.stage = Stage::Resolved;
-    request.evidence = evidence.to_owned();
-    request.blockers.clear();
-    request.resolved_at = Some(chrono::Utc::now().to_rfc3339());
-    let text = request.text.clone();
-    crate::tasks::remove_item(task, &text, evidence)?;
-    write(task, &records);
-    let from_human = text.starts_with(HUMAN_MARK);
-    crate::tasks::add_rule(task, &bare(&text), from_human)?;
-    Ok(text)
 }
 
 pub fn decide(
@@ -387,7 +360,7 @@ pub fn wait(task: &mut Task, id: &str, blockers: &[String], all: &[Task]) -> Res
         request
             .blockers
             .iter()
-            .filter(|b| b.starts_with(EXTERNAL))
+            .filter(|b| b.starts_with(EXTERNAL) || b.starts_with(DATE))
             .cloned(),
     );
     request.blockers = pending;
@@ -444,51 +417,113 @@ pub fn set_notifications(task: &mut Task, queued: Vec<Value>) {
 /// How an external reason is stored among a request's blockers; it never matches a request ID, so only its owner clears it.
 pub const EXTERNAL: &str = "on: ";
 
-/// How the end of an outside wait is written after its reason.
-const UNTIL: &str = " [until ";
+/// How a wait for a date is stored among a request's blockers: `until: RFC3339`; the watcher drops it once the date passes.
+pub const DATE: &str = "until: ";
 
-/// The default length of an outside wait or a whole-task block.
-// 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
-pub const WAIT_DEFAULT_S: i64 = 3 * 86400;
-
-/// A duration like `3d`, `12h` or `90m`, in seconds.
-pub fn duration_s(text: &str) -> Result<i64, String> {
+/// A date or time: `2026-11-20`, `2026-11-20 14:00` (local time), or RFC 3339.
+// 🧑 "I think tasks can block on other tasks, a date, or else should cause reminders to the responsible agent. Let's disallow blocking on someone."
+pub fn parse_date(text: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    use chrono::TimeZone;
     let text = text.trim();
-    let wrong = || format!("amh: say a duration like 3d, 12h or 90m, not `{text}`");
-    let (number, unit_s) = [("d", 86400), ("h", 3600), ("m", 60)]
-        .into_iter()
-        .find_map(|(unit, unit_s)| Some((text.strip_suffix(unit)?, unit_s)))
-        .ok_or_else(wrong)?;
-    let n: i64 = number.parse().map_err(|_| wrong())?;
-    match n > 0 {
-        true => Ok(n * unit_s),
-        false => Err("amh: a wait must last a positive time".to_owned()),
+    if let Ok(at) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Ok(at.with_timezone(&chrono::Utc));
     }
+    let local = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M")
+        .or_else(|_| {
+            chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+                .map(|day| day.and_hms_opt(0, 0, 0).unwrap_or_default())
+        })
+        .map_err(|_| {
+            format!("amh: say a date like 2026-11-20 or 2026-11-20 14:00, not `{text}`")
+        })?;
+    chrono::Local
+        .from_local_datetime(&local)
+        .earliest()
+        .map(|at| at.with_timezone(&chrono::Utc))
+        .ok_or_else(|| format!("amh: `{text}` is no valid local time"))
 }
 
-/// An outside wait's reason and its end, if it has one.
-pub fn wait_end(blocker: &str) -> (&str, Option<chrono::DateTime<chrono::FixedOffset>>) {
-    let Some(reason) = blocker.strip_prefix(EXTERNAL) else {
-        return (blocker, None);
-    };
-    match reason.rsplit_once(UNTIL) {
-        Some((reason, end)) => (
-            reason,
-            end.strip_suffix(']')
-                .and_then(|end| chrono::DateTime::parse_from_rfc3339(end).ok()),
-        ),
+/// Make one added request wait until `at`, replacing an earlier date wait.
+pub fn wait_until(
+    task: &mut Task,
+    id: &str,
+    at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    let mut records = sync(task)?;
+    let request = records
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or("amh: no such request")?;
+    if request.stage != Stage::Added {
+        return Err("amh: only added requests may change dependencies".to_owned());
+    }
+    request.blockers.retain(|b| !b.starts_with(DATE));
+    request.blockers.push(format!(
+        "{DATE}{}",
+        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    ));
+    write(task, &records);
+    Ok(())
+}
+
+/// Replace the outside wait of request `id` with a dependency on `human_item`, the human's item made from it.
+pub fn wait_to_item(task: &mut Task, id: &str, human_item: &str) -> Result<(), String> {
+    let mut records = sync(task)?;
+    let request = records
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or("amh: no such request")?;
+    request.blockers.retain(|b| !b.starts_with(EXTERNAL));
+    request.blockers.push(human_item.to_owned());
+    write(task, &records);
+    Ok(())
+}
+
+/// How the next reminder of an outside wait is written after its reason: `[remind RFC3339 #N]`, N reminders so far.
+const REMIND: &str = " [remind ";
+
+// 🧑 "Blocked tasks that are not blocked on other tasks should have long reminders with exponential backoff. Maybe 1hr, base 1.5?"
+/// The first reminder of a wait comes this long after it starts.
+pub const REMIND_FIRST_S: f64 = 3600.0;
+/// Each later reminder waits this many times longer than the one before.
+pub const REMIND_BASE: f64 = 1.5;
+
+/// When the reminder after `n` earlier ones is due, counted from `from`.
+pub fn next_reminder(from: chrono::DateTime<chrono::Utc>, n: i32) -> chrono::DateTime<chrono::Utc> {
+    from + chrono::Duration::seconds((REMIND_FIRST_S * REMIND_BASE.powi(n)) as i64)
+}
+
+/// An outside wait's reason, its next reminder time and how many reminders came before; `None` for a blocker without a schedule.
+pub fn wait_schedule(blocker: &str) -> (&str, Option<(chrono::DateTime<chrono::Utc>, i32)>) {
+    let reason = blocker.strip_prefix(EXTERNAL).unwrap_or(blocker);
+    let parsed = reason
+        .rsplit_once(REMIND)
+        .and_then(|(reason, rest)| Some((reason, parse_schedule(rest.strip_suffix(']')?)?)));
+    match parsed {
+        Some((reason, schedule)) => (reason, Some(schedule)),
         None => (reason, None),
     }
 }
 
-fn with_end(reason: &str, end: chrono::DateTime<chrono::Utc>) -> String {
+/// A reminder schedule as text: `RFC3339 #N`.
+pub fn schedule_text(at: chrono::DateTime<chrono::Utc>, n: i32) -> String {
     format!(
-        "{EXTERNAL}{reason}{UNTIL}{}]",
-        end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+        "{} #{n}",
+        at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     )
 }
 
-/// Make one added request wait for something outside amh, `reason`, until `end`, or clear that wait with `None`; its request-ID dependencies stay.
+pub fn parse_schedule(text: &str) -> Option<(chrono::DateTime<chrono::Utc>, i32)> {
+    let (at, n) = text.split_once(" #")?;
+    let at = chrono::DateTime::parse_from_rfc3339(at).ok()?;
+    Some((at.with_timezone(&chrono::Utc), n.parse().ok()?))
+}
+
+fn scheduled(reason: &str, at: chrono::DateTime<chrono::Utc>, n: i32) -> String {
+    format!("{EXTERNAL}{reason}{REMIND}{}]", schedule_text(at, n))
+}
+
+/// Make one added request wait for something outside amh, `reason`, starting at `now`, or clear that wait with `None`; its request-ID dependencies stay.
 // 🧑 "change amh s.t. \"blocking\" status is per-task instead of per-agent"
 pub fn wait_on(
     task: &mut Task,
@@ -504,19 +539,23 @@ pub fn wait_on(
         return Err("amh: only added requests may change dependencies".to_owned());
     }
     request.blockers.retain(|b| !b.starts_with(EXTERNAL));
-    if let Some((reason, end)) = reason {
+    if let Some((reason, now)) = reason {
         let reason = reason.trim();
-        if reason.is_empty() || reason.contains(UNTIL.trim()) {
-            return Err("amh: say what the request waits for, without `[until`".to_owned());
+        if reason.is_empty() || reason.contains(REMIND.trim()) {
+            return Err("amh: say what the request waits for, without `[remind`".to_owned());
         }
-        request.blockers.push(with_end(reason, end));
+        request
+            .blockers
+            .push(scheduled(reason, next_reminder(now, 0), 0));
     }
     write(task, &records);
     Ok(())
 }
 
-/// End outside waits that are over, give legacy waits an end `WAIT_DEFAULT_S` from `now`, and date records that lack `added_at` with `added(id)` or `now`; true when anything changed.
-pub fn expire_waits(
+/// Remind about outside waits that are due, with backoff, and date records that lack `added_at` with `added(id)` or `now`; true when anything changed.
+///
+/// A wait without a schedule (made before reminders) gets its first reminder `REMIND_FIRST_S` from `now`.
+pub fn remind_waits(
     task: &mut Task,
     now: chrono::DateTime<chrono::Utc>,
     added: impl Fn(&str) -> Option<String>,
@@ -524,45 +563,65 @@ pub fn expire_waits(
     let known = read(task)?.len();
     let mut records = sync(task)?;
     let mut changed = records.len() != known;
+    let mut due = Vec::new();
     let mut ended = Vec::new();
     for request in records.iter_mut().filter(|r| r.stage != Stage::Resolved) {
         if request.added_at.is_none() {
             request.added_at = Some(added(&request.id).unwrap_or_else(|| now.to_rfc3339()));
             changed = true;
         }
-        let mut kept = Vec::new();
-        for blocker in &request.blockers {
-            match wait_end(blocker) {
-                (_, Some(end)) if end <= now => ended.push(format!(
-                    "{}: {} (it waited on: {})",
-                    request.id,
-                    request.text,
-                    wait_end(blocker).0
-                )),
-                (reason, None) if blocker.starts_with(EXTERNAL) => kept.push(with_end(
-                    reason,
-                    now + chrono::Duration::seconds(WAIT_DEFAULT_S),
-                )),
-                _ => kept.push(blocker.clone()),
+        let before = request.blockers.len();
+        request.blockers.retain(|blocker| {
+            let passed = blocker
+                .strip_prefix(DATE)
+                .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+                .is_some_and(|at| at <= now);
+            if passed {
+                ended.push(format!("{}: {}", request.id, request.text));
             }
-        }
-        if kept != request.blockers {
-            request.blockers = kept;
+            !passed
+        });
+        changed |= request.blockers.len() != before;
+        for blocker in request
+            .blockers
+            .iter_mut()
+            .filter(|b| b.starts_with(EXTERNAL))
+        {
+            let (reason, schedule) = wait_schedule(blocker);
+            let next = match schedule {
+                None => scheduled(reason, next_reminder(now, 0), 0),
+                Some((at, n)) if at <= now => {
+                    due.push(format!(
+                        "{}: {} (waits on: {reason})",
+                        request.id, request.text
+                    ));
+                    scheduled(reason, next_reminder(now, n + 1), n + 1)
+                }
+                Some(_) => continue,
+            };
+            *blocker = next;
             changed = true;
         }
     }
     write(task, &records);
     if !ended.is_empty() {
+        let text = format!(
+            "The date these items waited for has come, so they are ready again:\n- {}",
+            ended.join("\n- ")
+        );
+        queue(task, &task.name.clone(), &text)?;
+    }
+    if !due.is_empty() {
         queue(
             task,
             &task.name.clone(),
             &format!(
-                "These waits ended, so the items are ready again:\n- {}\nFor each: finish it (`amh todo done`), wait again with an end (`amh todo wait ID --on WHAT --until 3d`), or, if it is a standing instruction, make it a rule (`amh rule from ID`).",
-                ended.join("\n- ")
+                "These items still wait:\n- {}\nIf a wait is over, clear it (`amh todo wait ID --clear-on`) and do the item; if it waits on the human, make it the human's item (`amh todo wait ID --ask-human`); if the item is finished or no longer wanted, resolve it (`amh todo done`). A standing rule is no item: write it into the suitable instructions and resolve the item. Otherwise nothing is needed; the next reminder comes later.",
+                due.join("\n- ")
             ),
         )?;
     }
-    Ok(changed || !ended.is_empty())
+    Ok(changed)
 }
 
 /// Ready open requests older than `OLD_S`, oldest first, with their age in days; and the number of open items.
@@ -821,7 +880,7 @@ mod tests {
         let waiting = sync(&mut owner)?[0].id.clone();
         let blocker = sync(&mut dependency)?[0].id.clone();
         crate::tasks::add_item(&mut owner, "independent work", false)?;
-        let end = chrono::Utc::now() + chrono::Duration::days(3);
+        let end = chrono::Utc::now();
         wait_on(
             &mut owner,
             &waiting,
@@ -845,43 +904,46 @@ mod tests {
     }
 
     #[test]
-    fn outside_waits_end_and_legacy_ones_get_an_end() -> Result<(), String> {
+    fn outside_waits_are_reminded_with_backoff() -> Result<(), String> {
         let mut owner = task("owner.md", false);
         let id = sync(&mut owner)?[0].id.clone();
-        let now = chrono::Utc::now();
-        wait_on(
-            &mut owner,
-            &id,
-            Some(("someone", now + chrono::Duration::hours(1))),
-        )?;
-        assert!(!expire_waits(&mut owner, now, |_| None)? || read(&owner)?[0].added_at.is_some());
+        let now =
+            chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp(), 0).ok_or("clock")?;
+        let hours = |h: f64| chrono::Duration::seconds((h * 3600.0) as i64);
+        wait_on(&mut owner, &id, Some(("someone", now)))?;
+        remind_waits(&mut owner, now, |_| None)?;
+        assert!(read(&owner)?[0].added_at.is_some());
+        assert!(notifications(&owner)?.is_empty());
+        // Due after 1 h, then 1.5 h after that, then 2.25 h.
+        for (n, after_h) in [(1, 1.0), (2, 2.5), (3, 4.75)] {
+            assert!(remind_waits(&mut owner, now + hours(after_h), |_| None)?);
+            assert_eq!(notifications(&owner)?.len(), n);
+            assert!(!remind_waits(
+                &mut owner,
+                now + hours(after_h + 0.1),
+                |_| None
+            )?);
+        }
         assert!(ready_items(&owner).is_empty());
-        assert!(expire_waits(
-            &mut owner,
-            now + chrono::Duration::hours(2),
-            |_| None
-        )?);
-        assert_eq!(ready_items(&owner).len(), 1);
         assert!(
             notifications(&owner)?[0]["text"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("waited on: someone")
+                .contains("waits on: someone")
         );
-        // A legacy wait without an end gets one, `WAIT_DEFAULT_S` from now.
+        // A wait made before reminders gets its first one `REMIND_FIRST_S` from now.
         let mut records = read(&owner)?;
         records[0].blockers = vec![format!("{EXTERNAL}human")];
         write(&mut owner, &records);
-        assert!(expire_waits(&mut owner, now, |_| None)?);
+        assert!(remind_waits(&mut owner, now, |_| None)?);
         let blocker = read(&owner)?[0].blockers[0].clone();
-        let (reason, end) = wait_end(&blocker);
-        assert_eq!(reason, "human");
         assert_eq!(
-            end.map(|end| end.timestamp()),
-            Some(now.timestamp() + WAIT_DEFAULT_S)
+            wait_schedule(&blocker),
+            (
+                "human",
+                Some((next_reminder(now, 0).with_timezone(&chrono::Utc), 0))
+            )
         );
-        assert_eq!(duration_s("3d")?, 3 * 86400);
-        assert!(duration_s("3").is_err() && duration_s("0h").is_err() && duration_s("3д").is_err());
         Ok(())
     }
 
