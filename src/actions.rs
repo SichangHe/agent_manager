@@ -53,6 +53,52 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+/// End outside waits and whole-task blocks that are over, and date undated requests; the watcher calls this every few minutes under the store lock.
+// 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
+pub fn maintain(store: &Store) -> Result<(), String> {
+    let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+    let now = chrono::Utc::now();
+    for mut task in store.active()? {
+        let added = |id: &str| {
+            database
+                .first_event_time("request added", id)
+                .ok()
+                .flatten()
+        };
+        let mut changed = requests::expire_waits(&mut task, now, added)?;
+        if task.status() == "blocked" {
+            let end = task
+                .field(tasks::BLOCKED_UNTIL)
+                .and_then(|end| chrono::DateTime::parse_from_rfc3339(end).ok());
+            match end {
+                None => {
+                    let end = now + chrono::Duration::seconds(requests::WAIT_DEFAULT_S);
+                    task.fields.retain(|(key, _)| key != tasks::BLOCKED_UNTIL);
+                    task.fields
+                        .push((tasks::BLOCKED_UNTIL.to_owned(), end.to_rfc3339()));
+                    changed = true;
+                }
+                Some(end) if end <= now => {
+                    let on = task.field("blocked_on").unwrap_or_default().to_owned();
+                    tasks::set_status(&mut task, "running", None)?;
+                    let name = task.name.clone();
+                    let text = format!(
+                        "Your task's block ended (it waited on: {on}), so it runs again and its ready items are reminded. If it still waits, set it again with an end: `amh task status {name} blocked --on WHAT --until 3d`."
+                    );
+                    requests::queue(&mut task, &name, &text)?;
+                    changed = true;
+                }
+                Some(_) => {}
+            }
+        }
+        if changed {
+            store.save(&task)?;
+            store.place(&task)?;
+        }
+    }
+    Ok(())
+}
+
 /// Send the queued request notifications; only the watcher calls this, so each message has one sender.
 ///
 /// The network send runs without the amh lock; the lock is taken only to record each delivery.
@@ -841,7 +887,38 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if task.render() != before {
                 store.save(&task)?;
             }
-            listed
+            listed + &tasks::rules_text(&task)
+        }
+        ("rule", "add") => {
+            let _lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let mut said = String::new();
+            for rule in many("rule") {
+                if !tasks::add_rule(&mut task, rule, flag("from_human"))? {
+                    said += &format!("already a rule: {rule}\n");
+                }
+            }
+            store.save(&task)?;
+            said
+        }
+        ("rule", "from") => {
+            let _lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let mut said = String::new();
+            for item in many("item") {
+                said += &format!("now a rule: {}\n", requests::to_rule(&mut task, item)?);
+            }
+            store.save(&task)?;
+            request_effects(&store)?;
+            said
+        }
+        ("rule", "list") => tasks::rules_text(&store.own(text("task_file"))?),
+        ("rule", "drop") => {
+            let _lock = store.lock()?;
+            let mut task = store.own(text("task_file"))?;
+            let dropped = tasks::drop_rule(&mut task, need("rule"))?;
+            store.save(&task)?;
+            format!("dropped: {dropped}\n")
         }
         ("todo", "add") | ("task", "give") => {
             let lock = store.lock()?;
@@ -966,7 +1043,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 requests::wait(&mut task, need("id"), &blockers, &store.all()?)?;
             }
             if text("on").is_some() || flag("clear_on") {
-                requests::wait_on(&mut task, need("id"), text("on"))?;
+                let wait_s = match text("until") {
+                    Some(until) => requests::duration_s(until)?,
+                    None => requests::WAIT_DEFAULT_S,
+                };
+                let end = chrono::Utc::now() + chrono::Duration::seconds(wait_s);
+                requests::wait_on(&mut task, need("id"), text("on").map(|on| (on, end)))?;
             }
             store.save(&task)?;
             String::new()
@@ -1079,6 +1161,15 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let _lock = store.lock()?;
             let mut task = store.load(need("task"))?;
             tasks::set_status(&mut task, need("status"), text("on"))?;
+            if need("status") == "blocked" {
+                let wait_s = match text("until") {
+                    Some(until) => requests::duration_s(until)?,
+                    None => requests::WAIT_DEFAULT_S,
+                };
+                let end = chrono::Utc::now() + chrono::Duration::seconds(wait_s);
+                task.fields
+                    .push((tasks::BLOCKED_UNTIL.to_owned(), end.to_rfc3339()));
+            }
             store.save(&task)?;
             store.place(&task)?;
             String::new()

@@ -280,8 +280,16 @@ fn draw<'a>(
     } else {
         "worker"
     };
+    let (open, old) = crate::requests::stale(task, chrono::Utc::now());
+    let flag = match (open > crate::requests::LONG_LIST, old.len()) {
+        (false, 0) => String::new(),
+        (_, n) => format!(
+            " ({open} open, {n} ready over {} d)",
+            crate::requests::OLD_S / 86400
+        ),
+    };
     lines.push(format!(
-        "{indent}{} [{role}, {}] {}",
+        "{indent}{} [{role}, {}] {}{flag}",
         task.name,
         task.status(),
         task.address()

@@ -294,6 +294,17 @@ impl Database {
         Ok(ids)
     }
 
+    /// When `subject` first had an event of `kind`, if the log still holds one.
+    pub fn first_event_time(&self, kind: &str, subject: &str) -> Result<Option<String>, String> {
+        self.0
+            .query_row(
+                "SELECT MIN(time) FROM events WHERE kind = ?1 AND subject = ?2",
+                [kind, subject],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
     pub fn latest_event_id(&self) -> Result<i64, String> {
         self.0
             .query_row(

@@ -98,11 +98,82 @@ pub fn add_item(task: &mut Task, item: &str, from_human: bool) -> Result<Option<
         ));
     }
     let marked = taskfile::mark(item, from_human)?;
-    if task.items.contains(&marked) {
-        return Ok(None);
+    // The study: near-duplicates like `🧑 Minimize diffs` and `🧑 “Minimize diffs”` sat open side by side.
+    let plain = |text: &str| -> String {
+        text.strip_prefix(HUMAN_MARK)
+            .unwrap_or(text)
+            .chars()
+            .filter(|c| !matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '`'))
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    if let Some(open) = task.items.iter().find(|open| plain(open) == plain(&marked)) {
+        return Err(format!("amh: already open as `{open}`; nothing was added"));
     }
     task.items.push(marked.clone());
     Ok(Some(marked))
+}
+
+/// Where a task keeps its standing rules: instructions with no end, never open items.
+const RULES: &str = "standing_rules";
+
+/// The task's standing rules, oldest first.
+pub fn rules(task: &Task) -> Vec<String> {
+    task.field(RULES)
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default()
+}
+
+fn set_rules(task: &mut Task, rules: &[String]) {
+    task.fields.retain(|(key, _)| key != RULES);
+    if !rules.is_empty() {
+        task.fields
+            .push((RULES.to_owned(), serde_json::json!(rules).to_string()));
+    }
+}
+
+/// Add a standing rule, marked as the human's when `from_human`; false when it is already there.
+// 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
+pub fn add_rule(task: &mut Task, rule: &str, from_human: bool) -> Result<bool, String> {
+    let marked = taskfile::mark(rule, from_human)?;
+    let mut rules = rules(task);
+    if rules.contains(&marked) {
+        return Ok(false);
+    }
+    rules.push(marked);
+    set_rules(task, &rules);
+    Ok(true)
+}
+
+/// Drop a standing rule given by its text, with or without the human mark.
+pub fn drop_rule(task: &mut Task, given: &str) -> Result<String, String> {
+    let bare = |rule: &str| {
+        rule.strip_prefix(HUMAN_MARK)
+            .unwrap_or(rule)
+            .trim()
+            .to_owned()
+    };
+    let mut rules = rules(task);
+    let at = rules
+        .iter()
+        .position(|rule| bare(rule) == bare(given))
+        .ok_or("amh: no such rule; copy its text from `amh rule list`")?;
+    let dropped = rules.remove(at);
+    set_rules(task, &rules);
+    Ok(dropped)
+}
+
+/// The rules as the agent reads them at start and in `amh todo list`; empty without rules.
+pub fn rules_text(task: &Task) -> String {
+    match rules(task).as_slice() {
+        [] => String::new(),
+        rules => format!(
+            "Standing rules (always follow; they are never open items):\n- {}\n",
+            rules.join("\n- ")
+        ),
+    }
 }
 
 /// The record left in a task file when an open item is removed: the item itself, then how it is known to be finished when that was said.
@@ -231,7 +302,10 @@ pub fn pin(task: &mut Task, section: &str) -> Result<(), String> {
     })
 }
 
-/// Set the status and what a blocked task waits for; a status change unpins the task's row.
+/// When a whole-task `blocked` ends (RFC 3339); the watcher then sets the task running again.
+pub const BLOCKED_UNTIL: &str = "blocked_until";
+
+/// Set the status and what a blocked task waits for; a status change unpins the task's row and drops the block's end.
 pub fn set_status(task: &mut Task, status: &str, blocked_on: Option<&str>) -> Result<(), String> {
     let waits = blocked_on.is_some_and(|on| !on.is_empty());
     if (status == "blocked") != waits && status != "long_running" {
@@ -241,7 +315,7 @@ pub fn set_status(task: &mut Task, status: &str, blocked_on: Option<&str>) -> Re
         );
     }
     task.fields
-        .retain(|(key, _)| key != "blocked_on" && key != PIN);
+        .retain(|(key, _)| key != "blocked_on" && key != BLOCKED_UNTIL && key != PIN);
     match task.fields.iter_mut().find(|(key, _)| key == "status") {
         Some(field) => field.1 = status.to_owned(),
         None => task.fields.push(("status".to_owned(), status.to_owned())),
@@ -401,7 +475,7 @@ mod tests {
         let mut work = worker();
         let added = add_item(&mut work, "write   the\n code", false);
         assert_eq!(added, Ok(Some("write the code".to_owned())));
-        assert_eq!(add_item(&mut work, "write the code", false), Ok(None));
+        assert!(add_item(&mut work, "write “the” code", false).is_err());
         let theirs = add_item(&mut work, "🧑 ship it", true).unwrap();
         assert_eq!(theirs.as_deref(), Some("🧑 ship it"));
         assert_eq!(work.items, ["write the code", "🧑 ship it"]);

@@ -18,6 +18,8 @@ use crate::store::Store;
 use crate::tasks::Task;
 use crate::{guest, omnigent, settings};
 
+/// How often outside waits and whole-task blocks are checked for their end.
+const MAINTAIN_EVERY: Duration = Duration::from_secs(300);
 // 🧑 "Why so slow ... Improve it"
 const MAIL_POLL: Duration = Duration::from_secs(5);
 const RECONNECT: Duration = Duration::from_secs(30);
@@ -1458,6 +1460,7 @@ pub fn run() -> u8 {
     let mut jobs = crate::jobs::Jobs::default();
     let mut last_flush: Option<Instant> = None;
     let mut last_compress: Option<Instant> = None;
+    let mut last_maintain: Option<Instant> = None;
     let mut last_archive: Option<Instant> = None;
     let mut last_zulip_cleanup: Option<Instant> = None;
     let mut last_commit: Option<Instant> = None;
@@ -1581,6 +1584,17 @@ pub fn run() -> u8 {
             log(&format!("request effects failed: {error}"));
         }
         log_elapsed("request state updates", phase);
+        if last_maintain.is_none_or(|at| at.elapsed() >= MAINTAIN_EVERY) {
+            let phase = Instant::now();
+            last_maintain = Some(Instant::now());
+            if let Err(error) = store
+                .lock()
+                .and_then(|_lock| crate::actions::maintain(&store))
+            {
+                log(&format!("wait expiry failed: {error}"));
+            }
+            log_elapsed("wait expiry", phase);
+        }
         let phase = Instant::now();
         let scanned = watcher.deliver_pending(&settings, &store);
         log_elapsed("message delivery", phase);

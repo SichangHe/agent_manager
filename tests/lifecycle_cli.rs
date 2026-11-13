@@ -554,3 +554,109 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
     assert!(events.contains("omnigent://h"));
     Ok(())
 }
+
+#[test]
+fn rules_expiring_waits_and_duplicate_adds() -> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-rules-{}-{now}", std::process::id())));
+    fs::create_dir_all(workspace.0.join("state"))?;
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\na.md omnigent://a\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("a.md"),
+        "---\nstatus: running\nrunat: omnigent://a\nmanagerat: omnigent://manager\nis_manager: false\npending_task_items:\n  - 🧑 Minimize diffs\n  - 🧑 Never file issues upstream\n---\n",
+    )?;
+    let duplicate = workspace.run(&[
+        "todo",
+        "add",
+        "“Minimize diffs”",
+        "--from-human",
+        "--task-file",
+        "a",
+    ])?;
+    assert!(!duplicate.status.success());
+    assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already open"));
+    let listed = workspace.ok(&["todo", "list", "--task-file", "a"])?;
+    let rule_id = listed
+        .lines()
+        .find(|line| line.contains("Never file"))
+        .and_then(|line| line.split_whitespace().next())
+        .ok_or("no rule item")?
+        .to_owned();
+    workspace.ok(&["rule", "from", &rule_id, "--task-file", "a"])?;
+    workspace.ok(&["rule", "add", "Keep things private", "--task-file", "a"])?;
+    let listed = workspace.ok(&["todo", "list", "--task-file", "a"])?;
+    assert!(listed.contains("Standing rules"));
+    assert!(listed.contains("- 🧑 Never file issues upstream\n- Keep things private"));
+    assert!(!listed.contains("[added] 🧑 Never file"));
+    let wait_id = listed
+        .lines()
+        .find(|line| line.contains("Minimize"))
+        .and_then(|line| line.split_whitespace().next())
+        .ok_or("no item")?
+        .to_owned();
+    workspace.ok(&[
+        "todo",
+        "wait",
+        &wait_id,
+        "--on",
+        "human review",
+        "--until",
+        "2d",
+        "--task-file",
+        "a",
+    ])?;
+    assert!(
+        workspace
+            .ok(&["todo", "list", "--task-file", "a"])?
+            .contains("on: human review [until ")
+    );
+    assert!(
+        !workspace
+            .run(&[
+                "todo",
+                "wait",
+                &wait_id,
+                "--on",
+                "x",
+                "--until",
+                "2",
+                "--task-file",
+                "a"
+            ])?
+            .status
+            .success()
+    );
+    workspace.ok(&[
+        "task",
+        "status",
+        "a",
+        "blocked",
+        "--on",
+        "human review",
+        "--until",
+        "1h",
+    ])?;
+    assert!(fs::read_to_string(root.join("a.md"))?.contains("blocked_until"));
+    workspace.ok(&["rule", "drop", "Keep things private", "--task-file", "a"])?;
+    assert!(
+        !workspace
+            .ok(&["rule", "list", "--task-file", "a"])?
+            .contains("private")
+    );
+    Ok(())
+}

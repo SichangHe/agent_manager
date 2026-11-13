@@ -201,6 +201,7 @@ mod tests {
             blockers,
             evidence: String::new(),
             resolved_at,
+            added_at: None,
         };
         let old = Some((now - Duration::days(31)).to_rfc3339());
         requests::write(

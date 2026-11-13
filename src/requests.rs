@@ -34,6 +34,8 @@ pub struct Request {
     pub blockers: Vec<String>,
     pub evidence: String,
     pub resolved_at: Option<String>,
+    /// When it was added (RFC 3339); legacy records get it from the event log or the first maintenance pass.
+    pub added_at: Option<String>,
 }
 
 /// Open items that can progress; legacy items without request records remain ready.
@@ -97,13 +99,14 @@ pub fn read(task: &Task) -> Result<Vec<Request>, String> {
                 blockers,
                 evidence: text("evidence")?,
                 resolved_at: record["resolved_at"].as_str().map(str::to_owned),
+                added_at: record["added_at"].as_str().map(str::to_owned),
             })
         })
         .collect()
 }
 
 pub fn write(task: &mut Task, requests: &[Request]) {
-    let records: Vec<Value> = requests.iter().map(|r| json!({"id": r.id, "text": r.text, "creator": r.creator, "source": r.source, "stage": r.stage.text(), "blockers": r.blockers, "evidence": r.evidence, "resolved_at":r.resolved_at})).collect();
+    let records: Vec<Value> = requests.iter().map(|r| json!({"id": r.id, "text": r.text, "creator": r.creator, "source": r.source, "stage": r.stage.text(), "blockers": r.blockers, "evidence": r.evidence, "resolved_at":r.resolved_at, "added_at": r.added_at})).collect();
     task.fields.retain(|(key, _)| key != KEY);
     task.fields
         .push((KEY.to_owned(), json!(records).to_string()));
@@ -149,6 +152,7 @@ pub fn sync(task: &mut Task) -> Result<Vec<Request>, String> {
             blockers: Vec::new(),
             evidence: String::new(),
             resolved_at: None,
+            added_at: Some(chrono::Utc::now().to_rfc3339()),
         });
     }
     write(task, &records);
@@ -196,6 +200,27 @@ pub fn finish(task: &mut Task, given: &str, evidence: &str) -> Result<Request, S
     }
     write(task, &records);
     Ok(result)
+}
+
+/// Turn the added request `given` (ID or text) into a standing rule: the request resolves quietly and the rule keeps its text; returns the text.
+pub fn to_rule(task: &mut Task, given: &str) -> Result<String, String> {
+    let mut records = sync(task)?;
+    let bare = |s: &str| s.strip_prefix(HUMAN_MARK).unwrap_or(s).trim().to_owned();
+    let request = records
+        .iter_mut()
+        .find(|r| r.stage == Stage::Added && (r.id == given || bare(&r.text) == bare(given)))
+        .ok_or("amh: no such open request; copy its ID or text from `amh todo list`")?;
+    let evidence = "made a standing rule";
+    request.stage = Stage::Resolved;
+    request.evidence = evidence.to_owned();
+    request.blockers.clear();
+    request.resolved_at = Some(chrono::Utc::now().to_rfc3339());
+    let text = request.text.clone();
+    crate::tasks::remove_item(task, &text, evidence)?;
+    write(task, &records);
+    let from_human = text.starts_with(HUMAN_MARK);
+    crate::tasks::add_rule(task, &bare(&text), from_human)?;
+    Ok(text)
 }
 
 pub fn decide(
@@ -412,9 +437,65 @@ pub fn set_notifications(task: &mut Task, queued: Vec<Value>) {
 /// How an external reason is stored among a request's blockers; it never matches a request ID, so only its owner clears it.
 pub const EXTERNAL: &str = "on: ";
 
-/// Make one added request wait for something outside amh, `reason`, or clear that wait with `None`; its request-ID dependencies stay.
+/// How the end of an outside wait is written after its reason.
+const UNTIL: &str = " [until ";
+
+/// The default length of an outside wait or a whole-task block.
+// 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
+pub const WAIT_DEFAULT_S: i64 = 3 * 86400;
+
+/// A duration like `3d`, `12h` or `90m`, in seconds.
+pub fn duration_s(text: &str) -> Result<i64, String> {
+    let text = text.trim();
+    let (number, unit) = text.split_at(text.len().saturating_sub(1));
+    let n: i64 = number
+        .parse()
+        .map_err(|_| format!("amh: say a duration like 3d, 12h or 90m, not `{text}`"))?;
+    let unit_s = match unit {
+        "d" => 86400,
+        "h" => 3600,
+        "m" => 60,
+        _ => {
+            return Err(format!(
+                "amh: say a duration like 3d, 12h or 90m, not `{text}`"
+            ));
+        }
+    };
+    match n > 0 {
+        true => Ok(n * unit_s),
+        false => Err("amh: a wait must last a positive time".to_owned()),
+    }
+}
+
+/// An outside wait's reason and its end, if it has one.
+pub fn wait_end(blocker: &str) -> (&str, Option<chrono::DateTime<chrono::FixedOffset>>) {
+    let Some(reason) = blocker.strip_prefix(EXTERNAL) else {
+        return (blocker, None);
+    };
+    match reason.rsplit_once(UNTIL) {
+        Some((reason, end)) => (
+            reason,
+            end.strip_suffix(']')
+                .and_then(|end| chrono::DateTime::parse_from_rfc3339(end).ok()),
+        ),
+        None => (reason, None),
+    }
+}
+
+fn with_end(reason: &str, end: chrono::DateTime<chrono::Utc>) -> String {
+    format!(
+        "{EXTERNAL}{reason}{UNTIL}{}]",
+        end.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    )
+}
+
+/// Make one added request wait for something outside amh, `reason`, until `end`, or clear that wait with `None`; its request-ID dependencies stay.
 // 🧑 "change amh s.t. \"blocking\" status is per-task instead of per-agent"
-pub fn wait_on(task: &mut Task, id: &str, reason: Option<&str>) -> Result<(), String> {
+pub fn wait_on(
+    task: &mut Task,
+    id: &str,
+    reason: Option<(&str, chrono::DateTime<chrono::Utc>)>,
+) -> Result<(), String> {
     let mut records = sync(task)?;
     let request = records
         .iter_mut()
@@ -424,16 +505,90 @@ pub fn wait_on(task: &mut Task, id: &str, reason: Option<&str>) -> Result<(), St
         return Err("amh: only added requests may change dependencies".to_owned());
     }
     request.blockers.retain(|b| !b.starts_with(EXTERNAL));
-    if let Some(reason) = reason {
+    if let Some((reason, end)) = reason {
         let reason = reason.trim();
         if reason.is_empty() {
             return Err("amh: say what the request waits for".to_owned());
         }
-        request.blockers.push(format!("{EXTERNAL}{reason}"));
+        request.blockers.push(with_end(reason, end));
     }
     write(task, &records);
     Ok(())
 }
+
+/// End outside waits that are over, give legacy waits an end `WAIT_DEFAULT_S` from `now`, and date records that lack `added_at` with `added(id)` or `now`; true when anything changed.
+pub fn expire_waits(
+    task: &mut Task,
+    now: chrono::DateTime<chrono::Utc>,
+    added: impl Fn(&str) -> Option<String>,
+) -> Result<bool, String> {
+    let mut records = sync(task)?;
+    let mut changed = false;
+    let mut ended = Vec::new();
+    for request in records.iter_mut().filter(|r| r.stage != Stage::Resolved) {
+        if request.added_at.is_none() {
+            request.added_at = Some(added(&request.id).unwrap_or_else(|| now.to_rfc3339()));
+            changed = true;
+        }
+        let mut kept = Vec::new();
+        for blocker in &request.blockers {
+            match wait_end(blocker) {
+                (_, Some(end)) if end <= now => ended.push(format!(
+                    "{}: {} (it waited on: {})",
+                    request.id,
+                    request.text,
+                    wait_end(blocker).0
+                )),
+                (reason, None) if blocker.starts_with(EXTERNAL) => kept.push(with_end(
+                    reason,
+                    now + chrono::Duration::seconds(WAIT_DEFAULT_S),
+                )),
+                _ => kept.push(blocker.clone()),
+            }
+        }
+        if kept != request.blockers {
+            request.blockers = kept;
+            changed = true;
+        }
+    }
+    write(task, &records);
+    if !ended.is_empty() {
+        queue(
+            task,
+            &task.name.clone(),
+            &format!(
+                "These waits ended, so the items are ready again:\n- {}\nFor each: finish it (`amh todo done`), wait again with an end (`amh todo wait ID --on WHAT --until 3d`), or, if it is a standing instruction, make it a rule (`amh rule from ID`).",
+                ended.join("\n- ")
+            ),
+        )?;
+    }
+    Ok(changed || !ended.is_empty())
+}
+
+/// Ready open requests older than `OLD_S`, oldest first, with their age in days; and the number of open items.
+pub fn stale(
+    task: &Task,
+    now: chrono::DateTime<chrono::Utc>,
+) -> (usize, Vec<(String, String, i64)>) {
+    let ready = ready_items(task);
+    let mut old: Vec<(String, String, i64)> = read(task)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.stage == Stage::Added && ready.contains(&r.text.as_str()))
+        .filter_map(|r| {
+            let added = chrono::DateTime::parse_from_rfc3339(r.added_at.as_deref()?).ok()?;
+            let age_s = (now - added.with_timezone(&chrono::Utc)).num_seconds();
+            (age_s >= OLD_S).then_some((r.id, r.text, age_s / 86400))
+        })
+        .collect();
+    old.sort_by_key(|(_, _, days)| std::cmp::Reverse(*days));
+    (task.items.len(), old)
+}
+
+/// An open item this old is flagged and reminded about with the choice to finish, wait with an end, or make it a rule.
+pub const OLD_S: i64 = 7 * 86400;
+/// A list with more open items than this is flagged.
+pub const LONG_LIST: usize = 15;
 
 pub fn unblock(task: &mut Task, resolved: &[String]) -> Result<bool, String> {
     let mut records = sync(task)?;
@@ -666,10 +821,11 @@ mod tests {
         let waiting = sync(&mut owner)?[0].id.clone();
         let blocker = sync(&mut dependency)?[0].id.clone();
         crate::tasks::add_item(&mut owner, "independent work", false)?;
+        let end = chrono::Utc::now() + chrono::Duration::days(3);
         wait_on(
             &mut owner,
             &waiting,
-            Some("human_mgr calling amh mail done"),
+            Some(("human_mgr calling amh mail done", end)),
         )?;
         let item = owner.items[0].clone();
         assert_eq!(ready_items(&owner), ["independent work"]);
@@ -680,11 +836,52 @@ mod tests {
         // A resolved request ID never releases an external wait.
         assert!(unblock(&mut owner, std::slice::from_ref(&blocker))?);
         assert!(!ready_items(&owner).contains(&item.as_str()));
-        assert!(wait_on(&mut owner, &waiting, Some("  ")).is_err());
+        assert!(wait_on(&mut owner, &waiting, Some(("  ", end))).is_err());
         wait_on(&mut owner, &waiting, None)?;
         assert!(ready_items(&owner).contains(&item.as_str()));
         let owner = Task::parse(&owner.name, &owner.render())?;
         assert_eq!(ready_items(&owner).len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn outside_waits_end_and_legacy_ones_get_an_end() -> Result<(), String> {
+        let mut owner = task("owner.md", false);
+        let id = sync(&mut owner)?[0].id.clone();
+        let now = chrono::Utc::now();
+        wait_on(
+            &mut owner,
+            &id,
+            Some(("someone", now + chrono::Duration::hours(1))),
+        )?;
+        assert!(!expire_waits(&mut owner, now, |_| None)? || read(&owner)?[0].added_at.is_some());
+        assert!(ready_items(&owner).is_empty());
+        assert!(expire_waits(
+            &mut owner,
+            now + chrono::Duration::hours(2),
+            |_| None
+        )?);
+        assert_eq!(ready_items(&owner).len(), 1);
+        assert!(
+            notifications(&owner)?[0]["text"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("waited on: someone")
+        );
+        // A legacy wait without an end gets one, `WAIT_DEFAULT_S` from now.
+        let mut records = read(&owner)?;
+        records[0].blockers = vec![format!("{EXTERNAL}human")];
+        write(&mut owner, &records);
+        assert!(expire_waits(&mut owner, now, |_| None)?);
+        let blocker = read(&owner)?[0].blockers[0].clone();
+        let (reason, end) = wait_end(&blocker);
+        assert_eq!(reason, "human");
+        assert_eq!(
+            end.map(|end| end.timestamp()),
+            Some(now.timestamp() + WAIT_DEFAULT_S)
+        );
+        assert_eq!(duration_s("3d")?, 3 * 86400);
+        assert!(duration_s("3").is_err() && duration_s("0h").is_err());
         Ok(())
     }
 

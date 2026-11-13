@@ -80,3 +80,20 @@ validation
 - pure tests cover creator decisions, final dependency release and stable transfers
 - isolated real CLI test covers legacy adoption, dependency cycle rejection, transfer, close refusal and human quiet resolution
     - no connectors, synthetic servers or email mocks
+
+keeping lists short
+- 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
+    - study: 185 items hid behind free-text `--on` waits, 208 behind whole-task `blocked`, ≥21 were standing rules
+- outside waits end: `amh todo wait ID --on WHAT --until DURATION` (default 3d), stored as `on: WHAT [until RFC3339]`
+    - whole-task `blocked` ends too: field `blocked_until`, set by `amh task status ... --until` (default 3d)
+    - watcher `actions::maintain` every 5 min, under the lock: ended waits drop and the task is told; an ended block sets the task `running`
+    - legacy waits and blocks without an end get one 3 d after the first pass
+- records carry `added_at`; legacy ones take their first `request added` event, else the first pass's time
+- standing rules: frontmatter `standing_rules`, JSON list; `amh rule add|from|list|drop`
+    - shown in the first prompt and `amh todo list`; never reminded, counted open, or blocking close
+    - `amh rule from ID` resolves the request quietly (evidence `made a standing rule`) and keeps its text
+    - ACCEPT sends standing instructions to `amh rule add`
+- flags: over 15 open items or ready items over 7 d old
+    - idle reminder adds the counts and the 3 oldest with the choice: done, wait with an end, or make a rule
+    - `amh ls` rows show `(N open, M ready over 7 d)`
+- adding an item that matches an open one, ignoring the human mark, quotes and spacing, is refused

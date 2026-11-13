@@ -15,7 +15,7 @@ pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
 // 🧑 "I think amh should say to add TODO and attach, if any, additional ack" ... "let agents answer quick questions directly immediately instead of adding to TODO"
-pub const ACCEPT: &str = "from the human; at once, add each request as an open item in the human's words, in ONE call: `amh tell human --add 'ITEM'` per item, with any acknowledgement as the message text. Answer a quick question directly instead";
+pub const ACCEPT: &str = "from the human; at once, add each request as an open item in the human's words, in ONE call: `amh tell human --add 'ITEM'` per item, with any acknowledgement as the message text. Answer a quick question directly instead. A standing instruction with no end goes to `amh rule add 'RULE'`, not an item";
 pub const ADD_REMINDER: &str =
     "\nAdd every still-open request to your open items; answer a quick question directly instead.";
 
@@ -690,16 +690,33 @@ pub enum Nudge {
 
 /// The reminder for an idle agent: its first `REMIND_LISTED` ready items and how many more there are.
 // 🧑 "Normal human messages should arrive without things around them"; the parent: "drop ... the long open-item reminder lists (80+ items)"
-fn remind_text(ready: &[&str]) -> String {
+fn remind_text(ready: &[&str], open: usize, old: &[(String, String, i64)]) -> String {
     let listed = &ready[..ready.len().min(REMIND_LISTED)];
     let more = match ready.len() - listed.len() {
         0 => String::new(),
         n => format!("\n- and {n} more"),
     };
-    format!(
+    let mut text = format!(
         "Continue your ready items:\n- {}{more}\nSee all, with request IDs and dependencies, with `amh todo list`. This reminder is automatic: send nobody a message because of it.",
         listed.join("\n- ")
-    )
+    );
+    // 🧑 "I previously noticed a widespread problem of agents keeping lots of TODOs around. Let the relevant agent study this and how to prevent this"
+    if open > crate::requests::LONG_LIST || !old.is_empty() {
+        let oldest: Vec<String> = old
+            .iter()
+            .take(REMIND_LISTED)
+            .map(|(id, item, days)| format!("{id} ({days} d): {item}"))
+            .collect();
+        text += &format!(
+            "\nYou have {open} open items, {} of them ready for over {} days. For each, oldest first: finish it (`amh todo done`), wait with an end (`amh todo wait ID --on WHAT --until 3d`), or, if it is a standing instruction, make it a rule (`amh rule from ID`).",
+            old.len(),
+            crate::requests::OLD_S / 86400
+        );
+        if !oldest.is_empty() {
+            text += &format!("\n- {}", oldest.join("\n- "));
+        }
+    }
+    text
 }
 
 const REMIND_LISTED: usize = 3;
@@ -741,7 +758,10 @@ pub fn nudges(
                 nudges.push(Nudge::Remind {
                     task: task.name.clone(),
                     address: task.address().to_owned(),
-                    text: remind_text(&ready),
+                    text: {
+                        let (open, old) = crate::requests::stale(task, chrono::Utc::now());
+                        remind_text(&ready, open, &old)
+                    },
                 });
             }
             continue;
@@ -1505,12 +1525,15 @@ mod tests {
     fn an_idle_reminder_lists_few_ready_items() {
         let ready: Vec<String> = (1..=80).map(|n| format!("item {n}")).collect();
         let ready: Vec<&str> = ready.iter().map(String::as_str).collect();
-        let text = remind_text(&ready);
+        let text = remind_text(&ready, ready.len(), &[]);
         assert!(text.starts_with(
             "Continue your ready items:\n- item 1\n- item 2\n- item 3\n- and 77 more\n"
         ));
         assert!(!text.contains("item 4"));
-        assert!(!remind_text(&["a", "b"]).contains("more"));
+        assert!(!remind_text(&["a", "b"], 2, &[]).contains("more"));
+        let old = [("t.md#1".to_owned(), "x".to_owned(), 9)];
+        assert!(remind_text(&["x"], 1, &old).contains("- t.md#1 (9 d): x"));
+        assert!(remind_text(&["x"], 16, &[]).contains("You have 16 open items, 0 of them"));
     }
 
     #[test]
