@@ -760,9 +760,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
             // --subject stays accepted for old callers; only a report label that names a report stream (PB news) is kept.
             let given = text("subject").unwrap_or_default();
             let report_stream = format!("zulip.report_streams.{}", mail::bare(given).trim());
-            let subject = match settings::get(&settings, &report_stream).is_empty() {
-                true => "",
-                false => given,
+            let subject = match (
+                text("report_label"),
+                settings::get(&settings, &report_stream).is_empty(),
+            ) {
+                (Some(label), _) => label,
+                (None, true) => "",
+                (None, false) => given,
             };
             let (receipt, reminder) = tell_human(
                 if flag("email") { &by_email } else { &settings },

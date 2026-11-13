@@ -197,8 +197,13 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
                 .map(|at| at.to_string())
                 .collect();
             let kept = match left.is_empty() {
+                true if !path.exists() => Ok(()),
                 true => fs::remove_file(&path),
-                false => fs::write(&path, format!("human {}\n", left.join(" "))),
+                false => {
+                    let temp = path.with_file_name(format!(".{id}.settle"));
+                    fs::write(&temp, format!("human {}\n", left.join(" ")))
+                        .and_then(|()| fs::rename(&temp, &path))
+                }
             };
             if let Err(error) = kept {
                 log.push(format!("cannot update {}: {error}", path.display()));

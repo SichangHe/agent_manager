@@ -3,7 +3,9 @@
 
 message input
 - `amh tell manager`, `human`, and `agent` accept `TEXT`, `--file FILE`, or standard input
-- human email requires `--subject SUBJECT`
+- human messages need no subject: the thread is the task tag; `--subject` is accepted and ignored
+    - 🧑 "Zulip does not need a title, it just needs a thread"
+    - kept only as a report label naming a `zulip.report_streams` entry (PB news); `--report-label` sets it
 - `--task-file TASK` works before or after subcommands
 - manager messages retain the 600 character limit
 
