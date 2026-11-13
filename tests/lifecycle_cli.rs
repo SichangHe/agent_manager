@@ -588,8 +588,14 @@ fn rules_expiring_waits_and_duplicate_adds() -> Result<(), Box<dyn std::error::E
         "--task-file",
         "a",
     ])?;
-    assert!(!duplicate.status.success());
+    assert!(duplicate.status.success());
     assert!(String::from_utf8_lossy(&duplicate.stderr).contains("already open"));
+    assert_eq!(
+        fs::read_to_string(root.join("a.md"))?
+            .matches("Minimize diffs")
+            .count(),
+        1
+    );
     let listed = workspace.ok(&["todo", "list", "--task-file", "a"])?;
     let rule_id = listed
         .lines()

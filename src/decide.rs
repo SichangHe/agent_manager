@@ -599,7 +599,7 @@ pub fn chase(
                 task: name.to_owned(),
                 address: task.address().to_owned(),
                 text: format!(
-                    "The human's email {mail_dir}/{mail} was given to you at {given} and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled {mail} --because 'THE HUMAN'S WORDS'` instead."
+                    "The human's message {mail_dir}/{mail} was given to you at {given} and you have not messaged the human since. Message the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no reply is needed, run `amh mail handled {mail} --because 'THE HUMAN'S WORDS'` instead."
                 ),
                 row: format!("{at} {name} {mail} 1"),
             }
@@ -608,13 +608,13 @@ pub fn chase(
                 task: name.to_owned(),
                 manager: task.field("managerat").unwrap_or_default().to_owned(),
                 text: format!(
-                    "The agent of {name} was given the human's email {mail_dir}/{mail} at {given}, was reminded, and still has not emailed the human. Find out why and make sure the human gets an answer."
+                    "The agent of {name} was given the human's message {mail_dir}/{mail} at {given}, was reminded, and still has not messaged the human. Find out why and make sure the human gets an answer."
                 ),
                 human: (stage == 1).then(|| {
                     (
                         format!("unanswered {mail}"),
                         format!(
-                            "The agent of {name} was given your message at {given} and was reminded once, but has not emailed you since. Its manager has been told to find out why."
+                            "The agent of {name} was given your message at {given} and was reminded once, but has not messaged you since. Its manager has been told to find out why."
                         ),
                     )
                 }),
@@ -947,7 +947,7 @@ pub fn parse_repeats(text: &str) -> BTreeMap<String, (u64, u32)> {
 /// The message telling a manager about the problems of its agents.
 pub fn problems_text(texts: &[String]) -> String {
     format!(
-        "Handle these agent problems; only email the human if you cannot:\n\n{}",
+        "Handle these agent problems; only message the human if you cannot:\n\n{}",
         texts.join("\n")
     )
 }
@@ -1806,7 +1806,7 @@ mod tests {
         );
         assert_eq!(
             text,
-            "The human's email manager_mail/m-11.txt was given to you at T99095 and you have not emailed the human since. Email the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no email is needed, run `amh mail handled m-11.txt --because 'THE HUMAN'S WORDS'` instead."
+            "The human's message manager_mail/m-11.txt was given to you at T99095 and you have not messaged the human since. Message the human now with `amh tell human`, even if only to say you got it and what you are doing. If the human wrote that no reply is needed, run `amh mail handled m-11.txt --because 'THE HUMAN'S WORDS'` instead."
         );
         // A send by a task the reminded one manages answers it; one before the email does not.
         assert_eq!(chased("99095 t_main.md m-11.txt 0", "99500 t_work\n"), []);
@@ -1832,10 +1832,10 @@ mod tests {
             (task.as_str(), manager.as_str()),
             ("t_sub.md", "omnigent://s1")
         );
-        assert!(text.contains("at T98195, was reminded, and still has not emailed the human"));
+        assert!(text.contains("at T98195, was reminded, and still has not messaged the human"));
         let (key, text) = human.clone().unwrap();
         assert_eq!(key, "unanswered m-11.txt");
-        assert!(text.contains("has not emailed you since"));
+        assert!(text.contains("has not messaged you since"));
         assert_eq!(chased("99095 t_sub.md m-11.txt 0", "99095 t_sub\n"), []);
         assert_eq!(
             chased(
@@ -1894,7 +1894,7 @@ mod tests {
         assert_eq!(
             problems_text(&[failure.to_owned()]),
             format!(
-                "Handle these agent problems; only email the human if you cannot:\n\n{failure}"
+                "Handle these agent problems; only message the human if you cannot:\n\n{failure}"
             )
         );
         // Reported and reminded: nothing more until the reminder period is over.

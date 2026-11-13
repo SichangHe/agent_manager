@@ -110,7 +110,8 @@ pub fn add_item(task: &mut Task, item: &str, from_human: bool) -> Result<Option<
             .join(" ")
     };
     if let Some(open) = task.items.iter().find(|open| plain(open) == plain(&marked)) {
-        return Err(format!("amh: already open as `{open}`; nothing was added"));
+        eprintln!("amh: not added: already open as `{open}`");
+        return Ok(None);
     }
     task.items.push(marked.clone());
     Ok(Some(marked))
@@ -200,7 +201,7 @@ fn position(task: &Task, given: &str) -> Option<usize> {
 pub fn quiet_evidence(evidence: &str, human_words: Option<&str>) -> String {
     match human_words {
         Some(words) => format!(
-            "{}; the human is not emailed, because they wrote: {}",
+            "{}; the human is not messaged, because they wrote: {}",
             evidence.trim(),
             words.trim()
         ),
@@ -475,7 +476,7 @@ mod tests {
         let mut work = worker();
         let added = add_item(&mut work, "write   the\n code", false);
         assert_eq!(added, Ok(Some("write the code".to_owned())));
-        assert!(add_item(&mut work, "write “the” code", false).is_err());
+        assert_eq!(add_item(&mut work, "write “the” code", false), Ok(None));
         let theirs = add_item(&mut work, "🧑 ship it", true).unwrap();
         assert_eq!(theirs.as_deref(), Some("🧑 ship it"));
         assert_eq!(work.items, ["write the code", "🧑 ship it"]);
@@ -711,7 +712,7 @@ mod tests {
     fn a_quiet_removal_notes_the_humans_words() {
         assert_eq!(
             quiet_evidence("image fixed ", Some(" don't bother me afterwards")),
-            "image fixed; the human is not emailed, because they wrote: don't bother me afterwards"
+            "image fixed; the human is not messaged, because they wrote: don't bother me afterwards"
         );
         assert_eq!(quiet_evidence("image fixed", None), "image fixed");
     }

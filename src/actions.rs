@@ -217,7 +217,7 @@ fn systemctl(args: &[&str]) -> Result<u8, String> {
         .unwrap_or(1))
 }
 
-const BATCH_HINT: &str = "This emailed the human by itself. Next time batch: give several items in one call, and when you also have something to tell the human, send it all in one email with `amh tell human --add ITEM --done ITEM`.\n";
+const BATCH_HINT: &str = "This messaged the human by itself. Next time batch: give several items in one call, and when you also have something to tell the human, send it all in one message with `amh tell human --add ITEM --done ITEM`.\n";
 
 /// Email the human at once about the changes one call made to their items on a task; returns the hint to print when an email went out.
 // 🧑 “Pending items originated from the human need emails, ones from agents do not.”
@@ -980,7 +980,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             drop(lock);
             // 🧑 "Get some agent to fix it, and don’t bother me afterwards"
             let hint = match text("quiet_because") {
-                Some(_) => "the human is not emailed, as they asked\n",
+                Some(_) => "the human is not messaged, as they asked\n",
                 None => report_items(&settings, &store, &task, &[], &done)?,
             };
             let _lock = store.lock()?;
@@ -1386,7 +1386,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 decide::without_awaiting(&store.record(watch::AWAITING)?, &task.name, need("mail"));
             if n == 0 {
                 return Err(format!(
-                    "amh: no email {} of the human is waiting for an answer from {}",
+                    "amh: no message {} of the human is waiting for an answer from {}",
                     need("mail"),
                     task.name
                 ));
@@ -1395,13 +1395,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
             tasks::add_note(
                 &mut task,
                 &format!(
-                    "handled the human's email {} without emailing, because the human wrote: {}",
+                    "handled the human's message {} without replying, because the human wrote: {}",
                     need("mail"),
                     need("because")
                 ),
             );
             store.save(&task)?;
-            "noted; you will not be reminded to answer that email\n".to_owned()
+            "noted; you will not be reminded to answer that message\n".to_owned()
         }
         ("mail", "done") => {
             let source = Path::new(need("mail"));

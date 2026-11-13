@@ -210,6 +210,13 @@ pub fn to_rule(task: &mut Task, given: &str) -> Result<String, String> {
         .iter_mut()
         .find(|r| r.stage == Stage::Added && (r.id == given || bare(&r.text) == bare(given)))
         .ok_or("amh: no such open request; copy its ID or text from `amh todo list`")?;
+    // Another agent's request resolves only by its creator's decision.
+    if request.creator != "human" && request.creator != task.name {
+        return Err(format!(
+            "amh: {} was created by {}; only the human's and your own requests become rules",
+            request.id, request.creator
+        ));
+    }
     let evidence = "made a standing rule";
     request.stage = Stage::Resolved;
     request.evidence = evidence.to_owned();
@@ -447,20 +454,12 @@ pub const WAIT_DEFAULT_S: i64 = 3 * 86400;
 /// A duration like `3d`, `12h` or `90m`, in seconds.
 pub fn duration_s(text: &str) -> Result<i64, String> {
     let text = text.trim();
-    let (number, unit) = text.split_at(text.len().saturating_sub(1));
-    let n: i64 = number
-        .parse()
-        .map_err(|_| format!("amh: say a duration like 3d, 12h or 90m, not `{text}`"))?;
-    let unit_s = match unit {
-        "d" => 86400,
-        "h" => 3600,
-        "m" => 60,
-        _ => {
-            return Err(format!(
-                "amh: say a duration like 3d, 12h or 90m, not `{text}`"
-            ));
-        }
-    };
+    let wrong = || format!("amh: say a duration like 3d, 12h or 90m, not `{text}`");
+    let (number, unit_s) = [("d", 86400), ("h", 3600), ("m", 60)]
+        .into_iter()
+        .find_map(|(unit, unit_s)| Some((text.strip_suffix(unit)?, unit_s)))
+        .ok_or_else(wrong)?;
+    let n: i64 = number.parse().map_err(|_| wrong())?;
     match n > 0 {
         true => Ok(n * unit_s),
         false => Err("amh: a wait must last a positive time".to_owned()),
@@ -507,8 +506,8 @@ pub fn wait_on(
     request.blockers.retain(|b| !b.starts_with(EXTERNAL));
     if let Some((reason, end)) = reason {
         let reason = reason.trim();
-        if reason.is_empty() {
-            return Err("amh: say what the request waits for".to_owned());
+        if reason.is_empty() || reason.contains(UNTIL.trim()) {
+            return Err("amh: say what the request waits for, without `[until`".to_owned());
         }
         request.blockers.push(with_end(reason, end));
     }
@@ -522,8 +521,9 @@ pub fn expire_waits(
     now: chrono::DateTime<chrono::Utc>,
     added: impl Fn(&str) -> Option<String>,
 ) -> Result<bool, String> {
+    let known = read(task)?.len();
     let mut records = sync(task)?;
-    let mut changed = false;
+    let mut changed = records.len() != known;
     let mut ended = Vec::new();
     for request in records.iter_mut().filter(|r| r.stage != Stage::Resolved) {
         if request.added_at.is_none() {
@@ -881,7 +881,7 @@ mod tests {
             Some(now.timestamp() + WAIT_DEFAULT_S)
         );
         assert_eq!(duration_s("3d")?, 3 * 86400);
-        assert!(duration_s("3").is_err() && duration_s("0h").is_err());
+        assert!(duration_s("3").is_err() && duration_s("0h").is_err() && duration_s("3д").is_err());
         Ok(())
     }
 
