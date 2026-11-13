@@ -144,7 +144,7 @@ pub fn request(
 }
 
 // 🧑 "How do we let agents know that if they want to send something to the human ... immediately. They should use the AMH command to send it. But also. Whatever they say at the end, of a turn after. Human. Message would be automatically sent."
-pub const TURN_REPLY: &str = "The text you end a turn with is sent to whoever messaged you: the human, or the agent that started the turn. It is not sent if you already messaged them with `amh tell` since their message. Use `amh tell` before then only for what they need before you finish.";
+pub const TURN_REPLY: &str = "When the human messages you, the text you end that turn with is sent to them. Use `amh tell human` only for what they need before you finish, and never repeat it in your final text. Answer other agents only with `amh tell`; your final text never goes to them.";
 
 /// A first prompt: the task's name, the output of each `getagentsmd` command in `shown`, then the request.
 // 🧑 "put task file, without the ‘.md’ in all starter prompts and use that as tags"

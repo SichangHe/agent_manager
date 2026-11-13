@@ -888,12 +888,7 @@ fn deliver_block(
         trace.as_ref(),
     );
     if let (Outcome::Delivered, Source::Mail(_)) = (&outcome, decide::source_of(&block[0]))
-        && let Err(error) = crate::replies::expect(
-            &store.state_dir,
-            &plan.target,
-            crate::replies::HUMAN,
-            sent_s,
-        )
+        && let Err(error) = crate::replies::expect(&store.state_dir, &plan.target, sent_s)
     {
         log(&error);
     }

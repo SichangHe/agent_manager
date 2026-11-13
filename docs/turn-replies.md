@@ -2,39 +2,33 @@
 (authored by agents unless marked 🧑)
 
 - 🧑 "Agents really love using the terminal printout for reply, so let's automatically send whatever the agent said at the end of the turn. This also needs to be worked on s.t. pending item notifications and messages replacements work"
-- code: `src/replies.rs`
+- 🧑 redesign: "get rid of the. Rule that does not send. The final. Agent output after. They call AMH message"; "Have their end-of-turn message sent. If they haven't responded. Or had a end of turn, since. Last time the human. Ask them something. Counting the interruption from other messages, as not a end of turn."; "Messages that agents received from the system or other agents, should not be sent back"
+- code: `src/replies.rs`; agent-facing text: `work::TURN_REPLY` (first prompt), `cli.rs` agent summary
 
 what
-- an agent's last assistant text of a turn goes to whoever started the turn
-    - human message delivered by the watcher → human
-    - `amh tell agent` from an agent → that agent; via `agents::report` when it is the task's manager
-- skipped when the turn ran `amh tell human` (human) or `amh tell manager|agent` (agent)
-    - recipient = first word after `amh tell`, past `--task-file NAME`
-    - so explicit messages are never repeated
+- a human message delivered by the watcher makes a reply owed to the human
+- each owed human message is answered by the agent's first natural end of turn after it
+    - natural end = an assistant text the agent stopped on by itself
+        - next conversation item is a user message: the agent was idle when it arrived
+        - or it is the newest item and the session is `ready`, or `running` with it newest for 180 s
+    - a message interrupting a turn arrives after a tool result, so the text before it is no end
+    - distinct answers go out oldest first, joined; system- or agent-started turns after the answer are not sent
+- `amh tell human` does not cancel it; every `amh tell` that sends prints `Never repeat this in your final text.`
+- nothing is ever sent back to agents or the system; agents answer agents with `amh tell`
+- not allowed to write to the human (`human.writers`) → its manager gets it, clipped, labeled `TASK (end of turn):`
 
 how
-- expectation: file in `amh-replies/` in the state dir, `FROM FIRST_S LATEST_S`
-    - time taken before sending; written after it succeeds
-    - 🧑 "the auto-forwarding should only trigger after messages from me, e.g., purely system message should not trigger it, but should also not cancel it if the previous message was from me"
-    - human: `SESSION_ID`; `FIRST_S` = earliest unanswered human message, `LATEST_S` = latest; system messages change nothing
-    - text = turn-final assistant texts since `FIRST_S` and after the newest `amh tell human`, newest 3, oldest first, joined; turn-final = followed by a user item or nothing
-    - text window from `FIRST_S`; `amh tell human` cancels only if run since `LATEST_S`
-    - agent: `SESSION_ID.agent`, overwritten: the turn's text goes to the latest sender
-- watcher poll `turn replies`: per file, when the turn ended
-    - ended = session `ready` (idle), or `running` with an assistant text as newest item for 180 s
-        - Claude sessions with background tasks stay `running` after the turn ends
-    - items since `EPOCH_S`, newest 500: an assistant text means the turn ended
-    - none yet → wait; after 12 h → drop
+- record `amh-replies/SESSION_ID` in the state dir: `human T1 T2 ...`, unanswered human message times
+    - time taken before sending; appended after it succeeds; times over 12 h old dropped
+- watcher poll `turn replies`: reads newest 500 items; sends once the latest time has an answer
     - file removed after sending only if unchanged meanwhile
-    - failed send retried each poll until 10 min after the latest delivery
-    - human and agent both owed → both get the text
-- human: same `actions::tell_human` path as `amh tell human`
-    - recorded and replaceable with `--replaces`; checked against `human.writers`
-    - consolidation reminder, when any, is sent to the agent with the Message-ID
-    - 🧑 "We allow 2 messages, one from previous turn, one from this end message, right?": reminders fire only with 2+ earlier unread updates
-    - not a writer → goes to its manager instead
-- agent: clipped to the manager message limit, labeled `TASK (end of turn):`
+    - failed send retried until 10 min after the latest human message; no answer within 12 h → dropped
+- human path = `actions::tell_human`: recorded, replaceable with `--replaces`; consolidation reminder, when any, goes to the agent
+
+why the 180 s rule stays
+- Claude sessions stay `running` after a turn ends while background commands or subagents run
+- no item marks a turn's end; mid-turn the text is followed by its tool call within seconds
+- risk: a text followed by over 180 s of generating the next tool call is taken as the end
 
 limits
-- a turn with over 500 items may miss an earlier `amh tell` and send a duplicate
-- turns not started by a delivery (reminders, item notices, starter prompts) send nothing
+- items only carry second timestamps; a natural end in the same second as a human message counts as after it

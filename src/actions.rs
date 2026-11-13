@@ -234,6 +234,10 @@ pub fn drop_open_work(store: &Store, name: &str, why: &str) -> Result<(), String
     Ok(())
 }
 
+/// Said after every `amh tell` that sends.
+// 🧑 "after agent sends something. Amh would say. Never repeat this. In. Your terminal output. Again"
+const NO_REPEAT: &str = "Never repeat this in your final text.\n";
+
 /// Whether the agent of `task` may message the human: its tool is in `human.writers`, or its model is admitted for that tool.
 pub fn writes_to_human(settings: &Settings, task: &Task) -> Result<bool, String> {
     let tool = task.field("tool").unwrap_or_default();
@@ -302,7 +306,7 @@ pub fn tell_human(
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
     if crate::zulip::enabled(settings) {
-        let receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n");
+        let receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n{NO_REPEAT}");
         let reminder = zulip_sent_followup(crate::zulip::replace(settings, replaces), || {
             crate::zulip::consolidation_reminder(settings, tag, &message_id)
         })
@@ -327,7 +331,10 @@ pub fn tell_human(
         Ok(unread) => mail::replace_reminder(&message_id, &unread),
         Err(error) => mail::unread_check_failed(&error),
     };
-    Ok((format!("Email sent.\nMessage-ID: {message_id}\n"), reminder))
+    Ok((
+        format!("Email sent.\nMessage-ID: {message_id}\n{NO_REPEAT}"),
+        reminder,
+    ))
 }
 
 /// Cleanup failure never changes delivery success or requests another copy.
@@ -699,7 +706,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 Some(sink) => format!(
                     "recorded in {sink}, which your manager reads; it is not woken. Do not send it again. Only a blocker (--blocked) or your final result (--done) wakes your manager\n"
                 ),
-                None => "message sent to your manager; do not send it again\n".to_owned(),
+                None => format!("message sent to your manager; do not send it again\n{NO_REPEAT}"),
             }
         }
         ("tell", "human") => {
@@ -797,14 +804,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 }
             };
             let message = work::envelope(&from, &message);
-            let sent_s = crate::replies::now_s();
             omnigent::send(&settings, &to, &message).map_err(failed)?;
-            if from.starts_with(omnigent::PREFIX)
-                && let Err(error) =
-                    crate::replies::expect(&settings::state_dir(), &to, &from, sent_s)
-            {
-                eprintln!("amh: sent; {error}");
-            }
+            say(NO_REPEAT);
             let _lock = store.lock()?;
             clear_stopped(&store, &to)?;
             // mdbook_pr3086.md: "routing ownership should match the task that handles them"
