@@ -1587,13 +1587,18 @@ pub fn run() -> u8 {
         if last_maintain.is_none_or(|at| at.elapsed() >= MAINTAIN_EVERY) {
             let phase = Instant::now();
             last_maintain = Some(Instant::now());
-            if let Err(error) = store
+            match store
                 .lock()
                 .and_then(|_lock| crate::actions::maintain(&store))
             {
-                log(&format!("wait expiry failed: {error}"));
+                Ok(failed) => {
+                    for line in failed {
+                        log(&format!("wait upkeep failed for {line}"));
+                    }
+                }
+                Err(error) => log(&format!("wait upkeep failed: {error}")),
             }
-            log_elapsed("wait expiry", phase);
+            log_elapsed("wait upkeep", phase);
         }
         let phase = Instant::now();
         let scanned = watcher.deliver_pending(&settings, &store);

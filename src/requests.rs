@@ -496,6 +496,11 @@ pub fn next_reminder(from: chrono::DateTime<chrono::Utc>, n: i32) -> chrono::Dat
 /// An outside wait's reason, its next reminder time and how many reminders came before; `None` for a blocker without a schedule.
 pub fn wait_schedule(blocker: &str) -> (&str, Option<(chrono::DateTime<chrono::Utc>, i32)>) {
     let reason = blocker.strip_prefix(EXTERNAL).unwrap_or(blocker);
+    // An end ` [until ...]` that a short-lived build of 2026-11-13 wrote is dropped.
+    let reason = match reason.rsplit_once(" [until ") {
+        Some((kept, end)) if end.ends_with(']') && !end.contains(REMIND.trim()) => kept,
+        _ => reason,
+    };
     let parsed = reason
         .rsplit_once(REMIND)
         .and_then(|(reason, rest)| Some((reason, parse_schedule(rest.strip_suffix(']')?)?)));
@@ -538,7 +543,10 @@ pub fn wait_on(
     if request.stage != Stage::Added {
         return Err("amh: only added requests may change dependencies".to_owned());
     }
-    request.blockers.retain(|b| !b.starts_with(EXTERNAL));
+    // Clearing drops a date wait too, so a wrong date can be fixed and the item finished early.
+    request
+        .blockers
+        .retain(|b| !b.starts_with(EXTERNAL) && (reason.is_some() || !b.starts_with(DATE)));
     if let Some((reason, now)) = reason {
         let reason = reason.trim();
         if reason.is_empty() || reason.contains(REMIND.trim()) {
@@ -606,7 +614,7 @@ pub fn remind_waits(
     write(task, &records);
     if !ended.is_empty() {
         let text = format!(
-            "The date these items waited for has come, so they are ready again:\n- {}",
+            "The date these items waited for has come:\n- {}",
             ended.join("\n- ")
         );
         queue(task, &task.name.clone(), &text)?;
@@ -937,6 +945,10 @@ mod tests {
         write(&mut owner, &records);
         assert!(remind_waits(&mut owner, now, |_| None)?);
         let blocker = read(&owner)?[0].blockers[0].clone();
+        assert_eq!(
+            wait_schedule("on: x [until 2026-11-16T21:01:00Z]"),
+            ("x", None)
+        );
         assert_eq!(
             wait_schedule(&blocker),
             (

@@ -67,7 +67,11 @@ fn ask_human(store: &Store, asker: &str, what: &str) -> Result<String, String> {
         )?,
     };
     let text = format!("{} (asked by {asker})", what.trim());
-    let item = tasks::add_item(&mut human, &text, false)?.unwrap_or(text);
+    let item = match tasks::add_item(&mut human, &text, false)? {
+        Some(item) => item,
+        None => tasks::open_match(&human, &taskfile::mark(&text, false)?)
+            .ok_or("amh: the human's item vanished")?,
+    };
     requests::register(&mut human, &item, asker, "amh todo ask-human")?;
     let id = requests::read(&human)?
         .into_iter()
@@ -82,10 +86,29 @@ fn ask_human(store: &Store, asker: &str, what: &str) -> Result<String, String> {
 /// Release tasks blocked on a task that closed, remind about other blocks and outside waits with backoff, and date undated requests; the watcher calls this every few minutes under the store lock.
 // 🧑 "What are the waiting on? Previously I asked for the task blocked on to block on other tasks, was that ever implemented?"
 // 🧑 "Blocked tasks that are not blocked on other tasks should have long reminders with exponential backoff. Maybe 1hr, base 1.5?"
-pub fn maintain(store: &Store) -> Result<(), String> {
+pub fn maintain(store: &Store) -> Result<Vec<String>, String> {
     let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let now = chrono::Utc::now();
-    for mut task in store.active()? {
+    let all = store.all()?;
+    let mut failed = Vec::new();
+    for task in store.active()? {
+        let name = task.name.clone();
+        if let Err(error) = maintain_task(store, &database, &all, task, now) {
+            failed.push(format!("{name}: {error}"));
+        }
+    }
+    Ok(failed)
+}
+
+/// One task's part of `maintain`; `all` is every task as the pass began.
+fn maintain_task(
+    store: &Store,
+    database: &crate::database::Database,
+    all: &[Task],
+    mut task: Task,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), String> {
+    {
         let added = |id: &str| {
             database
                 .first_event_time("request added", id)
@@ -93,6 +116,11 @@ pub fn maintain(store: &Store) -> Result<(), String> {
                 .flatten()
         };
         let mut changed = requests::remind_waits(&mut task, now, added)?;
+        // A short-lived build of 2026-11-13 gave blocks an end; reminders replace it.
+        if task.field("blocked_until").is_some() {
+            task.fields.retain(|(key, _)| key != "blocked_until");
+            changed = true;
+        }
         let on = task.field("blocked_on").unwrap_or_default().to_owned();
         let name = task.name.clone();
         // What a block on a task, an item or a date waits for, and whether it is over; `None` for free text.
@@ -101,7 +129,7 @@ pub fn maintain(store: &Store) -> Result<(), String> {
                 Some((store.load(other)?.status() == "done").then(|| format!("{other} is closed")))
             }
             Some(tasks::Block::Item(id)) => {
-                let open = store.all()?.iter().any(|owner| {
+                let open = all.iter().any(|owner| {
                     requests::read(owner).is_ok_and(|records| {
                         records
                             .iter()
@@ -1603,7 +1631,7 @@ mod maintain_tests {
             "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
         )?;
         let _lock = store.lock()?;
-        super::maintain(&store)?;
+        assert!(super::maintain(&store)?.is_empty());
         assert_eq!(store.load("waiter.md")?.status(), "blocked");
         let human = store.load("human.md")?;
         assert!(
@@ -1614,7 +1642,7 @@ mod maintain_tests {
         let mut other = store.load("other.md")?;
         crate::tasks::set_status(&mut other, "done", None)?;
         store.save(&other)?;
-        super::maintain(&store)?;
+        assert!(super::maintain(&store)?.is_empty());
         let waiter = store.load("waiter.md")?;
         assert_eq!(
             (waiter.status(), waiter.field("blocked_on")),

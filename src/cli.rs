@@ -124,7 +124,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("on").long("on").value_name("WHAT").hide(true).help("refused: wait on an item or a date instead"))
                 .arg(Arg::new("until").long("until").value_name("DATE").help("wait until a date, e.g. 2026-11-20 or '2026-11-20 14:00'; the item is ready and reminded again then"))
                 .arg(Arg::new("ask_human").long("ask-human").action(ArgAction::SetTrue).help("turn this item's old wait in words on the human into the human's own item (`amh human`) and wait for it"))
-                .arg(Arg::new("clear_on").long("clear-on").action(ArgAction::SetTrue).help("drop the --on wait; request dependencies stay"))
+                .arg(Arg::new("clear_on").long("clear-on").action(ArgAction::SetTrue).help("drop a wait in words or a date wait; item dependencies stay"))
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when amh cannot tell who you are"))
             )
             .subcommand(Command::new("ask-human").about("Give the human an item to do, which you can wait for; prints its ID.").long_about("Give the human an item to do, which you can wait for; prints its ID.\n\nThe item goes on the human's own task `human.md`; the human sees it with `amh human` and resolves it with `amh human --done ID`. Then wait for it: `amh todo wait YOUR_ID --for human.md#N`, or `amh task status TASK blocked --on human.md#N`. It sends no message; tell the human what you need with `amh tell human`.")

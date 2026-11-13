@@ -71,10 +71,14 @@ impl Task {
         if let Some(pinned) = self.pinned() {
             return pinned;
         }
+        let on = self.field("blocked_on").unwrap_or_default();
         let waits_on_human = self.status() == "blocked"
-            && self
-                .field("blocked_on")
-                .is_some_and(|on| on.to_lowercase().starts_with("human"));
+            && match block_of(on) {
+                Some(Block::Task(name)) => name == HUMAN_TASK,
+                Some(Block::Item(id)) => id.starts_with(&format!("{HUMAN_TASK}#")),
+                Some(Block::Date(_)) => false,
+                None => on.to_lowercase().starts_with("human"),
+            };
         match self.status() {
             "done" => "previous:",
             _ if waits_on_human => "human pending:",
@@ -99,22 +103,31 @@ pub fn add_item(task: &mut Task, item: &str, from_human: bool) -> Result<Option<
     }
     let marked = taskfile::mark(item, from_human)?;
     // The study: near-duplicates like `🧑 Minimize diffs` and `🧑 “Minimize diffs”` sat open side by side.
+    if let Some(open) = open_match(task, &marked) {
+        eprintln!("amh: not added: already open as `{open}`");
+        return Ok(None);
+    }
+    task.items.push(marked.clone());
+    Ok(Some(marked))
+}
+
+/// The open item that `marked` repeats: same kind (the human's or not), same words ignoring quotes and spacing.
+pub fn open_match(task: &Task, marked: &str) -> Option<String> {
     let plain = |text: &str| -> String {
-        text.strip_prefix(HUMAN_MARK)
-            .unwrap_or(text)
-            .chars()
+        text.chars()
             .filter(|c| !matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '`'))
             .collect::<String>()
             .split_whitespace()
             .collect::<Vec<_>>()
             .join(" ")
     };
-    if let Some(open) = task.items.iter().find(|open| plain(open) == plain(&marked)) {
-        eprintln!("amh: not added: already open as `{open}`");
-        return Ok(None);
-    }
-    task.items.push(marked.clone());
-    Ok(Some(marked))
+    task.items
+        .iter()
+        .find(|open| {
+            open.starts_with(HUMAN_MARK) == marked.starts_with(HUMAN_MARK)
+                && plain(open) == plain(marked)
+        })
+        .cloned()
 }
 
 /// The record left in a task file when an open item is removed: the item itself, then how it is known to be finished when that was said.
