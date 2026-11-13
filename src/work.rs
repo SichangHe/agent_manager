@@ -143,13 +143,16 @@ pub fn request(
     Ok(request)
 }
 
+// 🧑 "How do we let agents know that if they want to send something to the human ... immediately. They should use the AMH command to send it. But also. Whatever they say at the end, of a turn after. Human. Message would be automatically sent."
+pub const TURN_REPLY: &str = "The text you end a turn with is sent to whoever messaged you: the human, or the agent that started the turn. It is not sent if you already messaged them with `amh tell` since their message. Use `amh tell` before then only for what they need before you finish.";
+
 /// A first prompt: the task's name, the output of each `getagentsmd` command in `shown`, then the request.
 // 🧑 "put task file, without the ‘.md’ in all starter prompts and use that as tags"
 // 🧑 “makes its content available in the manager's initial prompt before the manager starts ... make it clear that it is the output of that command”
 pub fn first_prompt(name: &str, shown: &[(String, String)], request: &str) -> String {
     let tag = name.strip_suffix(".md").unwrap_or(name);
     let mut parts = vec![format!(
-        "Task tag: {tag}\nTask file: {name}\nUse --task-file {name} with `amh` when it cannot tell who you are."
+        "Task tag: {tag}\nTask file: {name}\nUse --task-file {name} with `amh` when it cannot tell who you are.\n{TURN_REPLY}"
     )];
     parts.extend(
         shown
@@ -570,7 +573,7 @@ pub mod tests {
         ];
         assert_eq!(
             first_prompt("t_work.md", &shown, "REQUEST\n"),
-            "Task tag: t_work\nTask file: t_work.md\nUse --task-file t_work.md with `amh` when it cannot tell who you are.\n$ getagentsmd\nbase rules\n$ getagentsmd get agent_work\nwork\nREQUEST\n"
+            format!("Task tag: t_work\nTask file: t_work.md\nUse --task-file t_work.md with `amh` when it cannot tell who you are.\n{TURN_REPLY}\n$ getagentsmd\nbase rules\n$ getagentsmd get agent_work\nwork\nREQUEST\n")
         );
         assert_eq!(guides(false), ["agent_work"]);
         assert_eq!(

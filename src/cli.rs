@@ -21,7 +21,7 @@ const OVERVIEW: &str = "What managers need to know:
 - The watcher archives events and resolved requests older than 30 days, and commits and pushes work-log Markdown hourly; you need not commit task files.
 
 What every agent needs to know:
-- The text you end a turn with goes to whoever started that turn, unless you already ran `amh tell` to them in that turn; write it as a message to them.
+- The text you end a turn with is sent to whoever messaged you: the human, or the agent that started the turn. It is not sent if you already messaged them with `amh tell` since their message. Use `amh tell` before then only for what they need before you finish. Write that text as a message to them.
 - Work logs change only through amh; never edit them directly.";
 
 /// Build the whole command tree.
