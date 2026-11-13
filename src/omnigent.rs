@@ -778,8 +778,6 @@ pub fn has_running_terminal(resources: &Value) -> bool {
         .any(|resource| resource["type"] == "terminal" && resource["metadata"]["running"] == true)
 }
 
-/// The command-line arguments that make a tool run with no sandbox and no permission prompts.
-// 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
 /// The model a session runs: the `--model` amh launched it with, else Omnigent's `model_override`.
 ///
 /// Omnigent 0.21 launches Codex on its default model and clears `model_override` when the pick is missing from Codex's model catalog (e.g. `gpt-6.1-terra`); `--model` in the launch arguments still reaches Codex.
@@ -805,6 +803,8 @@ fn launch_args(tool: &str, model: &str) -> Vec<String> {
     args
 }
 
+/// The command-line arguments that make a tool run with no sandbox and no permission prompts.
+// 🧑 "make Omnigent run every harness without sandbox and with no permission asking"
 fn unrestricted(tool: &str) -> Vec<String> {
     let args: &[&str] = match tool {
         "cursor" => &[
