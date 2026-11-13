@@ -14,8 +14,10 @@ pub const MAIL_SOURCE: &str = "(record and delegate manager_mail/";
 pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
-pub const ACCEPT: &str = "from the human; acknowledge it and record each request as an open item in ONE call: `amh tell human --add 'ITEM'` per item, in the human's words";
-pub const ADD_REMINDER: &str = "\nAdd every still-open request to your open items.";
+// 🧑 "I think amh should say to add TODO and attach, if any, additional ack" ... "let agents answer quick questions directly immediately instead of adding to TODO"
+pub const ACCEPT: &str = "from the human; at once, add each request as an open item in the human's words, in ONE call: `amh tell human --add 'ITEM'` per item, with any acknowledgement as the message text. Answer a quick question directly instead";
+pub const ADD_REMINDER: &str =
+    "\nAdd every still-open request to your open items; answer a quick question directly instead.";
 
 /// Text in quotes as the watcher log shows it.
 pub fn quoted(text: &str) -> String {
