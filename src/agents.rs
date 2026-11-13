@@ -516,7 +516,9 @@ pub fn start_task(settings: &Settings, store: &Store, new: &NewTask) -> Result<S
     // 🧑 "Task file names MUST be unique, descriptive, and shorter than 25 characters."
     let file_name = new.name.rsplit('/').next().unwrap_or(new.name);
     if !store.contains(new.name)? && file_name.trim_end_matches(".md").chars().count() + 3 >= 25 {
-        return Err(format!("amh: task file name {file_name:?} must be shorter than 25 characters, `.md` included"));
+        return Err(format!(
+            "amh: task file name {file_name:?} must be shorter than 25 characters, `.md` included"
+        ));
     }
     if store.contains(new.name)? {
         let old = store.load(new.name)?;

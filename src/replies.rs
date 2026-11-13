@@ -104,7 +104,7 @@ pub fn reply(items: &[Value], first_s: i64, latest_s: i64, recipients: &[&str]) 
     let told = since(latest_s).any(|item| {
         item["type"] == "function_call" && tells(&item["arguments"].to_string(), recipients)
     });
-    let last = turn.iter().find_map(|item| {
+    let text_of = |item: &Value| -> Option<String> {
         let text: String = (item["type"] == "message" && item["role"] == "assistant")
             .then(|| item["content"].as_array())
             .flatten()?
@@ -113,7 +113,18 @@ pub fn reply(items: &[Value], first_s: i64, latest_s: i64, recipients: &[&str]) 
             .collect::<Vec<_>>()
             .join("\n");
         Some(text.trim().to_owned()).filter(|text| !text.is_empty())
-    });
+    };
+    // uiclient_steer.md: a harness-started turn followed the answer at once, and only the newer turn's text was sent.
+    // Every turn's final text since `first_s` goes out, oldest first: an assistant text whose next item is a user message or none.
+    let ends: Vec<String> = turn
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| {
+            *at == 0 || (turn[at - 1]["type"] == "message" && turn[at - 1]["role"] == "user")
+        })
+        .filter_map(|(_, item)| text_of(item))
+        .collect();
+    let last = (!ends.is_empty()).then(|| ends.into_iter().rev().collect::<Vec<_>>().join("\n\n"));
     match (told, last) {
         (_, None) => Reply::Wait,
         (true, Some(_)) => Reply::Told,
@@ -312,8 +323,16 @@ mod tests {
         let later = json!({"type":"message","role":"user","created_at":12,"content":[]});
         let first = json!({"type":"message","role":"user","created_at":9,"content":[]});
         assert_eq!(
-            reply(&[said, later, call, first], 9, 12, &["human"]),
+            reply(&[said.clone(), later, call, first], 9, 12, &["human"]),
             Reply::Send("done".to_owned())
+        );
+        let answer = json!({"type":"message","role":"assistant","created_at":11,"content":[{"type":"output_text","text":"answer"}]});
+        let mid = json!({"type":"message","role":"assistant","created_at":10,"content":[{"type":"output_text","text":"working"}]});
+        let notice = json!({"type":"message","role":"user","created_at":12,"content":[]});
+        let tool = json!({"type":"function_call","created_at":10,"arguments":"ls"});
+        assert_eq!(
+            reply(&[said, notice, answer, tool, mid, user], 10, 10, &["human"]),
+            Reply::Send("answer\n\ndone".to_owned())
         );
     }
 }

@@ -573,7 +573,9 @@ pub mod tests {
         ];
         assert_eq!(
             first_prompt("t_work.md", &shown, "REQUEST\n"),
-            format!("Task tag: t_work\nTask file: t_work.md\nUse --task-file t_work.md with `amh` when it cannot tell who you are.\n{TURN_REPLY}\n$ getagentsmd\nbase rules\n$ getagentsmd get agent_work\nwork\nREQUEST\n")
+            format!(
+                "Task tag: t_work\nTask file: t_work.md\nUse --task-file t_work.md with `amh` when it cannot tell who you are.\n{TURN_REPLY}\n$ getagentsmd\nbase rules\n$ getagentsmd get agent_work\nwork\nREQUEST\n"
+            )
         );
         assert_eq!(guides(false), ["agent_work"]);
         assert_eq!(
