@@ -45,7 +45,7 @@ modules
     - 🧑 "Separate config file, which should live in .config or something and get committed, and env, which should be in local state or something and include things like where the work_logs is"
     - `config.toml` in the config folder (`$AMH_CFG_DIR`, else `$XDG_CONFIG_HOME/amh`, else `~/.config/amh`): same on every machine, committed; optional
         - `[launch.TOOL]` `model`, `effort`, `manager_model`, `manager_effort`
-        - `[compress]` `task` (who is told to compress the human's mailbox; unset = off), `unread_over` (default 16), `unread_urgent` (default 30)
+        - `[compress]` `task`: the human manager, nudged to consolidate agent status (unset = off); `[consolidate]` `every_h` (default 3): at most that often, only after new agent messages to the human
     - `env.toml` in the state folder (`$AMH_STATE_DIR`, else `$XDG_STATE_HOME/amh`, else `~/.local/state/amh`): this machine only, never committed; required
         - `work_logs`, `main_manager`, `[omnigent] url token`, `[mail] agent_address agent_password human_address human_mailbox_config stored_prefix`, `[guest] address name workdir stored_prefix`
     - both files flatten to dotted keys (`mail.agent_address`); `env.toml` wins

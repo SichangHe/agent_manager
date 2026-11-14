@@ -27,10 +27,10 @@ const ARCHIVE_EVERY: Duration = Duration::from_secs(86400);
 const RECONNECT: Duration = Duration::from_secs(30);
 /// How often queued emails are tried again.
 const FLUSH_EVERY: Duration = Duration::from_secs(600);
-/// How often the human's unread agent emails are counted.
+/// How often the watcher checks whether the human manager is due a status-consolidation nudge.
 const COMPRESS_EVERY: Duration = Duration::from_secs(300);
-/// The record of the last notice to compress: `EPOCH COUNT`.
-const COMPRESSED: &str = "amh-compress.txt";
+/// The record of the last consolidation nudge: `EPOCH NEWEST_MESSAGE_ID`.
+const CONSOLIDATED: &str = "amh-consolidate.txt";
 const NUDGE_EVERY: Duration = Duration::from_secs(60);
 /// How often the generated Markdown of the work logs is committed.
 // 🧑 "Why is work_logs not a clean repo? Since it is fully generated, should we auto-commit too? Do avoid committing huge files and artifacts, binaries, tho."
@@ -1385,74 +1385,38 @@ fn oversize_notice(files: &[(String, u64)]) -> String {
     )
 }
 
-/// Tell the task named by `compress.task` to compress the human's mailbox when too many agent emails wait unread there.
-fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> {
+/// Tell the task named by `compress.task` (the human manager) to consolidate agent status, at most every `consolidate.every_h` hours (default 3), and only when agent messages to the human arrived since the last time.
+// 🧑 "Email compression instructions no longer apply / What really is needed is the human manager should consolidate agents status once in a while and tell human what to handle next and prune any trifle that does not really need the human"
+fn notify_consolidation(settings: &Settings, store: &Store) -> Result<(), String> {
     let name = settings::get(settings, "compress.task");
-    if name.is_empty() {
+    if name.is_empty() || !crate::zulip::enabled(settings) {
         return Ok(());
     }
-    let number =
-        |key: &str, default: usize| settings::get(settings, key).parse().unwrap_or(default);
-    let (over, urgent) = (
-        number("compress.unread_over", 16),
-        number("compress.unread_urgent", 30),
-    );
-    // The human manager: "the compression notice counts PB news and PB urgent emails (shown as '(no tag)'). The compression rules exclude them"
-    let counted: Vec<String> = if crate::zulip::enabled(settings) {
-        let waiting = crate::zulip::unread(settings, &store.state_dir)?;
-        // The human manager: "the watcher counts 'pending item deleted' notices although its text says it does not."
-        let notice = |content: &str| {
-            let body = content.split_once("\n\n").map_or("", |(_, body)| body);
-            body.starts_with("pending item ")
-        };
-        // The human manager may archive only messages over 24 h old without attachments (`scripts/mail_compression/zarchive.py`), so only those count.
-        // The main manager: "the hourly 'compression due' nudge ... counts all unread agent messages toward its 16-message trigger, but human_mgr may archive only those over 24 h old without attachments. So it nags every hour with nothing to do."
-        let old_s = epoch_s() as i64 - 24 * 3600;
-        let counted = waiting.into_iter().filter(|(_, _, content, sent_s)| {
-            !notice(content) && *sent_s < old_s && !content.contains("/user_uploads/")
-        });
-        counted
-            .map(|(_, topic, _, _)| topic)
-            .filter(|topic| !mail::REPORT_LABELS.contains(&topic.as_str()))
-            .collect()
-    } else {
-        // Every email an agent sends through `amh` has a task tag, so an untagged one is not the human manager's to compress.
-        let unread = mail::unread_all(settings)?;
-        let countable = unread
-            .iter()
-            .filter(|header| decide::countable(&header.sender));
-        countable
-            .filter_map(|header| mail::tag_of(&header.subject).map(str::to_owned))
-            .collect()
-    };
-    let noted = record(store, COMPRESSED);
+    let every_s: u64 = settings::get(settings, "consolidate.every_h")
+        .parse::<f64>()
+        .map_or(3 * 3600, |hours| (hours * 3600.0) as u64);
+    let noted = record(store, CONSOLIDATED);
     let mut parts = noted.split_whitespace().map(str::parse::<u64>);
-    let last = match (parts.next(), parts.next()) {
-        (Some(Ok(at)), Some(Ok(count))) => Some((at, count as usize)),
-        _ => None,
+    let (last_s, seen) = match (parts.next(), parts.next()) {
+        (Some(Ok(at)), Some(Ok(id))) => (at, id),
+        _ => (0, 0),
     };
     let now_s = epoch_s() as u64;
-    if counted.len() <= over {
-        // Below the threshold the record goes, so the next pile-up is noticed at once.
-        if !noted.is_empty() {
-            store.set_record(COMPRESSED, "")?;
-        }
+    if now_s < last_s + every_s {
         return Ok(());
     }
-    if !decide::compress_due(counted.len(), over, urgent, last, now_s) {
+    let newest = crate::zulip::unread(settings, &store.state_dir)?
+        .iter()
+        .map(|(id, _, _, _)| *id)
+        .max()
+        .unwrap_or(0);
+    if newest <= seen {
         return Ok(());
     }
-    let task = store.load(name)?;
-    omnigent::send(
-        settings,
-        task.address(),
-        &decide::compress_text(counted.len(), over, &counted),
-    )?;
-    store.set_record(COMPRESSED, &format!("{now_s} {}\n", counted.len()))?;
-    log(&format!(
-        "told {name} to compress the mailbox: {} unread",
-        counted.len()
-    ));
+    let task = store.load(&name)?;
+    omnigent::send(settings, task.address(), decide::CONSOLIDATE_TEXT)?;
+    store.set_record(CONSOLIDATED, &format!("{now_s} {newest}\n"))?;
+    log(&format!("told {name} to consolidate agent status"));
     Ok(())
 }
 
@@ -1654,10 +1618,10 @@ pub fn run() -> u8 {
         if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
             let phase = Instant::now();
             last_compress = Some(Instant::now());
-            if let Err(error) = notify_compression(&settings, &store) {
-                log(&format!("mailbox compression check failed: {error}"));
+            if let Err(error) = notify_consolidation(&settings, &store) {
+                log(&format!("status consolidation check failed: {error}"));
             }
-            log_elapsed("compression check", phase);
+            log_elapsed("consolidation check", phase);
         }
         if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
             let phase = Instant::now();
