@@ -64,6 +64,26 @@ impl Database {
                 |row| row.get(0),
             )
             .map_err(error)?;
+        // A task's status, computed from its text and indexed, so active tasks are found without reading every task.
+        // 🧑 "Still unacceptably slow. Should be some ms. Why so slow"
+        let has_status: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('tasks') WHERE name = 'status')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !has_status {
+            connection
+                .execute_batch(
+                    "ALTER TABLE tasks ADD COLUMN status TEXT GENERATED ALWAYS AS (
+                         substr(text, instr(text, char(10) || 'status: ') + 9,
+                                instr(substr(text, instr(text, char(10) || 'status: ') + 9), char(10)) - 1)
+                     ) VIRTUAL;
+                     CREATE INDEX IF NOT EXISTS tasks_by_status ON tasks(status);",
+                )
+                .map_err(error)?;
+        }
         if !has_retry {
             connection
                 .execute_batch(
@@ -145,6 +165,20 @@ impl Database {
             )
             .optional()
             .map_err(error)
+    }
+
+    /// The tasks whose status is running, long_running or blocked, through the status index.
+    pub fn active_tasks(&self) -> Result<Vec<(String, String)>, String> {
+        let mut query = self
+            .0
+            .prepare("SELECT name, text FROM tasks WHERE status IN ('running', 'long_running', 'blocked') ORDER BY name")
+            .map_err(error)?;
+        let rows = query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)
     }
 
     pub fn tasks(&self) -> Result<Vec<(String, String)>, String> {

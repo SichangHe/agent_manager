@@ -951,7 +951,15 @@ impl Store {
 
     /// Every task file in the root that is not done, by file name.
     pub fn active(&self) -> Result<Vec<Task>, String> {
-        Ok(self.all()?.into_iter().filter(Task::is_active).collect())
+        let tasks = match self.database()? {
+            Some(database) => database
+                .active_tasks()?
+                .into_iter()
+                .map(|(name, text)| Task::parse(&name, &text))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => self.all()?,
+        };
+        Ok(tasks.into_iter().filter(Task::is_active).collect())
     }
 
     /// The caller's task: the named file, else the one active task whose agent runs at the caller's address.
