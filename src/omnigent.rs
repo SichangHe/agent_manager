@@ -331,7 +331,27 @@ fn holds_path() -> std::path::PathBuf {
     crate::settings::state_dir().join("amh-holds.json")
 }
 
+thread_local! {
+    /// The holds file as this thread read it, and when; reused for a second, so one listing reads it once. `set_hold` clears it.
+    static HOLDS: std::cell::RefCell<Option<(Instant, serde_json::Map<String, Value>)>> = const { std::cell::RefCell::new(None) };
+}
+
 fn holds() -> serde_json::Map<String, Value> {
+    let fresh = HOLDS.with_borrow(|known| {
+        known
+            .as_ref()
+            .filter(|(at, _)| at.elapsed() < Duration::from_secs(1))
+            .map(|(_, holds)| holds.clone())
+    });
+    if let Some(known) = fresh {
+        return known;
+    }
+    let read = read_holds();
+    HOLDS.set(Some((Instant::now(), read.clone())));
+    read
+}
+
+fn read_holds() -> serde_json::Map<String, Value> {
     std::fs::read_to_string(holds_path())
         .ok()
         .and_then(|text| serde_json::from_str::<Value>(&text).ok())
@@ -350,7 +370,8 @@ pub fn held(address: &str) -> Option<String> {
 /// Hold the agent at `address` with `reason`, or release it when `reason` is `None`.
 pub fn set_hold(address: &str, reason: Option<&str>) -> Result<(), String> {
     let id = session(address)?;
-    let mut all = holds();
+    HOLDS.set(None);
+    let mut all = read_holds();
     match reason {
         Some(reason) => {
             all.insert(id.to_owned(), json!(reason));

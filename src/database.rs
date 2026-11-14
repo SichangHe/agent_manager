@@ -34,6 +34,13 @@ impl Database {
     }
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(error)?;
+        // A reader that closes last would otherwise copy the whole WAL back on exit (880 writes in one `agent list`); writers' automatic checkpoints keep the WAL bounded.
+        connection
+            .set_db_config(
+                rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+                true,
+            )
+            .map_err(error)?;
         connection
             .busy_timeout(Duration::from_secs(30))
             .map_err(error)?;
