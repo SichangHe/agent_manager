@@ -1181,6 +1181,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("todo", "wait") => {
             let _lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
+            let dropped = many("clear_for")
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            if !dropped.is_empty() {
+                requests::unwait(&mut task, need("id"), &dropped)?;
+            }
             let blockers = many("blocker")
                 .into_iter()
                 .map(str::to_owned)

@@ -368,6 +368,25 @@ pub fn wait(task: &mut Task, id: &str, blockers: &[String], all: &[Task]) -> Res
     Ok(())
 }
 
+/// Drop the item dependencies `drop` of one added request; waits in words and dates stay.
+// 🧑 "I do think incorrect links. Of block on dependencies should be able to be removed."
+pub fn unwait(task: &mut Task, id: &str, drop: &[String]) -> Result<(), String> {
+    let mut records = sync(task)?;
+    let request = records
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or("amh: no such request")?;
+    if request.stage != Stage::Added {
+        return Err("amh: only added requests may change dependencies".to_owned());
+    }
+    if let Some(missing) = drop.iter().find(|d| !request.blockers.contains(d)) {
+        return Err(format!("amh: {id} does not wait for {missing}"));
+    }
+    request.blockers.retain(|b| !drop.contains(b));
+    write(task, &records);
+    Ok(())
+}
+
 /// Record messages in markdown before delivery, so an interrupted action can retry them.
 pub fn queue(task: &mut Task, to: &str, message: &str) -> Result<(), String> {
     let mut queued = notifications(task)?;
@@ -908,6 +927,25 @@ mod tests {
         assert!(ready_items(&owner).contains(&item.as_str()));
         let owner = Task::parse(&owner.name, &owner.render())?;
         assert_eq!(ready_items(&owner).len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn a_wrong_item_dependency_can_be_dropped_keeping_other_waits() -> Result<(), String> {
+        let mut owner = task("owner.md", false);
+        let mut dependency = task("dependency.md", true);
+        let waiting = sync(&mut owner)?[0].id.clone();
+        let blocker = sync(&mut dependency)?[0].id.clone();
+        let item = owner.items[0].clone();
+        let all = [owner.clone(), dependency.clone()];
+        wait(&mut owner, &waiting, std::slice::from_ref(&blocker), &all)?;
+        wait_on(&mut owner, &waiting, Some(("someone", chrono::Utc::now())))?;
+        assert!(unwait(&mut owner, &waiting, &["other.md#9".to_owned()]).is_err());
+        unwait(&mut owner, &waiting, std::slice::from_ref(&blocker))?;
+        let blockers = &sync(&mut owner)?[0].blockers;
+        assert!(!blockers.contains(&blocker) && blockers.iter().any(|b| b.starts_with(EXTERNAL)));
+        wait_on(&mut owner, &waiting, None)?;
+        assert!(ready_items(&owner).contains(&item.as_str()));
         Ok(())
     }
 
