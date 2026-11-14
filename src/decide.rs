@@ -15,7 +15,8 @@ pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
 // 🧑 "I think amh should say to add TODO and attach, if any, additional ack" ... "let agents answer quick questions directly immediately instead of adding to TODO"
-pub const ACCEPT: &str = "from the human: add each new request as an open item at once with `amh tell human --add 'ITEM'`; answer a quick question directly; a standing rule goes into the suitable instructions, not an item";
+// 🧑 "Instructions should say anything that agents do not respond immediately should be registered as pending items. Or rather, any task."
+pub const ACCEPT: &str = "from the human: anything you do not answer in this reply, i.e. any task, is an open item: add it at once with `amh tell human --add 'ITEM'`; a standing rule goes into the suitable instructions";
 pub const ADD_REMINDER: &str =
     "\nAdd every still-open request to your open items; answer a quick question directly instead.";
 
