@@ -962,7 +962,8 @@ pub fn approved_text(task: &Task, approved: &[String]) -> String {
 
 /// The periodic nudge to the human manager.
 // 🧑 "Email compression instructions no longer apply / What really is needed is the human manager should consolidate agents status once in a while and tell human what to handle next and prune any trifle that does not really need the human"
-pub const CONSOLIDATE_TEXT: &str = "Time to consolidate agent status: new agent messages reached the human since the last time. The human: \"What really is needed is the human manager should consolidate agents status once in a while and tell human what to handle next and prune any trifle that does not really need the human\". This reminder is automatic.";
+// 🧑 "Coordinate with human manager to actually use the priority, when the human manager. Reprioritizes. Which should happen once in a while."
+pub const CONSOLIDATE_TEXT: &str = "Time to consolidate agent status: new agent messages reached the human since the last time. The human: \"What really is needed is the human manager should consolidate agents status once in a while and tell human what to handle next and prune any trifle that does not really need the human\". First rerank with `amh task priority` (see your instructions), then send the what-next list in that order. This reminder is automatic.";
 
 /// The names of the config tables under `group`, e.g. the `NAME` of every `[job.NAME]`.
 pub fn table_names(settings: &BTreeMap<String, String>, group: &str) -> Vec<String> {
