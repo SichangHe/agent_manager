@@ -53,7 +53,8 @@ impl Database {
                  state TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending', 'sent')),
                  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
              );
-             CREATE TABLE IF NOT EXISTS records (name TEXT PRIMARY KEY, text TEXT NOT NULL);"
+             CREATE TABLE IF NOT EXISTS records (name TEXT PRIMARY KEY, text TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS events_by_subject ON events(subject, id);"
         ).map_err(error)?;
         // When a failed message may be tried again (Unix seconds); added after the table existed.
         let has_retry: bool = connection

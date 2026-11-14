@@ -133,11 +133,23 @@ fn main() -> ExitCode {
             }
         }
     }
+    let began = std::time::Instant::now();
     let code = actions::run(&values).unwrap_or_else(|message| {
         eprintln!("{message}");
         1
     });
-    log::record(&line, &format!("exit={code}"));
+    let ms =
+        |us: &std::sync::atomic::AtomicU64| us.load(std::sync::atomic::Ordering::Relaxed) / 1000;
+    log::record(
+        &line,
+        &format!(
+            "exit={code} duration_ms={} lock_wait_ms={} lock_hold_ms={} build={}",
+            began.elapsed().as_millis(),
+            ms(&store::LOCK_WAIT_US),
+            ms(&store::LOCK_HOLD_US),
+            env!("AMH_BUILD")
+        ),
+    );
     ExitCode::from(code)
 }
 

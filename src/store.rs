@@ -45,6 +45,25 @@ fn untouched_since(path: &std::path::Path, since: Option<i128>) -> bool {
         .is_some_and(|at| (at.as_nanos() as i128) < since)
 }
 
+/// Microseconds this process waited for the writer lock and held it, over all its acquisitions.
+// The rework design's stage 0: "log `duration_ms`, `lock_wait_ms`, `lock_hold_ms`, build id in each `amh-actions.log` exit line; clear the lock file's holder on release"
+pub static LOCK_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static LOCK_HOLD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The held writer lock; dropping it clears the holder line and counts the hold time.
+pub struct Held {
+    file: File,
+    since: std::time::Instant,
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        let _ = self.file.set_len(0);
+        let held_us = self.since.elapsed().as_micros() as u64;
+        LOCK_HOLD_US.fetch_add(held_us, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Milliseconds spent acquiring the writer lock and repairing derived state.
 pub struct LockTiming {
     pub acquire_ms: f64,
@@ -61,12 +80,12 @@ impl Store {
     }
 
     /// Serialize every writer of the root through one lock file, held until the returned file is dropped.
-    pub fn lock(&self) -> Result<File, String> {
+    pub fn lock(&self) -> Result<Held, String> {
         self.lock_timed().map(|(lock, _)| lock)
     }
 
     /// Acquire the same writer lock and report its preparation costs.
-    pub fn lock_timed(&self) -> Result<(File, LockTiming), String> {
+    pub fn lock_timed(&self) -> Result<(Held, LockTiming), String> {
         let began = std::time::Instant::now();
         let failed = |error: std::io::Error| {
             format!("amh: cannot lock {}: {error}", self.state_dir.display())
@@ -103,6 +122,11 @@ impl Store {
             }
         }
         let acquire_ms = began.elapsed().as_secs_f64() * 1000.0;
+        LOCK_WAIT_US.fetch_add(
+            began.elapsed().as_micros() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        let held_from = std::time::Instant::now();
         let importing = std::time::Instant::now();
         let me: Vec<String> = std::env::args().take(4).collect();
         lock.set_len(0).map_err(failed)?;
@@ -195,7 +219,10 @@ impl Store {
         self.export(&database, since)?;
         database.set_record("export:stamp", &next_stamp.to_string())?;
         Ok((
-            lock,
+            Held {
+                file: lock,
+                since: held_from,
+            },
             LockTiming {
                 acquire_ms,
                 import_ms,
