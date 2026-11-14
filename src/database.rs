@@ -55,6 +55,21 @@ impl Database {
              );
              CREATE TABLE IF NOT EXISTS records (name TEXT PRIMARY KEY, text TEXT NOT NULL);"
         ).map_err(error)?;
+        // When a failed message may be tried again (Unix seconds); added after the table existed.
+        let has_retry: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('messages') WHERE name = 'retry_at')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !has_retry {
+            connection
+                .execute_batch(
+                    "ALTER TABLE messages ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0",
+                )
+                .map_err(error)?;
+        }
         Ok(Self(connection))
     }
 
@@ -357,7 +372,7 @@ impl Database {
     /// Channel `agent`: `text` is a notification. Channel `human`: `text` names a stored message. Channel `block`: `text` contains a typed or guest-mail block. `target` names the owning task.
     pub fn pending_messages(&self, channel: &str) -> Result<Vec<Value>, String> {
         let mut query = self.0.prepare(
-            "SELECT id, channel, target, text, source, state, attempts, last_error FROM messages WHERE state = 'pending' AND channel = ?1 ORDER BY id"
+            "SELECT id, channel, target, text, source, state, attempts, last_error, retry_at FROM messages WHERE state = 'pending' AND channel = ?1 ORDER BY id"
         ).map_err(error)?;
         query
             .query_map([channel], |row| {
@@ -365,12 +380,27 @@ impl Database {
                     "id": row.get::<_, i64>(0)?, "channel": row.get::<_, String>(1)?,
                     "target": row.get::<_, String>(2)?, "text": row.get::<_, String>(3)?,
                     "source": row.get::<_, String>(4)?, "state": row.get::<_, String>(5)?,
-                    "attempts": row.get::<_, i64>(6)?, "last_error": row.get::<_, String>(7)?
+                    "attempts": row.get::<_, i64>(6)?, "last_error": row.get::<_, String>(7)?,
+                    "retry_at": row.get::<_, i64>(8)?
                 }))
             })
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
+    }
+
+    /// Record a failed delivery and when to try again: after 1 min, doubling each attempt, at most 6 h.
+    // The main manager: notices to retired tasks were "retried about every 1.2 s with no end, each storing a 'message failed' event: 1.93 M events today"
+    pub fn defer_message(&self, id: i64, failure: &str, now_s: i64) -> Result<(), String> {
+        self.0
+            .execute(
+                "UPDATE messages SET attempts = attempts + 1, last_error = ?1,
+                 retry_at = ?2 + MIN(60 * (1 << MIN(attempts, 9)), 21600)
+                 WHERE id = ?3 AND state = 'pending'",
+                params![failure, now_s, id],
+            )
+            .map_err(error)?;
+        Ok(())
     }
 
     /// Record a delivery result. An interrupted external send may retry the same stable ID.

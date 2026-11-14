@@ -91,7 +91,9 @@ pub fn maintain(store: &Store) -> Result<Vec<String>, String> {
     let now = chrono::Utc::now();
     let all = store.all()?;
     let mut failed = Vec::new();
-    for task in store.active()? {
+    // A task with no live Omnigent agent gets no reminders: they could never arrive.
+    let live = |task: &Task| task.address().starts_with(omnigent::PREFIX);
+    for task in store.active()?.into_iter().filter(live) {
         let name = task.name.clone();
         if let Err(error) = maintain_task(store, &database, &all, task, now) {
             failed.push(format!("{name}: {error}"));
@@ -208,22 +210,42 @@ pub fn deliver_requests(settings: &Settings, store: &Store) -> Result<(), String
             .as_str()
             .ok_or("amh: notification lacks owner")?;
         let id = message["id"].as_i64().ok_or("amh: notification lacks ID")?;
-        let delivered = agents::address_of(store, to)
-            .and_then(|address| omnigent::send(settings, &address, text).map(|()| address));
-        if let Err(error) = delivered {
-            database.finish_message(id, false, &error)?;
-            crate::log::event(
-                &store.state_dir,
-                "message failed",
-                source,
-                serde_json::json!({"to": to, "text": text, "error": error}),
-            )?;
-            failed.push(format!("{source}: {error}"));
+        let now_s = chrono::Utc::now().timestamp();
+        if message["retry_at"].as_i64().unwrap_or_default() > now_s {
             continue;
         }
-        if let Ok(address) = delivered {
-            awakened.push(address);
-        }
+        // A notice for a task with no live Omnigent agent (retired, elsewhere, closed) can never arrive: it is dropped once, with one event.
+        let target = match to.ends_with(".md") {
+            true => store.load(to).ok(),
+            false => None,
+        };
+        let address = agents::address_of(store, to).unwrap_or_default();
+        let dead = !address.starts_with(omnigent::PREFIX)
+            || target.as_ref().is_some_and(|task| task.status() == "done");
+        let kind = if dead {
+            "message dropped"
+        } else {
+            match omnigent::send(settings, &address, text) {
+                Ok(()) => {
+                    awakened.push(address.clone());
+                    "message delivered"
+                }
+                Err(error) => {
+                    // One event per message: the first failure; later attempts only back off.
+                    if message["attempts"].as_i64().unwrap_or_default() == 0 {
+                        crate::log::event(
+                            &store.state_dir,
+                            "message failed",
+                            source,
+                            serde_json::json!({"to": to, "text": text, "error": error}),
+                        )?;
+                    }
+                    database.defer_message(id, &error, now_s)?;
+                    failed.push(format!("{source}: {error}"));
+                    continue;
+                }
+            }
+        };
         let _lock = store.lock()?;
         let mut task = store.load(source)?;
         let mut remaining = requests::notifications(&task)?;
@@ -235,9 +257,9 @@ pub fn deliver_requests(settings: &Settings, store: &Store) -> Result<(), String
         }
         requests::set_notifications(&mut task, remaining);
         let event = crate::log::event_value(
-            "message delivered",
+            kind,
             source,
-            serde_json::json!({"id":id,"to":to,"text":text}),
+            serde_json::json!({"id":id,"to":to,"text":text,"address":address}),
         );
         database.complete_message(id, &[(task.name.clone(), task.render())], &[event])?;
         store.refresh_exports()?;
@@ -1600,6 +1622,72 @@ pub fn run(values: &Value) -> Result<u8, String> {
 mod maintain_tests {
     use crate::store::Store;
     use crate::taskfile;
+
+    #[test]
+    fn undeliverable_notices_drop_once_and_failures_back_off()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!(
+            "amh-notices-{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir(&root)?;
+        let store = Store {
+            root: root.clone(),
+            state_dir: root.join("state"),
+        };
+        for (name, at) in [
+            ("retired.md", "retired"),
+            ("live.md", "omnigent://nowhere"),
+            ("src.md", "omnigent://src"),
+        ] {
+            taskfile::write(
+                &root.join(name),
+                &format!("---\nstatus: running\nrunat: {at}\n---\n"),
+            )?;
+        }
+        taskfile::write(
+            &root.join("TODO.md"),
+            "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+        )?;
+        {
+            let _lock = store.lock()?;
+            let mut source = store.load("src.md")?;
+            crate::requests::queue(&mut source, "retired.md", "to nobody")?;
+            crate::requests::queue(&mut source, "live.md", "to a dead port")?;
+            store.save(&source)?;
+        }
+        // Nothing listens on port 9, so every send fails at once.
+        let settings =
+            super::Settings::from([("omnigent.url".to_owned(), "http://127.0.0.1:9".to_owned())]);
+        for _ in 0..3 {
+            let _ = super::deliver_requests(&settings, &store);
+        }
+        let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        let pending = database.pending_messages("agent")?;
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            (
+                pending[0]["target"].as_str(),
+                pending[0]["attempts"].as_i64()
+            ),
+            (Some("live.md"), Some(1))
+        );
+        let kinds: Vec<String> = database
+            .events()?
+            .iter()
+            .filter_map(|event| event["kind"].as_str().map(str::to_owned))
+            .filter(|kind| kind.starts_with("message ") && kind != "message queued")
+            .collect();
+        assert_eq!(kinds, ["message dropped", "message failed"]);
+        assert!(
+            !crate::requests::notifications(&store.load("src.md")?)?
+                .iter()
+                .any(|n| n["to"] == "retired.md")
+        );
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(())
+    }
 
     #[test]
     fn closing_a_task_releases_tasks_blocked_on_it_and_other_blocks_get_reminders()
