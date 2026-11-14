@@ -1479,7 +1479,7 @@ fn every(name: &'static str, every: Duration, work: fn(&Settings, &Store) -> Dur
 
 /// Archive old events and requests daily; retried after an hour when it fails.
 fn archive_once(_settings: &Settings, store: &Store) -> Duration {
-    let mut break_wait = Duration::from_secs(3600);
+    let mut wait = Duration::from_secs(3600);
     let phase = Instant::now();
     let archived = store.lock().and_then(|_lock| {
         let mut database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
@@ -1493,11 +1493,11 @@ fn archive_once(_settings: &Settings, store: &Store) -> Duration {
         Ok(count)
     });
     match archived {
-        Ok(_) => break_wait = ARCHIVE_EVERY,
+        Ok(_) => wait = ARCHIVE_EVERY,
         Err(error) => log(&format!("archival failed: {error}")),
     }
     log_elapsed("archive", phase);
-    break_wait
+    wait
 }
 
 /// Commit and push the work-log Markdown.
