@@ -1488,7 +1488,7 @@ fn archive_once(_settings: &Settings, store: &Store) -> Duration {
             &store.root.join("archive"),
             chrono::Utc::now(),
         )?;
-        let count = crate::archive::archive_requests(&store, chrono::Utc::now())?;
+        let count = crate::archive::archive_requests(store, chrono::Utc::now())?;
         store.refresh_exports()?;
         Ok(count)
     });
