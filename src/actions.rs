@@ -773,37 +773,69 @@ fn short(values: &Value) -> Result<u8, String> {
             let store = Store::new(&settings);
             let at = store.load(name)?.address().to_owned();
             let n = text("lines").and_then(|n| n.parse().ok()).unwrap_or(60);
-            let read =
-                |file: &str| fs::read_to_string(store.state_dir.join(file)).unwrap_or_default();
-            say(&work::task_log(
-                &read("amh-watch.log"),
-                &read("amh-actions.log"),
-                name,
-                &at,
-                n,
-            ));
-            let events = if store.state_dir.join("amh.sqlite3").exists() {
-                crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
-                    .events()?
-                    .into_iter()
-                    .map(|event| event.to_string())
-                    .collect::<Vec<_>>()
-            } else {
-                read("amh-events.jsonl")
-                    .lines()
-                    .map(str::to_owned)
-                    .collect()
+            // Only the end of each log is read: 4 MB, or 64 MB when that holds fewer than `n` lines about the task.
+            // 🧑 "Still unacceptably slow. Should be some ms. Why so slow"
+            let read = |bytes: u64| {
+                let tail = |file: &str| tail(&store.state_dir.join(file), bytes);
+                work::task_log(
+                    &tail("amh-watch.log"),
+                    &tail("amh-actions.log"),
+                    name,
+                    &at,
+                    n,
+                )
             };
-            let matching: Vec<&String> = events
-                .iter()
-                .filter(|line| line.contains(name) || line.contains(&at))
-                .collect();
-            for line in matching.iter().skip(matching.len().saturating_sub(n)) {
-                say(&format!("{line}\n"));
+            let mut found = read(4 << 20);
+            if found.lines().count() < n {
+                found = read(64 << 20);
+            }
+            say(&found);
+            let database = store.state_dir.join("amh.sqlite3");
+            if database.exists() {
+                for line in crate::database::Database::open(&database)?.task_events(name, n)? {
+                    say(&format!("{line}\n"));
+                }
             }
             Ok(0)
         }
         other => Err(format!("amh: no short command {other}")),
+    }
+}
+
+/// Serve agent states from the watcher's last scan (refreshed every minute) instead of one Omnigent request per session; a note when that scan is over a minute old.
+// 🧑 "Still unacceptably slow. Should be some ms. Why so slow"
+fn saved_scan_note(store: &Store) -> String {
+    match omnigent::use_saved_scan(&store.state_dir) {
+        Some(age_s) if age_s > 60 => {
+            format!("(agent states from the watcher's scan {age_s} s ago)\n")
+        }
+        Some(_) => String::new(),
+        None => "(no watcher scan saved; asking Omnigent per session)\n".to_owned(),
+    }
+}
+
+/// The last `bytes` of a file, from its first whole line; empty when it cannot be read.
+fn tail(path: &Path, bytes: u64) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut file) = fs::File::open(path) else {
+        return String::new();
+    };
+    let size = file.metadata().map_or(0, |meta| meta.len());
+    let start = size.saturating_sub(bytes);
+    let mut raw = Vec::new();
+    if file
+        .seek(SeekFrom::Start(start))
+        .and_then(|_| file.read_to_end(&mut raw))
+        .is_err()
+    {
+        return String::new();
+    }
+    let text = String::from_utf8_lossy(&raw).into_owned();
+    match start {
+        0 => text,
+        _ => text
+            .split_once('\n')
+            .map_or(String::new(), |(_, rest)| rest.to_owned()),
     }
 }
 
@@ -1385,6 +1417,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             return Ok(u8::from(!findings.is_empty()));
         }
         ("agent", "problems") => {
+            say(&saved_scan_note(&store));
             let found = agents::problems(&settings, &store)?;
             for (task, problem, evidence) in &found {
                 say(&(work::problem_line(task, *problem, evidence) + "\n"));
@@ -1392,6 +1425,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             return Ok(if found.is_empty() { 0 } else { 3 });
         }
         ("agent", "list") => {
+            say(&saved_scan_note(&store));
             for task in store.active()? {
                 let (state, evidence) = match task.address() {
                     "retired" => ("retired", String::new()),

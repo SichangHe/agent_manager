@@ -1339,6 +1339,9 @@ fn scan_agents() {
                 .map(|task| task.address().to_owned())
                 .collect();
             omnigent::begin_scan(&settings, &addresses);
+            if let Err(error) = omnigent::save_scan(&store.state_dir) {
+                log(&error);
+            }
             let scanned = answer_prompts(&settings, &store)
                 .and_then(|()| scanner.nudge(&settings, &store))
                 .and_then(|()| chase_answers(&settings, &store));

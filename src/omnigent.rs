@@ -600,6 +600,45 @@ pub fn forget(address: &str) {
     });
 }
 
+/// Where the watcher leaves its latest scan for the CLI: `{"at": EPOCH_S, "statuses": {ADDRESS: [STATE, EVIDENCE]}}`.
+fn scan_file(state_dir: &std::path::Path) -> std::path::PathBuf {
+    state_dir.join("amh-agent-states.json")
+}
+
+/// Save this scan's statuses for `use_saved_scan`; the watcher calls it after `begin_scan`.
+// 🧑 "Still unacceptably slow. Should be some ms. Why so slow"
+pub fn save_scan(state_dir: &std::path::Path) -> Result<(), String> {
+    let statuses = SCAN.with_borrow(|scan| scan.clone()).unwrap_or_default();
+    let now_s = chrono::Utc::now().timestamp();
+    let text = json!({"at": now_s, "statuses": statuses}).to_string();
+    let temp = scan_file(state_dir).with_extension("tmp");
+    std::fs::write(&temp, text)
+        .and_then(|()| std::fs::rename(&temp, scan_file(state_dir)))
+        .map_err(|error| format!("cannot save agent states: {error}"))
+}
+
+/// Answer `status` from the watcher's last scan instead of asking Omnigent per session; returns its age in seconds, or `None` without one.
+pub fn use_saved_scan(state_dir: &std::path::Path) -> Option<i64> {
+    let saved: Value = serde_json::from_slice(&std::fs::read(scan_file(state_dir)).ok()?).ok()?;
+    let known: BTreeMap<String, (&'static str, String)> = saved["statuses"]
+        .as_object()?
+        .iter()
+        .filter_map(|(address, pair)| {
+            let state = match pair[0].as_str()? {
+                "running" => "running",
+                "ready" => "ready",
+                "stuck" => "stuck",
+                "error" => "error",
+                "paused" => "paused",
+                _ => "missing",
+            };
+            Some((address.clone(), (state, pair[1].as_str()?.to_owned())))
+        })
+        .collect();
+    SCAN.set(Some(known));
+    Some(chrono::Utc::now().timestamp() - saved["at"].as_i64()?)
+}
+
 /// Stop answering `status` from the scan's statuses.
 pub fn end_scan() {
     SCAN.set(None);

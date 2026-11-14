@@ -441,6 +441,28 @@ impl Database {
         Ok((text, last))
     }
 
+    /// The newest `n` events about task `name` or its requests (`NAME#N`), oldest first, through the subject index.
+    // 🧑 "Still unacceptably slow. Should be some ms. Why so slow"
+    pub fn task_events(&self, name: &str, n: usize) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare(
+                "SELECT json_object('id', id, 'time', time, 'actor', actor, 'kind', kind, 'subject', subject, 'data', json(data))
+                 FROM (SELECT * FROM events WHERE subject = ?1
+                       UNION ALL SELECT * FROM events WHERE subject >= ?2 AND subject < ?3
+                       ORDER BY id DESC LIMIT ?4)
+                 ORDER BY id",
+            )
+            .map_err(error)?;
+        let rows = query
+            .query_map(
+                params![name, format!("{name}#"), format!("{name}$"), n as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)
+    }
+
     pub fn events(&self) -> Result<Vec<Value>, String> {
         let mut query = self
             .0
