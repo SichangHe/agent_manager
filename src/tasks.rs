@@ -256,6 +256,25 @@ pub fn pin(task: &mut Task, section: &str) -> Result<(), String> {
     })
 }
 
+/// The task's priority for the clients' ordering, lower first; the frontmatter field `priority`.
+pub const PRIORITY: &str = "priority";
+
+/// Task tags with their priorities, lower first, tasks without one last, ties by tag.
+pub fn by_priority(tasks: Vec<Task>) -> Vec<(String, Option<i64>)> {
+    // e.g. 1000 a, 2000 b, unset c
+    let mut ranked: Vec<(String, Option<i64>)> = tasks
+        .iter()
+        .map(|task| {
+            (
+                task.tag().to_owned(),
+                task.field(PRIORITY).and_then(|n| n.parse().ok()),
+            )
+        })
+        .collect();
+    ranked.sort_by(|a, b| (a.1.is_none(), a.1, &a.0).cmp(&(b.1.is_none(), b.1, &b.0)));
+    ranked
+}
+
 /// The human's own task: items the human owns, which agents wait on with `--for human.md#N`; no agent runs it.
 // 🧑 "First they need to create a task and let that someone own it, and block on this task, e.g. the human should have 67 tasks or something like that"
 pub const HUMAN_TASK: &str = "human.md";

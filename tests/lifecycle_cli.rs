@@ -679,3 +679,55 @@ fn waits_need_an_item_or_date_and_the_human_owns_items() -> Result<(), Box<dyn s
     assert!(fs::read_to_string(root.join("a.md"))?.contains("blocked_on: until 2099-01-01"));
     Ok(())
 }
+
+#[test]
+fn priorities_order_tasks_for_clients() -> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-priority-{}-{now}", std::process::id())));
+    fs::create_dir_all(workspace.0.join("state"))?;
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+    )?;
+    for name in ["a", "b", "c", "d"] {
+        fs::write(
+            root.join(format!("{name}.md")),
+            format!(
+                "---\nstatus: running\nrunat: omnigent://{name}\npending_task_items: []\n---\n"
+            ),
+        )?;
+    }
+    workspace.ok(&["task", "priority", "c", "1000"])?;
+    workspace.ok(&["task", "priority", "a", "2000"])?;
+    workspace.ok(&["task", "priority", "d", "1500"])?;
+    workspace.ok(&["task", "priority", "d", "none"])?;
+    workspace.ok(&["task", "priority", "d", "1500"])?;
+    assert!(
+        workspace
+            .run(&["task", "priority", "d", "high"])?
+            .status
+            .code()
+            != Some(0)
+    );
+    assert_eq!(
+        workspace.ok(&["task", "priorities", "--json"])?,
+        "{\"c\":1000,\"d\":1500,\"a\":2000,\"b\":null}\n"
+    );
+    assert_eq!(
+        workspace.ok(&["task", "priorities"])?,
+        "1000 c\n1500 d\n2000 a\n- b\n"
+    );
+    Ok(())
+}

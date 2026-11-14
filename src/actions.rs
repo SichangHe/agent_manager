@@ -1362,6 +1362,47 @@ pub fn run(values: &Value) -> Result<u8, String> {
             store.place(&task)?;
             String::new()
         }
+        // 🧑 "I want the. Human manager to be able to assign priority numbers. Probably integer values, but with large gaps in between. To accommodate for finer ranking, and the clients would display them in priority orders."
+        ("task", "priority") => {
+            let _lock = store.lock()?;
+            let mut task = store.load(need("task"))?;
+            let given = need("priority");
+            task.fields.retain(|(key, _)| key != tasks::PRIORITY);
+            if given != "none" {
+                let n: i64 = given.parse().map_err(|_| {
+                    format!("amh: priority must be a whole number or `none`, not `{given}`")
+                })?;
+                task.fields
+                    .push((tasks::PRIORITY.to_owned(), n.to_string()));
+            }
+            store.save(&task)?;
+            String::new()
+        }
+        ("task", "priorities") => {
+            let ranked = tasks::by_priority(store.active()?);
+            match flag("json") {
+                // Written by hand so the keys keep priority order.
+                true => {
+                    let pairs: Vec<String> = ranked
+                        .iter()
+                        .map(|(tag, priority)| {
+                            let n = priority.map_or("null".to_owned(), |n| n.to_string());
+                            format!("{}:{n}", serde_json::Value::from(tag.as_str()))
+                        })
+                        .collect();
+                    format!("{{{}}}\n", pairs.join(","))
+                }
+                false => ranked
+                    .iter()
+                    .map(|(tag, priority)| {
+                        format!(
+                            "{} {tag}\n",
+                            priority.map_or("-".to_owned(), |n| n.to_string())
+                        )
+                    })
+                    .collect(),
+            }
+        }
         ("task", "place") => {
             let _lock = store.lock()?;
             let mut task = store.load(need("task"))?;

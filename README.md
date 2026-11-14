@@ -29,6 +29,7 @@ one program for agents and managers; usage lives in `amh --help`, not here
 records, all under the work-log root (`work_logs` in `env.toml`)
 - task file `NAME.md`
     - frontmatter: `status` `runat` `managerat` `is_manager` `tool` `pending_task_items`
+        - `priority`: whole number, lower first, set by `amh task priority TASK N|none`; clients read `amh task priorities --json` (tag → number or null, in order)
         - `runat`: agent address `omnigent://ID`, or `retired`
         - `status`: `running` `long_running` `blocked` (+ `blocked_on`) `done`
         - item starting `🧑 ` = the human's request
