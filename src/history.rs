@@ -124,7 +124,11 @@ fn index_entries(bytes: &[u8]) -> Vec<(String, String, u8, String)> {
 /// Commit changed Markdown to the current branch, merge and push origin, and move the local branch forward.
 ///
 /// Files that are tracked, then removed from the shared index by someone, are left alone.
-pub fn commit_and_push(root: &Path) -> Result<Outcome, String> {
+/// `hold` takes the store lock for building and recording the commit, so no export rewrites a file meanwhile; fetching and pushing run without it.
+pub fn commit_and_push<L>(
+    root: &Path,
+    hold: impl FnOnce() -> Result<L, String>,
+) -> Result<Outcome, String> {
     let shared = Repo {
         root: root.to_owned(),
         index: None,
@@ -138,6 +142,7 @@ pub fn commit_and_push(root: &Path) -> Result<Outcome, String> {
     let git_dir = PathBuf::from(shared.text(&["rev-parse", "--absolute-git-dir"])?);
     let private = shared.with_index(git_dir.join("amh.index"));
     let mut outcome = Outcome::default();
+    let held = hold()?;
     let ours = match own_commit(&shared, &private, &head, &mut outcome)? {
         // The branch moves before the index so a lost race never leaves the index ahead of HEAD.
         Some(commit) if move_branch(&shared, &branch, &commit, &head) => {
@@ -150,6 +155,7 @@ pub fn commit_and_push(root: &Path) -> Result<Outcome, String> {
         }
         None => head,
     };
+    drop(held);
     if shared.text(&["remote", "get-url", REMOTE]).is_err() {
         return Ok(outcome);
     }
@@ -691,7 +697,7 @@ mod tests {
         put(&a, "code.txt", "edited\n");
         sh(&a, &["add", "code.txt"]);
         fs::write(a.join("huge.md"), vec![b'x'; (MAX_BYTES + 1) as usize]).unwrap();
-        let out = commit_and_push(&a).unwrap();
+        let out = commit_and_push(&a, || Ok(())).unwrap();
         assert!(out.committed && out.pushed);
         assert_eq!(out.oversize, vec![("huge.md".to_owned(), MAX_BYTES + 1)]);
         let files = sh(&origin, &["ls-tree", "-r", "--name-only", "main"]);
@@ -710,7 +716,7 @@ mod tests {
             sh(&origin, &["rev-parse", "main"])
         );
         assert_eq!(sh(&a, &["status", "--porcelain", "-uno"]), "M  code.txt");
-        assert!(!commit_and_push(&a).unwrap().committed);
+        assert!(!commit_and_push(&a, || Ok(())).unwrap().committed);
         fs::remove_dir_all(top).unwrap();
     }
 
@@ -719,7 +725,7 @@ mod tests {
         let (top, origin, a, _b) = setup("rm");
         sh(&a, &["rm", "-q", "--cached", "t.md"]);
         put(&a, "t.md", "changed\n");
-        commit_and_push(&a).unwrap();
+        commit_and_push(&a, || Ok(())).unwrap();
         assert!(
             sh(&origin, &["ls-tree", "-r", "--name-only", "main"]).contains("t.md"),
             "history keeps the file"
@@ -739,7 +745,7 @@ mod tests {
         // a: its own committed append, plus an uncommitted code edit and an uncommitted edit of a file b changed.
         put(&a, "t.md", "one\ntwo\nthree\nfrom a\n");
         put(&a, "code.txt", "local edit\n");
-        let out = commit_and_push(&a).unwrap();
+        let out = commit_and_push(&a, || Ok(())).unwrap();
         assert!(out.pushed);
         let merged = sh(&origin, &["show", "main:t.md"]);
         assert!(
@@ -775,7 +781,7 @@ mod tests {
         sh(&b, &["push", "-q", "origin", "main"]);
         // a's own file `new.md` is uncommitted-and-committed by amh; t.md is edited locally at its top.
         put(&a, "t.md", "zero\none\ntwo\nthree\n");
-        let out = commit_and_push(&a).unwrap();
+        let out = commit_and_push(&a, || Ok(())).unwrap();
         assert!(out.pushed);
         assert_eq!(
             fs::read_to_string(a.join("t.md")).unwrap().lines().count(),
@@ -812,7 +818,7 @@ mod tests {
             &FM.replace("running", "done")
                 .replace("body\n", "body\nmore\n"),
         );
-        let out = commit_and_push(&a).unwrap();
+        let out = commit_and_push(&a, || Ok(())).unwrap();
         let merged = sh(&origin, &["show", "main:f.md"]);
         assert_eq!(merged.matches("status:").count(), 1, "{merged}");
         assert!(merged.contains("status: done") && merged.contains("more"));
@@ -833,7 +839,7 @@ mod tests {
         put(&b, "t.md", "one\ntwo\nthree\nfrom b\n");
         sh(&b, &["commit", "-qam", "b"]);
         sh(&b, &["push", "-q", "origin", "main"]);
-        commit_and_push(&a).unwrap();
+        commit_and_push(&a, || Ok(())).unwrap();
         let files = sh(&origin, &["ls-tree", "-r", "--name-only", "main"]);
         assert!(
             files.contains("202611/t.md") && !files.lines().any(|l| l == "t.md"),
@@ -851,7 +857,7 @@ mod tests {
         sh(&a, &["add", "-f", "skip.md"]);
         sh(&a, &["commit", "-qm", "force"]);
         put(&a, "skip.md", "v2\n");
-        commit_and_push(&a).unwrap();
+        commit_and_push(&a, || Ok(())).unwrap();
         assert_eq!(sh(&origin, &["show", "main:skip.md"]), "v2");
         fs::remove_dir_all(top).unwrap();
     }
@@ -864,7 +870,7 @@ mod tests {
             &["remote", "set-url", "origin", "/nonexistent/origin.git"],
         );
         put(&a, "t.md", "changed\n");
-        let err = commit_and_push(&a).unwrap_err();
+        let err = commit_and_push(&a, || Ok(())).unwrap_err();
         assert!(err.contains("amh: git"), "{err}");
         assert!(
             sh(&a, &["log", "--oneline"]).contains("record work logs"),

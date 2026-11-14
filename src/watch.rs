@@ -1456,19 +1456,23 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
     Ok(())
 }
 
-/// Loop forever; the service manager restarts the process if it dies. Returns the exit status when the settings cannot be read.
 /// Run `work` forever on its own thread, one run at a time, sleeping `every` between runs; each run reads the settings afresh.
 // The rework design's stage 0: "Zulip intake, archive and git commit leave the sequential loop: one single-flight thread each, with I/O deadlines"
 fn every(name: &'static str, every: Duration, work: fn(&Settings, &Store) -> Duration) {
     let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
         loop {
-            let wait = match settings::load() {
+            // A panic ends only this run; the thread goes on, so the duty never stops silently.
+            let ran = std::panic::catch_unwind(|| match settings::load() {
                 Ok(settings) => work(&settings, &Store::new(&settings)),
                 Err(error) => {
                     log(&format!("{name}: settings failed: {error}"));
                     every
                 }
-            };
+            });
+            let wait = ran.unwrap_or_else(|_| {
+                log(&format!("{name}: the run panicked; trying again later"));
+                every
+            });
             thread::sleep(wait);
         }
     });
@@ -1508,7 +1512,7 @@ fn commit_once(settings: &Settings, store: &Store) -> Duration {
     let phase = Instant::now();
     // A failed run says nothing about oversize files or merges, so their records stay as they are; one failure streak is told once.
     let mut notices: Vec<(&str, String, String)> = Vec::new();
-    match crate::history::commit_and_push(&store.root) {
+    match crate::history::commit_and_push(&store.root, || store.lock()) {
         Ok(done) => {
             let oversize = oversize_notice(&done.oversize);
             notices.push(("oversize-notified", oversize.clone(), oversize));
@@ -1554,6 +1558,7 @@ fn zulip_once(settings: &Settings, store: &Store) -> Duration {
     MAIL_POLL
 }
 
+/// Loop forever; the service manager restarts the process if it dies. Returns the exit status when the settings cannot be read.
 pub fn run() -> u8 {
     let mut watcher = Watcher {
         failed_at: BTreeMap::new(),
