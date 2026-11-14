@@ -15,7 +15,7 @@ pub const RETRY_S: u64 = 600;
 pub const ANSWER_S: u64 = 900;
 pub const REMINDER_S: u64 = 1800;
 // 🧑 "I think amh should say to add TODO and attach, if any, additional ack" ... "let agents answer quick questions directly immediately instead of adding to TODO"
-pub const ACCEPT: &str = "from the human; at once, add each request as an open item in the human's words, in ONE call: `amh tell human --add 'ITEM'` per item, with any acknowledgement as the message text. Answer a quick question directly instead. A standing rule with no end is no item: write it into the suitable instructions (the project's AGENTS.md), or ask your manager for a rule in the shared agent instructions";
+pub const ACCEPT: &str = "from the human: add each new request as an open item at once with `amh tell human --add 'ITEM'`; answer a quick question directly; a standing rule goes into the suitable instructions, not an item";
 pub const ADD_REMINDER: &str =
     "\nAdd every still-open request to your open items; answer a quick question directly instead.";
 
@@ -291,11 +291,11 @@ pub fn plain_text(block: &[String], remind: bool) -> String {
 /// The message for an agent from a stored human email: the human's text bare, with at most one note after it.
 ///
 /// The subject is kept only for an email that starts a thread; Zulip topics, `amh say` labels, and `Re:` subjects carry no words of the human's.
-/// `has_items`: the task already has open items, so the request is recorded and only the occasional `remind` is added; without items it gets `ACCEPT`.
+/// Every message ends with the one-line `ACCEPT` note.
 /// A message typed in another task's thread than `to_tag` names that thread first.
 // 🧑 "human requests should be sent verbatim"
 // 🧑 "Normal human messages should arrive without things around them, only sometimes with reminders of adding pending items etc."
-pub fn mail_text(name: &str, stored: &str, to_tag: &str, has_items: bool, remind: bool) -> String {
+pub fn mail_text(name: &str, stored: &str, to_tag: &str) -> String {
     let stored = work::unix_lines(stored);
     let (subject, body) = match stored
         .strip_prefix("Subject: ")
@@ -322,12 +322,8 @@ pub fn mail_text(name: &str, stored: &str, to_tag: &str, has_items: bool, remind
         subject => format!("Subject: {subject}\n\n"),
     };
     text += body.trim();
-    if !has_items {
-        text += &format!("\n\n({ACCEPT})");
-    } else if remind {
-        text += ADD_REMINDER;
-    }
-    text
+    // uiclient_steer.md, ~100 open items, got the human's new requests bare and added none; so every human message carries the line.
+    text + &format!("\n\n({ACCEPT})")
 }
 
 /// What the human reads when an agent asks a question with choices.
@@ -1500,11 +1496,7 @@ mod tests {
         assert_eq!(source_of("(guest mail d/guest-3.txt)"), Source::Guest);
         let reply = "Subject: Re: [t_sub] do more\n\nPlease do Z.\r\n> old\r\n";
         assert_eq!(
-            mail_text("m-11.txt", reply, "t_sub", true, false),
-            "Please do Z.\n> old"
-        );
-        assert_eq!(
-            mail_text("m-11.txt", reply, "t_sub", false, true),
+            mail_text("m-11.txt", reply, "t_sub"),
             format!("Please do Z.\n> old\n\n({ACCEPT})")
         );
         assert_eq!(
@@ -1512,70 +1504,48 @@ mod tests {
                 "zulip-7.txt",
                 "Subject: [t_sub] Zulip message\n\nStop it\n",
                 "t_sub",
-                true,
-                false
             ),
-            "Stop it"
+            format!("Stop it\n\n({ACCEPT})")
         );
         assert_eq!(
             mail_text(
                 "zulip-7.txt",
                 "Subject: [toms_river] Zulip message\n\nTerminate this agent. Done\n",
                 "human_mgr",
-                true,
-                false
             ),
-            "In the toms_river thread:\nTerminate this agent. Done"
+            format!("In the toms_river thread:\nTerminate this agent. Done\n\n({ACCEPT})")
         );
         assert_eq!(
             mail_text(
                 "zulip-7.txt",
                 "Subject: [toms river] Zulip message\n\nhi\n",
                 "m",
-                true,
-                false
             ),
-            "In the toms river thread:\nhi"
+            format!("In the toms river thread:\nhi\n\n({ACCEPT})")
         );
         assert_eq!(
             mail_text(
                 "h-edit-1.txt",
                 "Subject: [t_sub] said with amh say\n\nGo on.\n",
                 "t_sub",
-                true,
-                false
             ),
-            "Go on."
+            format!("Go on.\n\n({ACCEPT})")
         );
         assert_eq!(
             mail_text(
                 "m-12.txt",
                 "Subject: [t_sub] build X\n\nUse Rust.\n",
                 "t_sub",
-                true,
-                false
             ),
-            "Subject: [t_sub] build X\n\nUse Rust."
+            format!("Subject: [t_sub] build X\n\nUse Rust.\n\n({ACCEPT})")
         );
         assert_eq!(
-            mail_text(
-                "zulip-9.txt",
-                "first para\n\nsecond\n",
-                "t_sub",
-                true,
-                false
-            ),
-            "first para\n\nsecond"
+            mail_text("zulip-9.txt", "first para\n\nsecond\n", "t_sub",),
+            format!("first para\n\nsecond\n\n({ACCEPT})")
         );
         assert_eq!(
-            mail_text(
-                "zulip-8.txt",
-                "Subject: [t] Zulip message\n\nok\n",
-                "t",
-                true,
-                true
-            ),
-            format!("ok{ADD_REMINDER}")
+            mail_text("zulip-8.txt", "Subject: [t] Zulip message\n\nok\n", "t",),
+            format!("ok\n\n({ACCEPT})")
         );
         assert_eq!(
             plain_text(&blocks[1].1, false),
