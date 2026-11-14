@@ -15,6 +15,11 @@ fn main() {
         git(&["status", "--porcelain", "--untracked-files=no"]).is_some_and(|s| !s.is_empty());
     let suffix = if dirty { "-dirty" } else { "" };
     println!("cargo:rustc-env=AMH_BUILD={commit}{suffix}");
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=.git/index");
+    // In a worktree `.git` is a file, so ask git where HEAD and the index live.
+    for name in ["HEAD", "index"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", name]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    println!("cargo:rerun-if-changed=src");
 }

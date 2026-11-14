@@ -22,6 +22,8 @@ use crate::{guest, omnigent, settings};
 const MAINTAIN_EVERY: Duration = Duration::from_secs(300);
 // 🧑 "Why so slow ... Improve it"
 const MAIL_POLL: Duration = Duration::from_secs(5);
+/// How often old events and requests are archived.
+const ARCHIVE_EVERY: Duration = Duration::from_secs(86400);
 const RECONNECT: Duration = Duration::from_secs(30);
 /// How often queued emails are tried again.
 const FLUSH_EVERY: Duration = Duration::from_secs(600);
@@ -1455,6 +1457,103 @@ fn notify_compression(settings: &Settings, store: &Store) -> Result<(), String> 
 }
 
 /// Loop forever; the service manager restarts the process if it dies. Returns the exit status when the settings cannot be read.
+/// Run `work` forever on its own thread, one run at a time, sleeping `every` between runs; each run reads the settings afresh.
+// The rework design's stage 0: "Zulip intake, archive and git commit leave the sequential loop: one single-flight thread each, with I/O deadlines"
+fn every(name: &'static str, every: Duration, work: fn(&Settings, &Store) -> Duration) {
+    let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
+        loop {
+            let wait = match settings::load() {
+                Ok(settings) => work(&settings, &Store::new(&settings)),
+                Err(error) => {
+                    log(&format!("{name}: settings failed: {error}"));
+                    every
+                }
+            };
+            thread::sleep(wait);
+        }
+    });
+    if let Err(error) = spawned {
+        log(&format!("cannot start the {name} thread: {error}"));
+    }
+}
+
+/// Archive old events and requests daily; retried after an hour when it fails.
+fn archive_once(_settings: &Settings, store: &Store) -> Duration {
+    let mut break_wait = Duration::from_secs(3600);
+    let phase = Instant::now();
+    let archived = store.lock().and_then(|_lock| {
+        let mut database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
+        crate::archive::archive_events(
+            &mut database,
+            &store.root.join("archive"),
+            chrono::Utc::now(),
+        )?;
+        let count = crate::archive::archive_requests(&store, chrono::Utc::now())?;
+        store.refresh_exports()?;
+        Ok(count)
+    });
+    match archived {
+        Ok(_) => break_wait = ARCHIVE_EVERY,
+        Err(error) => log(&format!("archival failed: {error}")),
+    }
+    log_elapsed("archive", phase);
+    break_wait
+}
+
+/// Commit and push the work-log Markdown.
+fn commit_once(settings: &Settings, store: &Store) -> Duration {
+    if settings::get(settings, "archive.commit") == "false" {
+        return COMMIT_EVERY;
+    }
+    let phase = Instant::now();
+    // A failed run says nothing about oversize files or merges, so their records stay as they are; one failure streak is told once.
+    let mut notices: Vec<(&str, String, String)> = Vec::new();
+    match crate::history::commit_and_push(&store.root) {
+        Ok(done) => {
+            let oversize = oversize_notice(&done.oversize);
+            notices.push(("oversize-notified", oversize.clone(), oversize));
+            notices.push(("push-failure-notified", String::new(), String::new()));
+            if !done.notes.is_empty() {
+                let text = format!("amh merge notes:\n{}", done.notes.join("\n"));
+                notices.push(("merge-notes-notified", text.clone(), text));
+            }
+        }
+        Err(error) => {
+            log(&format!("Markdown commit failed: {error}"));
+            notices.push((
+                "push-failure-notified",
+                "failing".to_owned(),
+                format!("amh could not commit or push the work logs: {error}"),
+            ));
+        }
+    }
+    let filing = record(store, "filing-problems");
+    notices.push((
+        "filing-problems-notified",
+        filing.clone(),
+        format!("amh left these task files unfiled or unreconciled:\n{filing}"),
+    ));
+    for (key, token, notice) in &notices {
+        if let Err(error) = notify_manager(settings, store, key, token, notice) {
+            log(&format!("{key} notice failed: {error}"));
+        }
+    }
+    log_elapsed("git commit", phase);
+    COMMIT_EVERY
+}
+
+/// Take in the human's Zulip messages.
+fn zulip_once(settings: &Settings, store: &Store) -> Duration {
+    let phase = Instant::now();
+    if crate::zulip::enabled(settings)
+        && let Err(error) = take_in_zulip(settings, store)
+    {
+        log(&format!("Zulip intake failed: {error}"));
+    }
+    log_elapsed("Zulip intake", phase);
+    MAIL_POLL
+}
+
 pub fn run() -> u8 {
     let mut watcher = Watcher {
         failed_at: BTreeMap::new(),
@@ -1464,10 +1563,7 @@ pub fn run() -> u8 {
     let mut last_flush: Option<Instant> = None;
     let mut last_compress: Option<Instant> = None;
     let mut last_maintain: Option<Instant> = None;
-    let mut last_archive: Option<Instant> = None;
     let mut last_zulip_cleanup: Option<Instant> = None;
-    let mut last_commit: Option<Instant> = None;
-    let mut last_poll: Option<Instant> = None;
     let mut last_state_profile: Option<Instant> = None;
     // Only one watcher may run: request notifications are read and sent without the amh lock, so a second watcher would send them twice.
     let _single = match watcher_lock(&settings::state_dir()) {
@@ -1490,6 +1586,9 @@ pub fn run() -> u8 {
     log("watcher started");
     std::thread::spawn(scan_agents);
     std::thread::spawn(poll_mail);
+    every("Zulip intake", MAIL_POLL, zulip_once);
+    every("archive", ARCHIVE_EVERY, archive_once);
+    every("git commit", COMMIT_EVERY, commit_once);
     loop {
         let settings = match settings::load() {
             Ok(settings) => settings,
@@ -1499,75 +1598,6 @@ pub fn run() -> u8 {
             }
         };
         let store = Store::new(&settings);
-        if last_archive.is_none_or(|last| last.elapsed().as_secs() >= 86400) {
-            let phase = Instant::now();
-            let archived = store.lock().and_then(|_lock| {
-                let mut database =
-                    crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
-                crate::archive::archive_events(
-                    &mut database,
-                    &store.root.join("archive"),
-                    chrono::Utc::now(),
-                )?;
-                let count = crate::archive::archive_requests(&store, chrono::Utc::now())?;
-                store.refresh_exports()?;
-                Ok(count)
-            });
-            match archived {
-                Ok(_) => last_archive = Some(Instant::now()),
-                Err(error) => log(&format!("archival failed: {error}")),
-            }
-            log_elapsed("archive", phase);
-        }
-        if settings::get(&settings, "archive.commit") != "false"
-            && last_commit.is_none_or(|last| last.elapsed() >= COMMIT_EVERY)
-        {
-            let phase = Instant::now();
-            last_commit = Some(Instant::now());
-            // A failed run says nothing about oversize files or merges, so their records stay as they are; one failure streak is told once.
-            let mut notices: Vec<(&str, String, String)> = Vec::new();
-            match crate::history::commit_and_push(&store.root) {
-                Ok(done) => {
-                    let oversize = oversize_notice(&done.oversize);
-                    notices.push(("oversize-notified", oversize.clone(), oversize));
-                    notices.push(("push-failure-notified", String::new(), String::new()));
-                    if !done.notes.is_empty() {
-                        let text = format!("amh merge notes:\n{}", done.notes.join("\n"));
-                        notices.push(("merge-notes-notified", text.clone(), text));
-                    }
-                }
-                Err(error) => {
-                    log(&format!("Markdown commit failed: {error}"));
-                    notices.push((
-                        "push-failure-notified",
-                        "failing".to_owned(),
-                        format!("amh could not commit or push the work logs: {error}"),
-                    ));
-                }
-            }
-            let filing = record(&store, "filing-problems");
-            notices.push((
-                "filing-problems-notified",
-                filing.clone(),
-                format!("amh left these task files unfiled or unreconciled:\n{filing}"),
-            ));
-            for (key, token, notice) in &notices {
-                if let Err(error) = notify_manager(&settings, &store, key, token, notice) {
-                    log(&format!("{key} notice failed: {error}"));
-                }
-            }
-            log_elapsed("git commit", phase);
-        }
-        if last_poll.is_none_or(|last| last.elapsed() >= MAIL_POLL) {
-            let phase = Instant::now();
-            if crate::zulip::enabled(&settings)
-                && let Err(error) = take_in_zulip(&settings, &store)
-            {
-                log(&format!("Zulip intake failed: {error}"));
-            }
-            log_elapsed("Zulip intake", phase);
-            last_poll = Some(Instant::now());
-        }
         let phase = Instant::now();
         let request_effects = store
             .lock_timed()
@@ -1661,7 +1691,7 @@ pub fn run() -> u8 {
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));
         }
-        let timeout = last_poll.map_or(MAIL_POLL, |last| MAIL_POLL.saturating_sub(last.elapsed()));
+        let timeout = MAIL_POLL;
         match &wake {
             Some(socket) => {
                 if let Err(error) = crate::wake::wait(socket, timeout) {
