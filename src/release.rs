@@ -61,7 +61,11 @@ fn live() -> Option<PathBuf> {
 }
 
 fn commit_of(release: &Path) -> Option<&str> {
-    release.file_name()?.to_str()?.rsplit_once('-').map(|(_, commit)| commit)
+    release
+        .file_name()?
+        .to_str()?
+        .rsplit_once('-')
+        .map(|(_, commit)| commit)
 }
 
 /// Point the installed command at `release` atomically, then restart the watcher.
@@ -71,8 +75,18 @@ fn switch(release: &Path) -> Result<String, String> {
     let _ = fs::remove_file(&temp);
     std::os::unix::fs::symlink(release.join("amh"), &temp)
         .and_then(|()| fs::rename(&temp, &link))
-        .map_err(|error| format!("amh: cannot point {} at {}: {error}", link.display(), release.display()))?;
-    run(&home(), "systemctl", &["--user", "restart", "amh-watch.service"])?;
+        .map_err(|error| {
+            format!(
+                "amh: cannot point {} at {}: {error}",
+                link.display(),
+                release.display()
+            )
+        })?;
+    run(
+        &home(),
+        "systemctl",
+        &["--user", "restart", "amh-watch.service"],
+    )?;
     Ok(format!("live: {}\n", release.display()))
 }
 
@@ -81,20 +95,40 @@ fn switch(release: &Path) -> Result<String, String> {
 /// Refused when the tree has changes, when the commit is not on `origin/revive` (unless `hotfix`), or when the live release is not an ancestor of it.
 pub fn release(repo: &Path, hotfix: bool) -> Result<String, String> {
     fs::create_dir_all(releases_dir()).map_err(|error| format!("amh: {error}"))?;
-    let lock = fs::File::create(releases_dir().join("release.lock")).map_err(|error| format!("amh: {error}"))?;
+    let lock = fs::File::create(releases_dir().join("release.lock"))
+        .map_err(|error| format!("amh: {error}"))?;
     lock.try_lock()
         .map_err(|_| "amh: another release is running".to_owned())?;
-    if !run(repo, "git", &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+    if !run(
+        repo,
+        "git",
+        &["status", "--porcelain", "--untracked-files=no"],
+    )?
+    .is_empty()
+    {
         return Err("amh: the checkout has changes; commit them first".to_owned());
     }
     run(repo, "git", &["fetch", "--quiet", "origin"])?;
     let commit = run(repo, "git", &["rev-parse", "--short", "HEAD"])?;
-    let on_branch = run(repo, "git", &["merge-base", "--is-ancestor", "HEAD", BRANCH]).is_ok();
+    let on_branch = run(
+        repo,
+        "git",
+        &["merge-base", "--is-ancestor", "HEAD", BRANCH],
+    )
+    .is_ok();
     if !on_branch && !hotfix {
-        return Err(format!("amh: {commit} is not on {BRANCH}; push it there first, or pass --hotfix"));
+        return Err(format!(
+            "amh: {commit} is not on {BRANCH}; push it there first, or pass --hotfix"
+        ));
     }
     if let Some(live_commit) = live().as_deref().and_then(commit_of) {
-        if run(repo, "git", &["merge-base", "--is-ancestor", live_commit, "HEAD"]).is_err() {
+        if run(
+            repo,
+            "git",
+            &["merge-base", "--is-ancestor", live_commit, "HEAD"],
+        )
+        .is_err()
+        {
             return Err(format!(
                 "amh: the live build {live_commit} is not part of {commit}; rebase onto it first, never overwrite a newer build"
             ));
@@ -110,15 +144,23 @@ pub fn release(repo: &Path, hotfix: bool) -> Result<String, String> {
     let target = releases_dir().join(format!("{version}-{commit}"));
     if !target.join("amh").is_file() {
         let staging = releases_dir().join(format!(".{version}-{commit}.{}", std::process::id()));
-        let built = PathBuf::from(run(repo, "cargo", &["metadata", "--format-version=1", "--no-deps"])
+        let built = PathBuf::from(
+            run(
+                repo,
+                "cargo",
+                &["metadata", "--format-version=1", "--no-deps"],
+            )
             .ok()
             .and_then(|meta| serde_json::from_str::<serde_json::Value>(&meta).ok())
             .and_then(|meta| meta["target_directory"].as_str().map(str::to_owned))
-            .unwrap_or_else(|| repo.join("target").display().to_string()))
+            .unwrap_or_else(|| repo.join("target").display().to_string()),
+        )
         .join("release/amh");
         let copied = fs::create_dir_all(&staging)
             .and_then(|()| fs::copy(&built, staging.join("amh")).map(|_| ()))
-            .and_then(|()| fs::set_permissions(staging.join("amh"), fs::Permissions::from_mode(0o555)))
+            .and_then(|()| {
+                fs::set_permissions(staging.join("amh"), fs::Permissions::from_mode(0o555))
+            })
             .and_then(|()| fs::set_permissions(&staging, fs::Permissions::from_mode(0o555)))
             .and_then(|()| fs::rename(&staging, &target));
         copied.map_err(|error| format!("amh: cannot install {}: {error}", target.display()))?;
@@ -141,7 +183,8 @@ pub fn rollback() -> Result<String, String> {
         .map(|before| all[before].clone())
         .ok_or("amh: no earlier release is kept")?;
     // Touching the target makes it the newest, so the rolled-back release counts as older from now on.
-    let now = fs::File::open(&previous).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
+    let now =
+        fs::File::open(&previous).and_then(|dir| dir.set_modified(std::time::SystemTime::now()));
     now.map_err(|error| format!("amh: {error}"))?;
     switch(&previous)
 }

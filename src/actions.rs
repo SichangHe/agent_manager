@@ -650,6 +650,19 @@ fn short(values: &Value) -> Result<u8, String> {
         ),
         "edit" => long("task", "edit", serde_json::json!({"task": name})),
         // 🧑 "Let's call it `amh human`"
+        "release" => {
+            let output = match values["rollback"] == true {
+                true => crate::release::rollback()?,
+                false => {
+                    let repo = text("repo")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| PathBuf::from("."));
+                    crate::release::release(&repo, values["hotfix"] == true)?
+                }
+            };
+            say(&output);
+            Ok(0)
+        }
         "human" => {
             let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
             let store = Store::new(&settings);
