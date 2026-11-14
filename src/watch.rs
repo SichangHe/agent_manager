@@ -756,7 +756,7 @@ fn delivery_text(
             let file = Path::new(name).file_name().unwrap_or_default();
             let stored = fs::read_to_string(store.root.join("manager_mail").join(file))
                 .map_err(|error| format!("{name}: {error}"))?;
-            decide::mail_text(name, &stored, task.tag())
+            decide::mail_text(name, &stored, task.tag(), remind)
         }
         Source::Plain => decide::plain_text(block, remind),
     })
@@ -1115,7 +1115,7 @@ impl Watcher {
                     settings,
                     store,
                     name,
-                    &decide::mail_text(mail, &stored, task.tag()),
+                    &decide::mail_text(mail, &stored, task.tag(), false),
                     None,
                     "on the human's order",
                 ) {

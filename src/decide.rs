@@ -291,11 +291,11 @@ pub fn plain_text(block: &[String], remind: bool) -> String {
 /// The message for an agent from a stored human email: the human's text bare, with at most one note after it.
 ///
 /// The subject is kept only for an email that starts a thread; Zulip topics, `amh say` labels, and `Re:` subjects carry no words of the human's.
-/// Every message ends with the one-line `ACCEPT` note.
+/// With `remind` (one message in eight, at random, whatever the open items), it ends with the one-line `ACCEPT` note.
 /// A message typed in another task's thread than `to_tag` names that thread first.
 // 🧑 "human requests should be sent verbatim"
 // 🧑 "Normal human messages should arrive without things around them, only sometimes with reminders of adding pending items etc."
-pub fn mail_text(name: &str, stored: &str, to_tag: &str) -> String {
+pub fn mail_text(name: &str, stored: &str, to_tag: &str, remind: bool) -> String {
     let stored = work::unix_lines(stored);
     let (subject, body) = match stored
         .strip_prefix("Subject: ")
@@ -322,8 +322,11 @@ pub fn mail_text(name: &str, stored: &str, to_tag: &str) -> String {
         subject => format!("Subject: {subject}\n\n"),
     };
     text += body.trim();
-    // uiclient_steer.md, ~100 open items, got the human's new requests bare and added none; so every human message carries the line.
-    text + &format!("\n\n({ACCEPT})")
+    // 🧑 "Don't add the reminder every message. Added about one eighth of the times randomly."
+    match remind {
+        true => text + &format!("\n\n({ACCEPT})"),
+        false => text,
+    }
 }
 
 /// What the human reads when an agent asks a question with choices.
@@ -1496,7 +1499,7 @@ mod tests {
         assert_eq!(source_of("(guest mail d/guest-3.txt)"), Source::Guest);
         let reply = "Subject: Re: [t_sub] do more\n\nPlease do Z.\r\n> old\r\n";
         assert_eq!(
-            mail_text("m-11.txt", reply, "t_sub"),
+            mail_text("m-11.txt", reply, "t_sub", true),
             format!("Please do Z.\n> old\n\n({ACCEPT})")
         );
         assert_eq!(
@@ -1504,6 +1507,7 @@ mod tests {
                 "zulip-7.txt",
                 "Subject: [t_sub] Zulip message\n\nStop it\n",
                 "t_sub",
+                true,
             ),
             format!("Stop it\n\n({ACCEPT})")
         );
@@ -1512,6 +1516,7 @@ mod tests {
                 "zulip-7.txt",
                 "Subject: [toms_river] Zulip message\n\nTerminate this agent. Done\n",
                 "human_mgr",
+                true,
             ),
             format!("In the toms_river thread:\nTerminate this agent. Done\n\n({ACCEPT})")
         );
@@ -1520,6 +1525,7 @@ mod tests {
                 "zulip-7.txt",
                 "Subject: [toms river] Zulip message\n\nhi\n",
                 "m",
+                true,
             ),
             format!("In the toms river thread:\nhi\n\n({ACCEPT})")
         );
@@ -1528,6 +1534,7 @@ mod tests {
                 "h-edit-1.txt",
                 "Subject: [t_sub] said with amh say\n\nGo on.\n",
                 "t_sub",
+                true,
             ),
             format!("Go on.\n\n({ACCEPT})")
         );
@@ -1536,16 +1543,31 @@ mod tests {
                 "m-12.txt",
                 "Subject: [t_sub] build X\n\nUse Rust.\n",
                 "t_sub",
+                true,
             ),
             format!("Subject: [t_sub] build X\n\nUse Rust.\n\n({ACCEPT})")
         );
         assert_eq!(
-            mail_text("zulip-9.txt", "first para\n\nsecond\n", "t_sub",),
+            mail_text("zulip-9.txt", "first para\n\nsecond\n", "t_sub", true),
             format!("first para\n\nsecond\n\n({ACCEPT})")
         );
         assert_eq!(
-            mail_text("zulip-8.txt", "Subject: [t] Zulip message\n\nok\n", "t",),
+            mail_text(
+                "zulip-8.txt",
+                "Subject: [t] Zulip message\n\nok\n",
+                "t",
+                true
+            ),
             format!("ok\n\n({ACCEPT})")
+        );
+        assert_eq!(
+            mail_text(
+                "zulip-8.txt",
+                "Subject: [t] Zulip message\n\nok\n",
+                "t",
+                false
+            ),
+            "ok"
         );
         assert_eq!(
             plain_text(&blocks[1].1, false),
