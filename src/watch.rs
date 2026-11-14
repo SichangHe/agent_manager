@@ -1719,7 +1719,14 @@ mod tests {
         let first = watcher_lock(&dir).unwrap();
         assert!(watcher_lock(&dir).unwrap_err().contains("already running"));
         drop(first);
-        assert!(watcher_lock(&dir).is_ok());
+        // Another test forking a process may hold the inherited descriptor until it execs, so the release can lag briefly.
+        let freed = (0..50).any(|_| {
+            watcher_lock(&dir).is_ok() || {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                false
+            }
+        });
+        assert!(freed);
         let _ = fs::remove_dir_all(&dir);
     }
 }
