@@ -14,7 +14,8 @@ one program for agents and managers; usage lives in `amh --help`, not here
     - rule taken from it for every part: pure functions over plain data in one module, input/output in a thin caller (`src/taskfile.rs` is the pattern)
         - pure: `taskfile` (but its atomic `write`), `tasks`, `work`, `decide`, `guest`, and the text functions of `mail` and `omnigent`
         - input/output: `actions`, `agents`, `store`, `settings`, `omnigent`, `mail`, `watch`, `view`, `log`
-- build: `cargo build --release`; install: `cargo install --path .`, then `amh manager watchers` so the watcher runs the new binary
+- build: `cargo build --release`; install: `cpu-run LOW -c 8 -o TASK -e END -- amh release` in a clean checkout on `origin/revive` (`src/release.rs`): tests, read-only copy in `~/.local/lib/amh/VERSION-COMMIT/`, symlink `~/.cargo/bin/amh`, watcher restart; `amh release --rollback` goes back one; never `cargo install`, which bypasses the newer-build check
+- each `amh-actions.log` exit line has `duration_ms lock_wait_ms lock_hold_ms build=COMMIT`
 - watcher: `amh manager watch` in the foreground; `amh-watch.service` is the user systemd unit for it
 - quota: `amh quota status` and the observer `amh quota serve` (user unit `amh-quota.service`); design in `docs/quota-manager.md`
 - `use-amh`: stub that old command names link to
