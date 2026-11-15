@@ -259,8 +259,16 @@ pub fn parse_auth_files(answer: &Value, now: i64) -> Vec<Reading> {
                 .max();
             let said = file["status_message"].as_str().unwrap_or_default();
             let message = said.to_lowercase();
-            // A 429 storm also shows status error; it is a rate limit, not a refused credential.
-            let rate_limited = message.contains("429") || message.contains("rate limit");
+            // A 429 storm or a used-up quota also shows status error; that is a limit, not a refused credential.
+            let rate_limited = [
+                "429",
+                "rate limit",
+                "rate_limit",
+                "usage_limit",
+                "limit_reached",
+            ]
+            .iter()
+            .any(|sign| message.contains(sign));
             let refused = message.contains("401")
                 || message.contains("unauthorized")
                 || (!rate_limited && (file["status"] == "error" || file["unavailable"] == true));
