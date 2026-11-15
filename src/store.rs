@@ -35,6 +35,16 @@ fn stamp(database: &Database) -> Result<Option<i128>, String> {
         .and_then(|t| t.parse().ok()))
 }
 
+/// For a routine pass (`since` given), the event ID after which changed tasks are exported; `None` checks every task (full passes, and before the first routine export).
+fn hot_after(database: &Database, since: Option<i128>) -> Result<Option<i64>, String> {
+    Ok(match since {
+        None => None,
+        Some(_) => database
+            .record("export:through")?
+            .and_then(|id| id.parse().ok()),
+    })
+}
+
 /// True when `path` exists and was last modified before `since`.
 fn untouched_since(path: &std::path::Path, since: Option<i128>) -> bool {
     let Some(since) = since else { return false };
@@ -236,7 +246,7 @@ impl Store {
     /// A typed line is one in the file's body that is not in the text amh last exported there; it is appended to the task's body in the database.
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
     fn take_in_edits(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
-        for (name, month, _) in database.export_states(false)? {
+        for (name, month, _) in database.export_states(false, hot_after(database, since)?)? {
             let path = self.root.join(&month).join(&name);
             if untouched_since(&path, since) {
                 continue;
@@ -295,7 +305,8 @@ impl Store {
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
     fn export(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
         let mut git = None;
-        for (name, month, exported) in database.export_states(true)? {
+        let through = database.latest_event_id()?;
+        for (name, month, exported) in database.export_states(true, hot_after(database, since)?)? {
             // A task unchanged since the last export, whose file (and any stray root copy of a filed one) is untouched since, needs nothing; full passes (no `since`) still check all.
             let stray = self.root.join(&name);
             if exported
@@ -322,6 +333,7 @@ impl Store {
                 database.set_record(&key, &text)?;
             }
         }
+        database.set_record("export:through", &through.to_string())?;
         self.export_events(database)
     }
 
@@ -385,7 +397,8 @@ impl Store {
         let full = database
             .record("export:full_at")?
             .and_then(|t| t.parse::<i128>().ok());
-        if full.is_none_or(|at| now - at > 600 * 1_000_000_000) {
+        // A full pass checks closed tasks too; routine passes skip them, so it runs hourly, not every 10 min.
+        if full.is_none_or(|at| now - at > 3600 * 1_000_000_000) {
             database.set_record("export:full_at", &now.to_string())?;
             return Ok(None);
         }
@@ -1198,6 +1211,8 @@ mod tests {
         assert!(!root.join("t.md").exists(), "root copy removed");
         fs::remove_file(root.join("190001").join("t.md"))?;
         fs::create_dir_all(root.join("190001"))?;
+        // A closed task's file is repaired by the hourly full pass; force one.
+        Database::open(&store.state_dir.join("amh.sqlite3"))?.set_record("export:full_at", "0")?;
         drop(store.lock()?);
         assert!(
             root.join("190001").join("t.md").exists(),
@@ -1341,6 +1356,8 @@ mod tests {
         close(&store)?;
         let month = chrono::Utc::now().format("%Y%m").to_string();
         fs::write(root.join("t.md"), "stray\n")?;
+        // A closed task's stray root copy is found by the hourly full pass; force one.
+        Database::open(&store.state_dir.join("amh.sqlite3"))?.set_record("export:full_at", "0")?;
         drop(store.lock()?);
         assert!(
             store

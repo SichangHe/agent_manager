@@ -203,17 +203,29 @@ impl Database {
     /// Every task's name, filed month (empty at the root), and, when `compare`, whether its text equals what the last export recorded.
     ///
     /// Compares inside SQLite so a lock need not copy every task text and export record into Rust; skipping the comparison skips reading the texts.
-    pub fn export_states(&self, compare: bool) -> Result<Vec<(String, String, bool)>, String> {
+    /// Each task's name, month folder and whether its export is current; with `hot_after`, only the task list, open tasks and tasks changed by an event after that ID.
+    // The rework design's stage 0 gate "lock hold p99 < 300 ms": every lock compared and stat-ed all 7,596 tasks (~80 ms import + ~80 ms export); a closed task's file changes only through amh, so routine passes skip it.
+    pub fn export_states(
+        &self,
+        compare: bool,
+        hot_after: Option<i64>,
+    ) -> Result<Vec<(String, String, bool)>, String> {
         let mut query = self
             .0
             .prepare(
                 "SELECT t.name, COALESCE(m.text, ''), ?1 AND e.text IS t.text FROM tasks t
                  LEFT JOIN records e ON e.name = 'export:' || t.name
-                 LEFT JOIN records m ON m.name = 'month:' || t.name ORDER BY t.name",
+                 LEFT JOIN records m ON m.name = 'month:' || t.name
+                 WHERE ?2 IS NULL OR t.name = 'TODO.md'
+                    OR t.status IN ('running', 'long_running', 'blocked')
+                    OR t.name IN (SELECT subject FROM events WHERE id > ?2 AND kind = 'task changed')
+                 ORDER BY t.name",
             )
             .map_err(error)?;
         query
-            .query_map([compare], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .query_map(params![compare, hot_after], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
