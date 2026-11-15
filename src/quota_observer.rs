@@ -980,10 +980,12 @@ pub fn status_text(snapshot: &Snapshot, now: i64, events: &[Value]) -> String {
                 format!("read {} ago", span(now - at))
             });
             let who = b.creds.first().map_or("?", |c| c.trim_end_matches(".json"));
+            let state = match &b.auth_error {
+                Some(said) => format!("auth error: {said}"),
+                None => format!("{} for {}", b.status.name(), span(now - b.since)),
+            };
             out.push_str(&format!(
-                "  {who}: {} for {}; {}; {age}\n",
-                b.status.name(),
-                span(now - b.since),
+                "  {who}: {state}; {}; {age}\n",
                 windows.join(", ")
             ));
         }

@@ -76,7 +76,9 @@ pub struct Reading {
     pub windows: Vec<Window>,
     /// End of an active `credential_quota` cooldown: the proxy itself saw a quota error.
     pub quota_until: Option<i64>,
-    pub auth_error: bool,
+    /// The proxy cannot use the credential (401, or status error / unavailable): its own message, else `None`.
+    // The main manager: "show 'auth error: <status_message>' when the proxy says status error/unavailable"
+    pub auth_error: Option<String>,
 }
 
 /// One quota per principal; several credentials of one principal share it.
@@ -91,6 +93,8 @@ pub struct Bucket {
     pub since: i64,
     pub streak: u32,
     pub next_reset: Option<i64>,
+    /// The proxy's message when it cannot use the credential.
+    pub auth_error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -253,10 +257,13 @@ pub fn parse_auth_files(answer: &Value, now: i64) -> Vec<Reading> {
                 .filter_map(|c| epoch(&c["retry_at"]))
                 .filter(|until| *until > now)
                 .max();
-            let message = file["status_message"]
-                .as_str()
-                .unwrap_or_default()
-                .to_lowercase();
+            let said = file["status_message"].as_str().unwrap_or_default();
+            let message = said.to_lowercase();
+            // A 429 storm also shows status error; it is a rate limit, not a refused credential.
+            let rate_limited = message.contains("429") || message.contains("rate limit");
+            let refused = message.contains("401")
+                || message.contains("unauthorized")
+                || (!rate_limited && (file["status"] == "error" || file["unavailable"] == true));
             Some(Reading {
                 auth_index: file["auth_index"].as_str().unwrap_or_default().to_owned(),
                 pool: pool.to_owned(),
@@ -267,7 +274,10 @@ pub fn parse_auth_files(answer: &Value, now: i64) -> Vec<Reading> {
                 observed_at,
                 windows,
                 quota_until,
-                auth_error: message.contains("401") || message.contains("unauthorized"),
+                auth_error: refused.then(|| match said {
+                    "" => "unavailable".to_owned(),
+                    said => said.to_owned(),
+                }),
                 name,
             })
         })
@@ -292,6 +302,10 @@ fn classify(r: &Reading, prev: Option<&Bucket>, now: i64) -> Raw {
         .filter(|b| b.status == Status::Exhausted)
         .filter(|b| r.observed_at.is_none_or(|at| at < b.since));
     if let Some(b) = predates_exhaustion {
+        // A credential the proxy cannot use is not exhausted: one seen exhausted on Nov 11 kept that label for days while the proxy said "invalid grant (retrying)".
+        if r.auth_error.is_some() {
+            return Raw::Unknown;
+        }
         // Only a reading taken after the exhaustion can end it; with none, wait for the reset hint plus one TTL, then ask for a new poll.
         return match b.next_reset {
             Some(at) if now <= at + TTL_S => Raw::Exhausted(Some(at)),
@@ -299,7 +313,7 @@ fn classify(r: &Reading, prev: Option<&Bucket>, now: i64) -> Raw {
         };
     }
     let invalid = r.windows.iter().any(|w| w.state == WinState::Invalid);
-    if r.auth_error || !fresh || r.windows.is_empty() || invalid {
+    if r.auth_error.is_some() || !fresh || r.windows.is_empty() || invalid {
         return Raw::Unknown;
     }
     let active: Vec<&Window> = r
@@ -388,6 +402,7 @@ pub fn step(prev: &[Bucket], readings: &[Reading], now: i64) -> (Vec<Bucket>, Ve
             since,
             streak,
             next_reset,
+            auth_error: group.iter().find_map(|r| r.auth_error.clone()),
         });
     }
     (buckets, events)
@@ -755,7 +770,7 @@ impl Bucket {
             .collect();
         json!({"principal": self.principal, "pool": self.pool, "creds": self.creds, "windows": windows,
             "observed_at": self.observed_at, "status": self.status.name(), "since": self.since, "streak": self.streak,
-            "next_reset": self.next_reset})
+            "next_reset": self.next_reset, "auth_error": self.auth_error})
     }
 
     pub fn from_json(v: &Value) -> Option<Self> {
@@ -791,6 +806,7 @@ impl Bucket {
             since: v["since"].as_i64().unwrap_or_default(),
             streak: v["streak"].as_u64().unwrap_or_default() as u32,
             next_reset: v["next_reset"].as_i64(),
+            auth_error: v["auth_error"].as_str().map(str::to_owned),
         })
     }
 }
@@ -1078,6 +1094,24 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_credential_shows_its_message_and_drops_a_stale_exhaustion() {
+        let (b, _) = run(&[], vec![codex_file("x", "100", "300", None)], NOW);
+        assert_eq!(b[0].status, Status::Exhausted);
+        let mut refused = codex_file("x", "10", "300", None);
+        refused["model_quotas"]["m"]["observed_at"] =
+            json!(DateTime::from_timestamp(NOW - 100, 0).map(|t| t.to_rfc3339()));
+        refused["status"] = json!("error");
+        refused["unavailable"] = json!(true);
+        refused["status_message"] = json!("invalid grant (retrying)");
+        let (b, _) = run(&b, vec![refused.clone()], NOW + 1);
+        let (b, _) = run(&b, vec![refused], NOW + 2);
+        assert_eq!(
+            (b[0].status, b[0].auth_error.as_deref()),
+            (Status::Unknown, Some("invalid grant (retrying)"))
+        );
+    }
+
+    #[test]
     fn status_401_is_unknown() {
         let mut f = claude_file("a", Some("0.1"), "0.1", 10);
         f["status_message"] = json!("401 unauthorized");
@@ -1121,6 +1155,7 @@ mod tests {
             since: NOW,
             streak: 2,
             next_reset: d7_reset,
+            auth_error: None,
         }
     }
 
@@ -1161,7 +1196,7 @@ mod tests {
             observed_at: Some(NOW),
             windows: vec![],
             quota_until: None,
-            auth_error: false,
+            auth_error: None,
         }
     }
 
