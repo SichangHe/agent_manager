@@ -203,7 +203,7 @@ impl Database {
     /// Every task's name, filed month (empty at the root), and, when `compare`, whether its text equals what the last export recorded.
     ///
     /// Compares inside SQLite so a lock need not copy every task text and export record into Rust; skipping the comparison skips reading the texts.
-    /// Each task's name, month folder and whether its export is current; with `hot_after`, only the task list, open tasks and tasks changed by an event after that ID.
+    /// Each task's name, month folder and whether its export is current; with `hot_after`, only the task list, open tasks and tasks that are the subject of an event after that ID (every snapshot commit records one).
     // The rework design's stage 0 gate "lock hold p99 < 300 ms": every lock compared and stat-ed all 7,596 tasks (~80 ms import + ~80 ms export); a closed task's file changes only through amh, so routine passes skip it.
     pub fn export_states(
         &self,
@@ -218,7 +218,7 @@ impl Database {
                  LEFT JOIN records m ON m.name = 'month:' || t.name
                  WHERE ?2 IS NULL OR t.name = 'TODO.md'
                     OR t.status IN ('running', 'long_running', 'blocked')
-                    OR t.name IN (SELECT subject FROM events WHERE id > ?2 AND kind = 'task changed')
+                    OR t.name IN (SELECT subject FROM events WHERE id > ?2)
                  ORDER BY t.name",
             )
             .map_err(error)?;

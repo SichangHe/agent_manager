@@ -247,50 +247,63 @@ impl Store {
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
     fn take_in_edits(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
         for (name, month, _) in database.export_states(false, hot_after(database, since)?)? {
-            let path = self.root.join(&month).join(&name);
-            if untouched_since(&path, since) {
+            if name == "TODO.md" || untouched_since(&self.root.join(&month).join(&name), since) {
                 continue;
             }
-            let Ok(file) = fs::read_to_string(&path) else {
-                continue;
-            };
             let Some(text) = database.task(&name)? else {
                 continue;
             };
-            let Some(last) = database.record(&format!("export:{name}"))? else {
-                continue;
-            };
-            if file == text || file == last || name == "TODO.md" {
-                continue;
+            let task = Task::parse(&name, &text)?;
+            if let Some(task) = self.with_typed_lines(database, &task)? {
+                self.save(&task)?;
             }
-            let (Ok(typed), Ok(exported)) = (Task::parse(&name, &file), Task::parse(&name, &last))
-            else {
-                continue;
-            };
-            let mut known: Vec<&str> = exported.body.lines().collect();
-            let added: Vec<&str> = typed
-                .body
-                .lines()
-                .filter(|line| match known.iter().position(|seen| seen == line) {
-                    Some(at) => {
-                        known.remove(at);
-                        false
-                    }
-                    None => true,
-                })
-                .collect();
-            if added.iter().all(|line| line.trim().is_empty()) {
-                continue;
-            }
-            let mut task = Task::parse(&name, &text)?;
-            task.body = format!(
-                "{}\n{}\n",
-                task.body.trim_end_matches('\n'),
-                added.join("\n")
-            );
-            self.save(&task)?;
         }
         Ok(())
+    }
+
+    /// `task` with the body lines someone typed into its exported file appended, or `None` when nothing was typed.
+    ///
+    /// A typed line is one in the file's body that is not in the text amh last exported there.
+    // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
+    fn with_typed_lines(&self, database: &Database, task: &Task) -> Result<Option<Task>, String> {
+        let name = &task.name;
+        let month = database
+            .record(&format!("month:{name}"))?
+            .unwrap_or_default();
+        let Ok(file) = fs::read_to_string(self.root.join(&month).join(name)) else {
+            return Ok(None);
+        };
+        let Some(last) = database.record(&format!("export:{name}"))? else {
+            return Ok(None);
+        };
+        if file == last || file == task.render() || name == "TODO.md" {
+            return Ok(None);
+        }
+        let (Ok(typed), Ok(exported)) = (Task::parse(name, &file), Task::parse(name, &last)) else {
+            return Ok(None);
+        };
+        let mut known: Vec<&str> = exported.body.lines().collect();
+        let added: Vec<&str> = typed
+            .body
+            .lines()
+            .filter(|line| match known.iter().position(|seen| seen == line) {
+                Some(at) => {
+                    known.remove(at);
+                    false
+                }
+                None => true,
+            })
+            .collect();
+        if added.iter().all(|line| line.trim().is_empty()) {
+            return Ok(None);
+        }
+        let mut task = task.clone();
+        task.body = format!(
+            "{}\n{}\n",
+            task.body.trim_end_matches('\n'),
+            added.join("\n")
+        );
+        Ok(Some(task))
     }
 
     fn database(&self) -> Result<Option<Database>, String> {
@@ -672,7 +685,12 @@ impl Store {
     }
 
     pub fn save(&self, task: &Task) -> Result<(), String> {
-        let (task, events) = self.prepare(task)?;
+        // Routine lock passes skip closed tasks, so lines typed into a closed task's file are taken in here, before the save overwrites the file.
+        let typed = match self.database()? {
+            Some(database) => self.with_typed_lines(&database, task)?,
+            None => None,
+        };
+        let (task, events) = self.prepare(typed.as_ref().unwrap_or(task))?;
         if let Some(mut database) = self.database()? {
             database.commit(&[(task.name.clone(), task.render())], &events)?;
             return self.export(&database, stamp(&database)?);
@@ -1281,6 +1299,30 @@ mod tests {
         crate::tasks::set_status(&mut task, "done", None)?;
         store.save(&task)?;
         drop(lock);
+        Ok(())
+    }
+
+    #[test]
+    fn a_line_typed_into_a_closed_task_survives_the_next_save()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (root, store) = month_store("month-typed")?;
+        close(&store)?;
+        let month = chrono::Utc::now().format("%Y%m").to_string();
+        let path = root.join(&month).join("t.md");
+        let typed = fs::read_to_string(&path)? + "a line the human typed\n";
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(&path, typed)?;
+        let lock = store.lock()?;
+        let mut task = store.load("t.md")?;
+        task.body += "\n(note)\n";
+        store.save(&task)?;
+        drop(lock);
+        let text = fs::read_to_string(&path)?;
+        assert!(
+            text.contains("a line the human typed") && text.contains("(note)"),
+            "{text}"
+        );
+        let _ = fs::remove_dir_all(&root);
         Ok(())
     }
 
