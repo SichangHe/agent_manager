@@ -213,12 +213,15 @@ impl Database {
         let mut query = self
             .0
             .prepare(
-                "SELECT t.name, COALESCE(m.text, ''), ?1 AND e.text IS t.text FROM tasks t
+                // The hot set is built from indexes first; an OR in the outer WHERE made SQLite compute every task's status (~100 ms).
+                "WITH hot(name) AS (
+                     SELECT name FROM tasks WHERE status IN ('running', 'long_running', 'blocked')
+                     UNION SELECT 'TODO.md'
+                     UNION SELECT subject FROM events WHERE id > ?2)
+                 SELECT t.name, COALESCE(m.text, ''), ?1 AND e.text IS t.text FROM tasks t
                  LEFT JOIN records e ON e.name = 'export:' || t.name
                  LEFT JOIN records m ON m.name = 'month:' || t.name
-                 WHERE ?2 IS NULL OR t.name = 'TODO.md'
-                    OR t.status IN ('running', 'long_running', 'blocked')
-                    OR t.name IN (SELECT subject FROM events WHERE id > ?2)
+                 WHERE ?2 IS NULL OR t.name IN (SELECT name FROM hot)
                  ORDER BY t.name",
             )
             .map_err(error)?;
