@@ -117,6 +117,12 @@ fn switch(name: &str) -> Result<String, String> {
         "systemctl",
         &["--user", "restart", "amh-watch.service"],
     )?;
+    // The quota observer runs the same binary; restart it only if it runs.
+    run(
+        &home(),
+        "systemctl",
+        &["--user", "try-restart", "amh-quota.service"],
+    )?;
     Ok(format!("live: {}\n", target.display()))
 }
 
