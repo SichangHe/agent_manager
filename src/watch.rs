@@ -1123,6 +1123,12 @@ impl Watcher {
                         log(&format!(
                             "{name}: replaced its agent with {new} on the human's order {mail}"
                         ));
+                        // The new agent's first turn answers the human's order.
+                        if let Err(error) =
+                            crate::replies::expect(&store.state_dir, &new, crate::replies::now_s())
+                        {
+                            log(&error);
+                        }
                         let _lock = store.lock()?;
                         if let Err(error) = database.finish_message(id, true, "") {
                             log(&error);

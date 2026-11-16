@@ -21,7 +21,7 @@ const OVERVIEW: &str = "What managers need to know:
 - The watcher archives events and resolved requests older than 30 days, and commits and pushes work-log Markdown hourly; you need not commit task files.
 
 What every agent needs to know:
-- When the human messages you, the text you end that turn with is sent to them. Use `amh tell human` only for what they need before you finish, and never repeat it in your final text. Answer other agents only with `amh tell`; your final text never goes to them.
+- When the human messages you, or started you with this prompt, the text you end that turn with is sent to them. Use `amh tell human` only for what they need before you finish, and never repeat it in your final text. Answer other agents only with `amh tell`; your final text never goes to them.
 - Any task from the human that you do not finish in your reply is an open item: add it at once with `amh tell human --add 'ITEM'`.
 - Work logs change only through amh; never edit them directly.";
 

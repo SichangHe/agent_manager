@@ -48,6 +48,20 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the human started this agent: they ran the command in a terminal (no agent session), or it carries their quoted message.
+fn human_started(quotes_human: bool) -> bool {
+    quotes_human || omnigent::own_address().is_err()
+}
+
+/// Make the end of the new agent's first turn owed to the human, like a reply to a human message.
+fn owe_first_reply(store: &Store, address: &str) {
+    if let Err(error) =
+        crate::replies::expect(&store.state_dir, address.trim(), crate::replies::now_s())
+    {
+        eprintln!("amh: the first reply will not be forwarded: {error}");
+    }
+}
+
 /// What to wait on instead of someone.
 // 🧑 "Let's disallow blocking on someone. First they need to create a task and let that someone own it, and block on this task"
 const WAIT_HOW: &str = "amh: wait only on a task file (OTHER.md), an item ID (NAME.md#N), or a date (--until 2026-11-20). To wait on the human, give them an item with `amh todo ask-human 'WHAT YOU NEED'` and wait for the ID it prints; to wait on another agent, add an item to its task with `amh task give OTHER.md 'WHAT YOU NEED'` and wait for that item. Without a dependency, do not block: keep the item open.";
@@ -1315,7 +1329,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 lines: text("lines"),
                 account: text("account"),
             };
-            agents::start_task(&settings, &store, &new)? + "\n"
+            let address = agents::start_task(&settings, &store, &new)?;
+            // 🧑 "I started a new main manager but don't receive them initial response. Is the first message counted as a response to the system? Should be to the human"
+            if human_started(text("email").is_some()) {
+                owe_first_reply(&store, &address);
+            }
+            address + "\n"
         }
         ("quota", "status") => {
             crate::quota_observer::status(&store.state_dir, chrono::Utc::now().timestamp())?
@@ -1580,6 +1599,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 None,
                 "on the human's order",
             )?;
+            if human_started(false) {
+                owe_first_reply(&store, &new);
+            }
             format!("{name} now runs at {new}\n")
         }
         ("agent", "retire") => {
@@ -1724,7 +1746,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         ("manager", "rotate") => {
             let (tool, model, effort) = (text("tool"), text("model"), text("effort"));
-            agents::rotate(&settings, &store, need("who"), tool, model, effort)? + "\n"
+            let new = agents::rotate(&settings, &store, need("who"), tool, model, effort)?;
+            if human_started(false) {
+                owe_first_reply(&store, &new);
+            }
+            new + "\n"
         }
         ("manager", "worktree") => {
             let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
