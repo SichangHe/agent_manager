@@ -420,6 +420,15 @@ impl Store {
         let stamp = database
             .record("export:stamp")?
             .and_then(|t| t.parse().ok());
+        // Once a day a deep pass reads every file, for edits that kept an old mtime (git checkout, rsync -t, a clock step).
+        let deep = database
+            .record("export:deep_at")?
+            .and_then(|t| t.parse::<i128>().ok());
+        if deep.is_none_or(|at| now - at > 86400 * 1_000_000_000) {
+            database.set_record("export:deep_at", &now.to_string())?;
+            database.set_record("export:full_at", &now.to_string())?;
+            return Ok((None, true));
+        }
         if full.is_none_or(|at| now - at > 3600 * 1_000_000_000) {
             database.set_record("export:full_at", &now.to_string())?;
             return Ok((stamp, true));
