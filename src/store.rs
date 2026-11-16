@@ -45,6 +45,26 @@ fn hot_after(database: &Database, full: bool) -> Result<Option<i64>, String> {
         .and_then(|id| id.parse().ok()))
 }
 
+/// The body lines of `file` that are not in `last`, the text amh last exported there: what someone typed.
+fn typed_lines(name: &str, file: &str, last: &str) -> Vec<String> {
+    let (Ok(typed), Ok(exported)) = (Task::parse(name, file), Task::parse(name, last)) else {
+        return Vec::new();
+    };
+    let mut known: Vec<&str> = exported.body.lines().collect();
+    typed
+        .body
+        .lines()
+        .filter(|line| match known.iter().position(|seen| seen == line) {
+            Some(at) => {
+                known.remove(at);
+                false
+            }
+            None => true,
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
 /// True when `path` exists and was last modified before `since`.
 fn untouched_since(path: &std::path::Path, since: Option<i128>) -> bool {
     let Some(since) = since else { return false };
@@ -61,6 +81,9 @@ pub static LOCK_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomi
 pub static LOCK_HOLD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The held writer lock; dropping it clears the holder line and counts the hold time.
+/// Whether this process took the writer lock; the CLI then exports changed task files after the command, outside the lock.
+pub static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 pub struct Held {
     file: File,
     since: std::time::Instant,
@@ -109,6 +132,10 @@ impl Store {
             .truncate(false)
             .open(&path)
             .map_err(failed)?;
+        // Schema checks happen on a process's first open; do them before taking the lock, so the lock is held for microseconds.
+        if self.state_dir.join("amh.sqlite3").exists() {
+            Database::open(&self.state_dir.join("amh.sqlite3"))?;
+        }
         if lock.try_lock().is_err() {
             // The lock file names its holder, so a long wait can be traced to the run that caused it.
             let holder = fs::read_to_string(&path).unwrap_or_default();
@@ -204,9 +231,7 @@ impl Store {
                 }
             }
         }
-        let next_stamp = since_next();
-        let (since, full) = self.export_since(&database)?;
-        self.take_in_edits(&database, since, full)?;
+        // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": the lock only orders writers; the watcher imports typed edits and exports task files (`sync_files`).
         if database.record("pending-block-queue-v1")?.is_none() {
             let mut snapshots = Vec::new();
             let mut events = Vec::new();
@@ -226,8 +251,7 @@ impl Store {
         }
         let import_ms = importing.elapsed().as_secs_f64() * 1000.0;
         let exporting = std::time::Instant::now();
-        self.export(&database, since, full)?;
-        database.set_record("export:stamp", &next_stamp.to_string())?;
+        LOCKED.store(true, std::sync::atomic::Ordering::Relaxed);
         Ok((
             Held {
                 file: lock,
@@ -241,31 +265,6 @@ impl Store {
         ))
     }
 
-    /// Keep body lines someone typed into an exported task file, which the next export would overwrite.
-    ///
-    /// A typed line is one in the file's body that is not in the text amh last exported there; it is appended to the task's body in the database.
-    // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
-    fn take_in_edits(
-        &self,
-        database: &Database,
-        since: Option<i128>,
-        full: bool,
-    ) -> Result<(), String> {
-        for (name, month, _) in database.export_states(false, hot_after(database, full)?)? {
-            if name == "TODO.md" || untouched_since(&self.root.join(&month).join(&name), since) {
-                continue;
-            }
-            let Some(text) = database.task(&name)? else {
-                continue;
-            };
-            let task = Task::parse(&name, &text)?;
-            if let Some(task) = self.with_typed_lines(database, &task)? {
-                self.save(&task)?;
-            }
-        }
-        Ok(())
-    }
-
     /// `task` with the body lines someone typed into its exported file appended, or `None` when nothing was typed.
     ///
     /// A typed line is one in the file's body that is not in the text amh last exported there.
@@ -275,6 +274,10 @@ impl Store {
         let month = database
             .record(&format!("month:{name}"))?
             .unwrap_or_default();
+        // A file untouched since the last export holds no typing; one stat instead of reading it (this runs in every save).
+        if untouched_since(&self.root.join(&month).join(name), stamp(database)?) {
+            return Ok(None);
+        }
         let Ok(file) = fs::read_to_string(self.root.join(&month).join(name)) else {
             return Ok(None);
         };
@@ -284,21 +287,7 @@ impl Store {
         if file == last || file == task.render() || name == "TODO.md" {
             return Ok(None);
         }
-        let (Ok(typed), Ok(exported)) = (Task::parse(name, &file), Task::parse(name, &last)) else {
-            return Ok(None);
-        };
-        let mut known: Vec<&str> = exported.body.lines().collect();
-        let added: Vec<&str> = typed
-            .body
-            .lines()
-            .filter(|line| match known.iter().position(|seen| seen == line) {
-                Some(at) => {
-                    known.remove(at);
-                    false
-                }
-                None => true,
-            })
-            .collect();
+        let added = typed_lines(name, &file, &last);
         if added.iter().all(|line| line.trim().is_empty()) {
             return Ok(None);
         }
@@ -343,7 +332,20 @@ impl Store {
             if recorded.as_deref() == Some(&text) && untouched_since(&path, since) {
                 continue;
             }
-            if fs::read_to_string(&path).ok().as_deref() != Some(&text) {
+            let current = fs::read_to_string(&path).ok();
+            // A file changed since amh last wrote it may hold typing not taken in yet: leave it for the import of the next pass.
+            let untaken = match (&current, &recorded) {
+                (Some(now), Some(last)) if now != last && *now != text => {
+                    typed_lines(&name, now, last).iter().any(|line| {
+                        !line.trim().is_empty() && !text.lines().any(|kept| kept == line)
+                    })
+                }
+                _ => false,
+            };
+            if untaken {
+                continue;
+            }
+            if current.as_deref() != Some(&text) {
                 taskfile::write(&path, &text)
                     .map_err(|error| format!("amh: cannot export {name}: {error}"))?;
             }
@@ -618,11 +620,47 @@ impl Store {
         Ok(to)
     }
 
+    /// Export changed task files now (no import); without a database, nothing.
     pub fn refresh_exports(&self) -> Result<(), String> {
         if let Some(database) = self.database()? {
             self.export(&database, stamp(&database)?, false)?;
         }
         Ok(())
+    }
+
+    /// Bring the Markdown and the database together, outside the lock: take in lines typed into changed task files (each under a brief lock), then export the tasks that changed.
+    ///
+    /// The watcher calls this every poll and after each commit wakeup; a file whose mtime did not change since the last pass costs one stat.
+    pub fn sync_files(&self) -> Result<(), String> {
+        let Some(database) = self.database()? else {
+            return Ok(());
+        };
+        let next_stamp = since_next();
+        let (since, full) = self.export_since(&database)?;
+        for (name, month, _) in database.export_states(false, hot_after(&database, full)?)? {
+            if name == "TODO.md" || untouched_since(&self.root.join(&month).join(&name), since) {
+                continue;
+            }
+            let Some(text) = database.task(&name)? else {
+                continue;
+            };
+            if self
+                .with_typed_lines(&database, &Task::parse(&name, &text)?)?
+                .is_none()
+            {
+                continue;
+            }
+            // Typed lines found: recheck against the committed text under the lock, then save.
+            let _lock = self.lock()?;
+            let Some(text) = database.task(&name)? else {
+                continue;
+            };
+            if let Some(task) = self.with_typed_lines(&database, &Task::parse(&name, &text)?)? {
+                self.save(&task)?;
+            }
+        }
+        self.export(&database, since, full)?;
+        database.set_record("export:stamp", &next_stamp.to_string())
     }
 
     pub fn contains(&self, name: &str) -> Result<bool, String> {
@@ -673,7 +711,7 @@ impl Store {
                 ],
                 &events,
             )?;
-            return self.export(&database, stamp(&database)?, false);
+            return Ok(());
         }
         let data = serde_json::to_string(&[
             (to.name.clone(), to.render()),
@@ -709,7 +747,11 @@ impl Store {
         let (task, events) = self.prepare(typed.as_ref().unwrap_or(task))?;
         if let Some(mut database) = self.database()? {
             database.commit(&[(task.name.clone(), task.render())], &events)?;
-            return self.export(&database, stamp(&database)?, false);
+            // Typed lines just taken in: export at once, or the next import would take them in again.
+            if typed.is_some() {
+                self.export(&database, stamp(&database)?, false)?;
+            }
+            return Ok(());
         }
         self.write(&task.name, &task.render())?;
         for event in events {
@@ -731,7 +773,6 @@ impl Store {
         let (task, events) = self.prepare(task)?;
         let received =
             database.receive_mail(key, &[(task.name.clone(), task.render())], &events)?;
-        self.export(&database, stamp(&database)?, false)?;
         Ok(received)
     }
 
@@ -751,7 +792,6 @@ impl Store {
             Some(key) => database.receive_mail(key, &snapshots, &events)?,
             None => database.commit(&snapshots, &events).map(|()| true)?,
         };
-        self.export(&database, stamp(&database)?, false)?;
         Ok(queued)
     }
 
@@ -934,7 +974,7 @@ impl Store {
                 return self.save(&task);
             }
             database.commit(&[(name.to_owned(), text.to_owned())], &[])?;
-            return self.export(&database, stamp(&database)?, false);
+            return Ok(());
         }
         taskfile::write(&self.root.join(name), text)
             .map_err(|error| format!("amh: cannot write {name}: {error}"))
@@ -997,6 +1037,18 @@ impl Store {
     }
 
     /// Every task file in the root that is not done, by file name.
+    /// The active tasks whose text names one of `words` (e.g. request IDs they wait on); found in SQL, so the rest are never parsed.
+    pub fn active_mentioning(&self, words: &[String]) -> Result<Vec<Task>, String> {
+        let Some(database) = self.database()? else {
+            return self.active();
+        };
+        let mut found = Vec::new();
+        for (name, text) in database.active_tasks_mentioning(words)? {
+            found.push(Task::parse(&name, &text)?);
+        }
+        Ok(found.into_iter().filter(Task::is_active).collect())
+    }
+
     pub fn active(&self) -> Result<Vec<Task>, String> {
         let tasks = match self.database()? {
             Some(database) => database
@@ -1115,6 +1167,7 @@ mod tests {
             "---\nstatus: running\nrunat: omnigent://worker\n---\n\n(pending)\nfirst\nsecond\n\n(pending)\nfirst\nsecond\n\n```\n(pending)\nexample\n```\n",
         )?;
         drop(store.lock()?);
+        store.sync_files()?;
         let db = Database::open(&store.state_dir.join("amh.sqlite3"))?;
         let initial = db.pending_messages("block")?;
         assert_eq!(initial.len(), 2);
@@ -1123,6 +1176,7 @@ mod tests {
         assert!(taskfile::pending_blocks(&store.load("t.md")?.body).is_empty());
         assert!(store.load("t.md")?.body.contains("```\n(pending)\nexample"));
         drop(store.lock()?);
+        store.sync_files()?;
         assert_eq!(db.pending_messages("block")?, initial);
         let failure =
             crate::agents::close_task(&BTreeMap::new(), &store, "t.md", false, false, false);
@@ -1138,6 +1192,7 @@ mod tests {
             fs::read_to_string(&path)? + "\n(pending)\nnew typed request\n",
         )?;
         drop(store.lock()?);
+        store.sync_files()?;
         assert_eq!(db.pending_messages("block")?.len(), 3);
         {
             let _lock = store.lock()?;
@@ -1156,6 +1211,7 @@ mod tests {
         store.drop_queued_mail("t.md")?;
         assert!(store.queued_mail("t.md")?.is_empty());
         drop(store.lock()?);
+        store.sync_files()?;
         assert!(db.pending_messages("block")?.is_empty());
         assert!(store.load("t.md")?.body.contains("new typed request"));
         fs::remove_dir_all(root)?;
@@ -1242,12 +1298,14 @@ mod tests {
         fs::create_dir(root.join("190001"))?;
         taskfile::write(&root.join("190001").join("t.md"), text)?;
         drop(store.lock()?);
+        store.sync_files()?;
         assert!(!root.join("t.md").exists(), "root copy removed");
         fs::remove_file(root.join("190001").join("t.md"))?;
         fs::create_dir_all(root.join("190001"))?;
         // A closed task's file is repaired by the hourly full pass; force one.
         Database::open(&store.state_dir.join("amh.sqlite3"))?.set_record("export:full_at", "0")?;
         drop(store.lock()?);
+        store.sync_files()?;
         assert!(
             root.join("190001").join("t.md").exists(),
             "exported to the filed folder"
@@ -1273,20 +1331,24 @@ mod tests {
         )?;
         taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
         drop(store.lock()?);
+        store.sync_files()?;
         let lock = store.lock()?;
         let mut task = store.load("t.md")?;
         crate::tasks::set_status(&mut task, "done", None)?;
         store.save(&task)?;
         drop(lock);
+        store.sync_files()?;
         let month = chrono::Utc::now().format("%Y%m").to_string();
         assert!(!root.join("t.md").exists() && root.join(&month).join("t.md").is_file());
         drop(store.lock()?);
+        store.sync_files()?;
         assert!(!root.join("t.md").exists(), "stays filed across exports");
         let lock = store.lock()?;
         let mut task = store.load("t.md")?;
         crate::tasks::set_status(&mut task, "running", None)?;
         store.save(&task)?;
         drop(lock);
+        store.sync_files()?;
         assert!(root.join("t.md").is_file() && !root.join(&month).join("t.md").exists());
         fs::remove_dir_all(&root)?;
         Ok(())
@@ -1306,6 +1368,7 @@ mod tests {
             state_dir: root.join("state"),
         };
         drop(store.lock()?);
+        store.sync_files()?;
         Ok((root, store))
     }
 
@@ -1315,6 +1378,7 @@ mod tests {
         crate::tasks::set_status(&mut task, "done", None)?;
         store.save(&task)?;
         drop(lock);
+        store.sync_files()?;
         Ok(())
     }
 
@@ -1333,6 +1397,7 @@ mod tests {
         task.body += "\n(note)\n";
         store.save(&task)?;
         drop(lock);
+        store.sync_files()?;
         let text = fs::read_to_string(&path)?;
         assert!(
             text.contains("a line the human typed") && text.contains("(note)"),
@@ -1417,6 +1482,7 @@ mod tests {
         // A closed task's stray root copy is found by the hourly full pass; force one.
         Database::open(&store.state_dir.join("amh.sqlite3"))?.set_record("export:full_at", "0")?;
         drop(store.lock()?);
+        store.sync_files()?;
         assert!(
             store
                 .record("filing-problems")?
@@ -1427,6 +1493,7 @@ mod tests {
         // Losing the database re-imports the filed task from its month folder.
         fs::remove_file(store.state_dir.join("amh.sqlite3"))?;
         drop(store.lock()?);
+        store.sync_files()?;
         assert_eq!(store.load("t.md")?.status(), "done");
         assert!(root.join(&month).join("t.md").is_file() && !root.join("t.md").exists());
         fs::remove_dir_all(&root)?;
@@ -1452,6 +1519,7 @@ mod tests {
         )?;
         taskfile::write(&root.join("TODO.md"), "current:\n\nprevious:\n")?;
         drop(store.lock()?);
+        store.sync_files()?;
         let path = root.join("t.md");
         fs::write(&path, fs::read_to_string(&path)? + "typed by a manager\n")?;
         let lock = store.lock()?;
@@ -1459,10 +1527,12 @@ mod tests {
         task.fields.push(("tool".to_owned(), "codex".to_owned()));
         store.save(&task)?;
         drop(lock);
+        store.sync_files()?;
         let text = fs::read_to_string(&path)?;
         assert!(text.contains("typed by a manager") && text.contains("tool: codex"));
         assert_eq!(text.matches("typed by a manager").count(), 1);
         drop(store.lock()?);
+        store.sync_files()?;
         assert_eq!(fs::read_to_string(&path)?, text);
         fs::remove_dir_all(&root)?;
         Ok(())
@@ -1544,6 +1614,7 @@ mod tests {
         let expected_source = store.load("source.md")?.render();
         let expected_target = store.load("target.md")?.render();
         drop(lock);
+        store.sync_files()?;
         fs::write(root.join("source.md"), "interrupted export")?;
         fs::remove_file(root.join("target.md"))?;
         fs::write(root.join("TODO.md"), "stale task list")?;
@@ -1556,6 +1627,7 @@ mod tests {
                 .iter()
                 .any(|request| request.id == request_id)
         );
+        store.sync_files()?;
         let lock = store.lock()?;
         assert_eq!(fs::read_to_string(root.join("source.md"))?, expected_source);
         assert_eq!(fs::read_to_string(root.join("target.md"))?, expected_target);
@@ -1569,9 +1641,10 @@ mod tests {
         requests::queue(&mut source, "target.md", "repeat")?;
         store.save(&source)?;
         assert_eq!(database.pending_messages("agent")?.len(), baseline + 2);
-        assert!(fs::read_to_string(root.join("amh_views/events.md"))?.contains("message queued"));
         drop(database);
         drop(lock);
+        store.sync_files()?;
+        assert!(fs::read_to_string(root.join("amh_views/events.md"))?.contains("message queued"));
         fs::remove_dir_all(root)?;
         Ok(())
     }

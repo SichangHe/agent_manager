@@ -139,15 +139,21 @@ fn main() -> ExitCode {
         eprintln!("{message}");
         1
     });
-    let ms =
-        |us: &std::sync::atomic::AtomicU64| us.load(std::sync::atomic::Ordering::Relaxed) / 1000;
+    // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": files of the tasks this command changed are written now, after the lock is released.
+    if store::LOCKED.load(std::sync::atomic::Ordering::Relaxed)
+        && let Err(error) =
+            settings::load().and_then(|settings| store::Store::new(&settings).refresh_exports())
+    {
+        eprintln!("amh: task files not refreshed yet (the watcher will): {error}");
+    }
+    let us = |us: &std::sync::atomic::AtomicU64| us.load(std::sync::atomic::Ordering::Relaxed);
     log::record(
         &line,
         &format!(
-            "exit={code} duration_ms={} lock_wait_ms={} lock_hold_ms={} build={}",
+            "exit={code} duration_ms={} lock_wait_us={} lock_hold_us={} build={}",
             began.elapsed().as_millis(),
-            ms(&store::LOCK_WAIT_US),
-            ms(&store::LOCK_HOLD_US),
+            us(&store::LOCK_WAIT_US),
+            us(&store::LOCK_HOLD_US),
             env!("AMH_BUILD")
         ),
     );

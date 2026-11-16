@@ -32,20 +32,15 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
 pub fn request_effects(store: &Store) -> Result<(), String> {
     let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let through = database.latest_event_id()?;
-    if database.cursor("request_effects")? < through {
-        let mut all = store.all()?;
-        let mut resolved = Vec::new();
-        for task in &mut all {
-            resolved.extend(
-                requests::sync(task)?
-                    .into_iter()
-                    .filter(|r| r.stage == requests::Stage::Resolved)
-                    .map(|r| r.id),
-            );
-        }
-        for task in &mut all {
-            if requests::unblock(task, &resolved)? {
-                store.save(task)?;
+    let cursor = database.cursor("request_effects")?;
+    if cursor < through {
+        // Only requests resolved since the last pass can release a waiter; it used to parse all ~7,600 tasks inside the lock on every change.
+        let resolved = database.subjects_since(cursor, "request resolved")?;
+        if !resolved.is_empty() {
+            for mut task in store.active_mentioning(&resolved)? {
+                if requests::unblock(&mut task, &resolved)? {
+                    store.save(&task)?;
+                }
             }
         }
         database.set_cursor("request_effects", through)?;
@@ -1056,13 +1051,19 @@ pub fn run(values: &Value) -> Result<u8, String> {
             need("file"),
             &many("image"),
         )?,
+        // Read without the lock; only a list that gains request records is saved, under it.
         ("todo", "list") => {
-            let _lock = store.lock()?;
             let mut task = store.own(text("task_file"))?;
             let before = task.render();
             let listed = requests::listed(&mut task)?;
             if task.render() != before {
-                store.save(&task)?;
+                let _lock = store.lock()?;
+                let mut task = store.load(&task.name)?;
+                let before = task.render();
+                requests::listed(&mut task)?;
+                if task.render() != before {
+                    store.save(&task)?;
+                }
             }
             listed
         }

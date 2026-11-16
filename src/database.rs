@@ -44,9 +44,27 @@ impl Database {
         connection
             .busy_timeout(Duration::from_secs(30))
             .map_err(error)?;
+        // The schema checks below run once per process and database; later opens only connect (they cost ~1 ms each, several per command).
+        // Keyed by inode too: a database file deleted and made anew is checked again.
+        static READY: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+            std::sync::Mutex::new(Vec::new());
+        let inode = |path: &Path| {
+            std::fs::metadata(path).map_or(0, |meta| std::os::unix::fs::MetadataExt::ino(&meta))
+        };
+        let key = (path.to_owned(), inode(path));
+        let ready = READY
+            .lock()
+            .map(|known| known.contains(&key))
+            .unwrap_or(false);
+        if ready {
+            connection
+                .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824;")
+                .map_err(error)?;
+            return Ok(Self(connection));
+        }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=FULL;
+             PRAGMA synchronous=NORMAL;
              PRAGMA mmap_size=1073741824;
              CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (name TEXT PRIMARY KEY, text TEXT NOT NULL);
@@ -97,6 +115,9 @@ impl Database {
                     "ALTER TABLE messages ADD COLUMN retry_at INTEGER NOT NULL DEFAULT 0",
                 )
                 .map_err(error)?;
+        }
+        if let Ok(mut known) = READY.lock() {
+            known.push((path.to_owned(), inode(path)));
         }
         Ok(Self(connection))
     }
@@ -172,6 +193,30 @@ impl Database {
             )
             .optional()
             .map_err(error)
+    }
+
+    /// The active tasks whose text contains any of `words`.
+    pub fn active_tasks_mentioning(
+        &self,
+        words: &[String],
+    ) -> Result<Vec<(String, String)>, String> {
+        let mut found = std::collections::BTreeMap::new();
+        let mut query = self
+            .0
+            .prepare("SELECT name, text FROM tasks WHERE status IN ('running', 'long_running', 'blocked') AND instr(text, ?1) > 0")
+            .map_err(error)?;
+        for word in words {
+            let rows = query
+                .query_map([word], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(error)?;
+            for row in rows {
+                let (name, text) = row.map_err(error)?;
+                found.insert(name, text);
+            }
+        }
+        Ok(found.into_iter().collect())
     }
 
     /// The tasks whose status is running, long_running or blocked, through the status index.
@@ -375,6 +420,18 @@ impl Database {
                 |row| row.get(0),
             )
             .map_err(error)
+    }
+
+    /// The subjects of events of `kind` after event `after`.
+    pub fn subjects_since(&self, after: i64, kind: &str) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare("SELECT DISTINCT subject FROM events WHERE id > ?1 AND kind = ?2")
+            .map_err(error)?;
+        let rows = query
+            .query_map(params![after, kind], |row| row.get::<_, String>(0))
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)
     }
 
     pub fn latest_event_id(&self) -> Result<i64, String> {

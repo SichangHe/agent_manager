@@ -1589,6 +1589,12 @@ pub fn run() -> u8 {
             log(&format!("request effects failed: {error}"));
         }
         log_elapsed("request state updates", phase);
+        // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": task files are imported and exported here, outside the lock.
+        let phase = Instant::now();
+        if let Err(error) = store.sync_files() {
+            log(&format!("task file sync failed: {error}"));
+        }
+        log_elapsed("task file sync", phase);
         if last_maintain.is_none_or(|at| at.elapsed() >= MAINTAIN_EVERY) {
             let phase = Instant::now();
             last_maintain = Some(Instant::now());
