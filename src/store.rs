@@ -35,14 +35,14 @@ fn stamp(database: &Database) -> Result<Option<i128>, String> {
         .and_then(|t| t.parse().ok()))
 }
 
-/// For a routine pass (`since` given), the event ID after which changed tasks are exported; `None` checks every task (full passes, and before the first routine export).
-fn hot_after(database: &Database, since: Option<i128>) -> Result<Option<i64>, String> {
-    Ok(match since {
-        None => None,
-        Some(_) => database
-            .record("export:through")?
-            .and_then(|id| id.parse().ok()),
-    })
+/// For a routine pass, the event ID after which changed tasks are exported; `None` checks every task (full passes, and before the first routine export).
+fn hot_after(database: &Database, full: bool) -> Result<Option<i64>, String> {
+    if full {
+        return Ok(None);
+    }
+    Ok(database
+        .record("export:through")?
+        .and_then(|id| id.parse().ok()))
 }
 
 /// True when `path` exists and was last modified before `since`.
@@ -205,8 +205,8 @@ impl Store {
             }
         }
         let next_stamp = since_next();
-        let since = self.export_since(&database)?;
-        self.take_in_edits(&database, since)?;
+        let (since, full) = self.export_since(&database)?;
+        self.take_in_edits(&database, since, full)?;
         if database.record("pending-block-queue-v1")?.is_none() {
             let mut snapshots = Vec::new();
             let mut events = Vec::new();
@@ -226,7 +226,7 @@ impl Store {
         }
         let import_ms = importing.elapsed().as_secs_f64() * 1000.0;
         let exporting = std::time::Instant::now();
-        self.export(&database, since)?;
+        self.export(&database, since, full)?;
         database.set_record("export:stamp", &next_stamp.to_string())?;
         Ok((
             Held {
@@ -245,8 +245,13 @@ impl Store {
     ///
     /// A typed line is one in the file's body that is not in the text amh last exported there; it is appended to the task's body in the database.
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
-    fn take_in_edits(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
-        for (name, month, _) in database.export_states(false, hot_after(database, since)?)? {
+    fn take_in_edits(
+        &self,
+        database: &Database,
+        since: Option<i128>,
+        full: bool,
+    ) -> Result<(), String> {
+        for (name, month, _) in database.export_states(false, hot_after(database, full)?)? {
             if name == "TODO.md" || untouched_since(&self.root.join(&month).join(&name), since) {
                 continue;
             }
@@ -316,10 +321,10 @@ impl Store {
     }
 
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
-    fn export(&self, database: &Database, since: Option<i128>) -> Result<(), String> {
+    fn export(&self, database: &Database, since: Option<i128>, full: bool) -> Result<(), String> {
         let mut git = None;
         let through = database.latest_event_id()?;
-        for (name, month, exported) in database.export_states(true, hot_after(database, since)?)? {
+        for (name, month, exported) in database.export_states(true, hot_after(database, full)?)? {
             // A task unchanged since the last export, whose file (and any stray root copy of a filed one) is untouched since, needs nothing; full passes (no `since`) still check all.
             let stray = self.root.join(&name);
             if exported
@@ -404,20 +409,22 @@ impl Store {
         database.set_record("export:events", &format!("{newest} {}", text.len()))
     }
 
-    /// The time before which an unchanged file needs no re-read: the start of the last complete export; none (read all) every 10 minutes or when unknown.
-    fn export_since(&self, database: &Database) -> Result<Option<i128>, String> {
+    /// The time before which an unchanged file needs no re-read (the start of the last complete export; none when unknown), and whether this pass checks every task.
+    ///
+    /// A full pass checks closed tasks too, hourly; it still skips files untouched since the stamp, so it costs stats, not reads (it took 2-3 s inside an agent's `tell human` when it read every file).
+    fn export_since(&self, database: &Database) -> Result<(Option<i128>, bool), String> {
         let now = now_ns();
         let full = database
             .record("export:full_at")?
             .and_then(|t| t.parse::<i128>().ok());
-        // A full pass checks closed tasks too; routine passes skip them, so it runs hourly, not every 10 min.
+        let stamp = database
+            .record("export:stamp")?
+            .and_then(|t| t.parse().ok());
         if full.is_none_or(|at| now - at > 3600 * 1_000_000_000) {
             database.set_record("export:full_at", &now.to_string())?;
-            return Ok(None);
+            return Ok((stamp, true));
         }
-        Ok(database
-            .record("export:stamp")?
-            .and_then(|t| t.parse().ok()))
+        Ok((stamp, false))
     }
 
     /// The `YYYYMM` folders of the root and the task files in them, as `(month, name)`.
@@ -604,7 +611,7 @@ impl Store {
 
     pub fn refresh_exports(&self) -> Result<(), String> {
         if let Some(database) = self.database()? {
-            self.export(&database, stamp(&database)?)?;
+            self.export(&database, stamp(&database)?, false)?;
         }
         Ok(())
     }
@@ -657,7 +664,7 @@ impl Store {
                 ],
                 &events,
             )?;
-            return self.export(&database, stamp(&database)?);
+            return self.export(&database, stamp(&database)?, false);
         }
         let data = serde_json::to_string(&[
             (to.name.clone(), to.render()),
@@ -693,7 +700,7 @@ impl Store {
         let (task, events) = self.prepare(typed.as_ref().unwrap_or(task))?;
         if let Some(mut database) = self.database()? {
             database.commit(&[(task.name.clone(), task.render())], &events)?;
-            return self.export(&database, stamp(&database)?);
+            return self.export(&database, stamp(&database)?, false);
         }
         self.write(&task.name, &task.render())?;
         for event in events {
@@ -715,7 +722,7 @@ impl Store {
         let (task, events) = self.prepare(task)?;
         let received =
             database.receive_mail(key, &[(task.name.clone(), task.render())], &events)?;
-        self.export(&database, stamp(&database)?)?;
+        self.export(&database, stamp(&database)?, false)?;
         Ok(received)
     }
 
@@ -735,7 +742,7 @@ impl Store {
             Some(key) => database.receive_mail(key, &snapshots, &events)?,
             None => database.commit(&snapshots, &events).map(|()| true)?,
         };
-        self.export(&database, stamp(&database)?)?;
+        self.export(&database, stamp(&database)?, false)?;
         Ok(queued)
     }
 
@@ -918,7 +925,7 @@ impl Store {
                 return self.save(&task);
             }
             database.commit(&[(name.to_owned(), text.to_owned())], &[])?;
-            return self.export(&database, stamp(&database)?);
+            return self.export(&database, stamp(&database)?, false);
         }
         taskfile::write(&self.root.join(name), text)
             .map_err(|error| format!("amh: cannot write {name}: {error}"))
