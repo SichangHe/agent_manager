@@ -48,6 +48,25 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
+/// Keep a message to a held agent until the human releases it: it is queued on the agent's own task and the watcher delivers it after the release.
+// The main manager: uiclient_godot.md's overview for the human was refused because its manager was held, and the worker parked it as an open item.
+fn queue_for_held(store: &Store, address: &str, message: &str) -> Result<String, String> {
+    let _lock = store.lock()?;
+    let mut task = store
+        .active()?
+        .into_iter()
+        .find(|task| task.address() == address)
+        .ok_or_else(|| {
+            format!("amh: {address} is held and runs no active task to keep the message for")
+        })?;
+    let name = task.name.clone();
+    requests::queue(&mut task, &name, message)?;
+    store.save(&task)?;
+    Ok(format!(
+        "queued: {name} is held until the human releases it; if the human needs this now, send it with `amh tell human`.\n"
+    ))
+}
+
 /// Whether a stored human message in the thread `tag` contains `words`.
 /// Only the human's Zulip messages count (`zulip-*.txt`, written by intake alone), and the words must name the main manager.
 fn human_wrote_to(store: &Store, tag: &str, words: &str) -> bool {
@@ -266,6 +285,10 @@ pub fn deliver_requests(settings: &Settings, store: &Store) -> Result<(), String
             false => None,
         };
         let address = agents::address_of(store, to).unwrap_or_default();
+        // A held agent gets its messages when the human releases it; until then nothing is tried or counted.
+        if omnigent::held(&address).is_some() {
+            continue;
+        }
         let dead = !address.starts_with(omnigent::PREFIX)
             || target.as_ref().is_some_and(|task| task.status() == "done");
         let kind = if dead {
@@ -969,6 +992,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 _ => return Err("amh: give TEXT or --file, not both".to_owned()),
             };
             let (manager, message) = work::manager_message(&task, &body, state)?;
+            if omnigent::held(manager).is_some() {
+                say(&(queue_for_held(&store, manager, &message)? + NO_REPEAT));
+                return Ok(0);
+            }
             match agents::report(&settings, &store, manager, &message, !state.is_empty())
                 .map_err(failed)?
             {
@@ -1085,6 +1112,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 }
             };
             let message = work::envelope(&from, &message);
+            if omnigent::held(&to).is_some() {
+                say(&(queue_for_held(&store, &to, &message)? + NO_REPEAT));
+                return Ok(0);
+            }
             omnigent::send(&settings, &to, &message).map_err(failed)?;
             say(NO_REPEAT);
             let _lock = store.lock()?;

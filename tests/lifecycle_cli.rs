@@ -818,3 +818,54 @@ fn an_agent_becomes_main_manager_only_when_the_human_asked()
     assert!(!forged.status.success());
     Ok(())
 }
+
+#[test]
+fn messages_to_a_held_agent_are_queued_not_refused() -> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-held-{}-{now}", std::process::id())));
+    fs::create_dir_all(workspace.0.join("state"))?;
+    let root = workspace.0.join("records");
+    fs::create_dir_all(&root)?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\n\n[omnigent]\nurl = \"http://127.0.0.1:9\"\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("m.md"),
+        "---\nstatus: long_running\nrunat: omnigent://mgr\nis_manager: true\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        root.join("w.md"),
+        "---\nstatus: running\nrunat: omnigent://wkr\nmanagerat: omnigent://mgr\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        workspace.0.join("state/amh-holds.json"),
+        "{\"mgr\": \"Human requested: pause\"}",
+    )?;
+    let said = workspace.ok(&[
+        "tell",
+        "manager",
+        "overview for the human",
+        "--task-file",
+        "w",
+    ])?;
+    assert!(
+        said.contains("queued: m.md is held until the human releases it"),
+        "{said}"
+    );
+    let said = workspace.ok(&["tell", "agent", "m.md", "--from", "script", "hello"])?;
+    assert!(said.contains("queued: m.md is held"), "{said}");
+    let m = fs::read_to_string(root.join("m.md"))?;
+    assert!(m.contains("overview for the human") && m.contains("hello"));
+    Ok(())
+}
