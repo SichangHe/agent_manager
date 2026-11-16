@@ -408,6 +408,25 @@ pub fn relaunch(
     ])
 }
 
+/// `env.toml` text with its top-level `main_manager` set to `address`; other keys, tables and comments unchanged. Pure.
+pub fn with_main_manager(env: &str, address: &str) -> String {
+    let line = format!("main_manager = \"{address}\"");
+    let mut lines: Vec<String> = env.lines().map(str::to_owned).collect();
+    let top_end = lines
+        .iter()
+        .position(|line| line.trim_start().starts_with('['))
+        .unwrap_or(lines.len());
+    let key = |line: &str| line.split_once('=').map(|(key, _)| key.trim().to_owned());
+    match lines[..top_end]
+        .iter()
+        .position(|l| key(l).as_deref() == Some("main_manager"))
+    {
+        Some(at) => lines[at] = line,
+        None => lines.insert(top_end, line),
+    }
+    lines.join("\n") + "\n"
+}
+
 /// The tasks that reported to the agent at `old`, changed to report to `new`.
 pub fn repointed(tasks: Vec<Task>, old: &str, new: &str) -> Vec<Task> {
     let mut moved: Vec<Task> = tasks
@@ -498,6 +517,18 @@ pub mod tests {
             items: items.iter().map(|item| (*item).to_owned()).collect(),
             body: body.to_owned(),
         }
+    }
+
+    #[test]
+    fn main_manager_is_set_only_at_the_top_level() {
+        let env = "# note\nwork_logs = \"/w\"\nmain_manager = \"omnigent://a\"\nmain_manager_old = \"x\"\n\n[omnigent]\nmain_manager = \"no\"\n";
+        let out = super::with_main_manager(env, "omnigent://b");
+        assert!(out.contains("main_manager = \"omnigent://b\"\nmain_manager_old = \"x\""));
+        assert!(out.contains("[omnigent]\nmain_manager = \"no\""));
+        assert!(
+            super::with_main_manager("[t]\nx = 1\n", "omnigent://b")
+                .starts_with("main_manager = \"omnigent://b\"\n[t]")
+        );
     }
 
     #[test]

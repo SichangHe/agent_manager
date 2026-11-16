@@ -1113,18 +1113,6 @@ impl Watcher {
             {
                 let started_s = crate::replies::now_s();
                 let (tool, model, effort, unknown) = decide::replace_target(&own);
-                if let Some(word) = &unknown {
-                    let text = format!(
-                        "\"{word}\" names no tool (claude, codex, cursor or antigravity); {name} is replaced on its current tool."
-                    );
-                    tell_human_once(
-                        settings,
-                        store,
-                        task,
-                        &format!("replace-tool {mail}"),
-                        &text,
-                    );
-                }
                 let to = (!tool.is_empty() || !model.is_empty() || !effort.is_empty()).then_some((
                     tool.as_str(),
                     model.as_str(),
@@ -1142,6 +1130,18 @@ impl Watcher {
                         log(&format!(
                             "{name}: replaced its agent with {new} on the human's order {mail}"
                         ));
+                        if let Some(word) = &unknown {
+                            let text = format!(
+                                "\"{word}\" names no tool (claude, codex, cursor or antigravity); {name} was replaced on its current tool."
+                            );
+                            tell_human_once(
+                                settings,
+                                store,
+                                task,
+                                &format!("replace-tool {mail}"),
+                                &text,
+                            );
+                        }
                         // The new agent's first turn answers the human's order.
                         if let Err(error) =
                             crate::replies::expect(&store.state_dir, &new, started_s)

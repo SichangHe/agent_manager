@@ -805,5 +805,16 @@ fn an_agent_becomes_main_manager_only_when_the_human_asked()
             .ok(&["task", "show", "old"])?
             .contains("managerat: omnigent://new")
     );
+    assert!(
+        !workspace
+            .ok(&["task", "show", "new"])?
+            .contains("managerat")
+    );
+    // An agent cannot name someone else's task to pass the check.
+    let forged = workspace
+        .command(&["manager", "become", "--task-file", "new"])
+        .env("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", "w")
+        .output()?;
+    assert!(!forged.status.success());
     Ok(())
 }

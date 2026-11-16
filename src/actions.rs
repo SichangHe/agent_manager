@@ -49,28 +49,31 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
 }
 
 /// Whether a stored human message in the thread `tag` contains `words`.
+/// Only the human's Zulip messages count (`zulip-*.txt`, written by intake alone), and the words must name the main manager.
 fn human_wrote_to(store: &Store, tag: &str, words: &str) -> bool {
     let words = words
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
         .to_lowercase();
-    if words.len() < 8 {
+    if words.len() < 15 || !words.contains("main manager") {
         return false;
     }
     let Ok(entries) = fs::read_dir(store.root.join("manager_mail")) else {
         return false;
     };
     entries.flatten().any(|entry| {
-        fs::read_to_string(entry.path()).is_ok_and(|text| {
-            text.starts_with(&format!("Subject: [{tag}]"))
-                && text
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
-                    .to_lowercase()
-                    .contains(&words)
-        })
+        let human = entry.file_name().to_string_lossy().starts_with("zulip-");
+        human
+            && fs::read_to_string(entry.path()).is_ok_and(|text| {
+                text.starts_with(&format!("Subject: [{tag}]"))
+                    && text
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .to_lowercase()
+                        .contains(&words)
+            })
     })
 }
 
@@ -1370,7 +1373,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
             // 🧑 "I started a new main manager but don't receive them initial response. Is the first message counted as a response to the system? Should be to the human"
             if human_started(text("email").is_some()) {
                 owe_first_reply(&store, &address, started_s);
-                // `amh manager become` trusts a manager the human started.
+            }
+            // `amh manager become` trusts a manager the human started from their own terminal.
+            if human_terminal() {
                 let name = need("task");
                 let _lock = store.lock()?;
                 if let Ok(mut task) = store.load(name) {
@@ -1793,20 +1798,21 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         // 🧑 "Agents should be able to make themselves main manager in the future and they should naturally find how to do it"
         ("manager", "become") => {
-            let _lock = store.lock()?;
-            let caller = store.own(text("task_file"))?;
-            let me = caller.address().to_owned();
-            if !me.starts_with(omnigent::PREFIX) {
-                return Err("amh: run this from your agent session".to_owned());
-            }
+            // Only the caller's own session counts: --task-file could name someone else's task.
+            let me = omnigent::own_address()
+                .map_err(|_| "amh: run this from your agent session".to_owned())?;
+            let lock = store.lock()?;
+            let caller = store
+                .active()?
+                .into_iter()
+                .find(|task| task.address() == me)
+                .ok_or("amh: no active task runs at your session")?;
             let started_as_manager = caller.field("started_by") == Some("human")
                 && caller.field("is_manager") == Some("true");
             let asked =
                 text("because").is_some_and(|words| human_wrote_to(&store, caller.tag(), words));
             if !started_as_manager && !asked {
-                return Err(format!(
-                    "amh: nothing changed: only an agent the human started as a manager, or one the human asked in its own thread (quote their words with --because), may become the main manager"
-                ));
+                return Err("amh: nothing changed: only an agent the human started as a manager, or one the human asked in its own thread (quote their words, naming the main manager, with --because), may become the main manager".to_owned());
             }
             let old = settings::get(&settings, "main_manager").to_owned();
             if old == me {
@@ -1821,53 +1827,47 @@ pub fn run(values: &Value) -> Result<u8, String> {
             ));
             fs::write(&backup, &text_now)
                 .map_err(|error| format!("amh: cannot back up env.toml: {error}"))?;
-            let mut replaced = false;
-            let lines: Vec<String> = text_now
-                .lines()
-                .map(
-                    |line| match line.trim_start().starts_with("main_manager") && !replaced {
-                        true => {
-                            replaced = true;
-                            format!("main_manager = \"{me}\"")
-                        }
-                        false => line.to_owned(),
-                    },
-                )
-                .collect();
-            let mut updated = lines.join("\n") + "\n";
-            if !replaced {
-                updated = format!("main_manager = \"{me}\"\n{updated}");
-            }
-            fs::write(&env, updated)
+            let temp = env.with_file_name("env.toml.new");
+            fs::write(&temp, work::with_main_manager(&text_now, &me))
+                .and_then(|()| fs::rename(&temp, &env))
                 .map_err(|error| format!("amh: cannot write env.toml: {error}"))?;
             let mut adopted = 0;
-            for report in work::repointed(store.active()?, &old, &me) {
-                if report.address() != me {
-                    store.save(&report)?;
+            for mut report in work::repointed(store.active()?, &old, &me) {
+                // The new main manager reports to nobody.
+                if report.address() == me {
+                    report.fields.retain(|(key, _)| key != "managerat");
+                } else {
                     adopted += 1;
                 }
+                store.save(&report)?;
             }
-            let mut told = String::new();
-            if let Some(mut previous) = store
+            let previous = store
                 .active()?
                 .into_iter()
-                .find(|task| task.address() == old)
-            {
+                .find(|task| task.address() == old);
+            if let Some(mut previous) = previous.clone() {
                 previous.fields.retain(|(key, _)| key != "managerat");
                 previous.fields.push(("managerat".to_owned(), me.clone()));
                 store.save(&previous)?;
-                let text = work::envelope(
-                    &me,
-                    &format!(
-                        "{} is the main manager now, on the human's order. Hand over each open item with `amh task move {} {} ITEM` (or finish it), then close your task with `amh task close {}`.",
-                        caller.name, previous.name, caller.name, previous.name
-                    ),
-                );
-                match omnigent::send(&settings, &old, &text) {
-                    Ok(()) => told = format!("; told {} to hand over and close", previous.name),
-                    Err(error) => told = format!("; telling {} failed: {error}", previous.name),
-                }
             }
+            // The message goes out after the lock is released.
+            drop(lock);
+            let told = match previous {
+                Some(previous) => {
+                    let text = work::envelope(
+                        &me,
+                        &format!(
+                            "{} is the main manager now, on the human's order. Hand over each open item with `amh task move {} {} ITEM` (or finish it), then close your task with `amh task close {}`.",
+                            caller.name, previous.name, caller.name, previous.name
+                        ),
+                    );
+                    match omnigent::send(&settings, &old, &text) {
+                        Ok(()) => format!("; told {} to hand over and close", previous.name),
+                        Err(error) => format!("; telling {} failed: {error}", previous.name),
+                    }
+                }
+                None => format!("; the old main manager {old} has no active task to hand over"),
+            };
             format!(
                 "you are the main manager; env.toml backed up to {}; {adopted} tasks now report to you{told}\n",
                 backup.display()

@@ -86,11 +86,8 @@ pub fn replace_target(body: &str) -> (String, String, String, Option<String>) {
         .unwrap_or_default()
         .trim_start_matches(['*', '_'])
         .to_lowercase();
-    let rest = first
-        .strip_prefix("replace this agent")
-        .unwrap_or_default()
-        .trim();
-    let Some(words) = rest.strip_prefix("with ") else {
+    let rest = first.strip_prefix("replace this agent").unwrap_or_default();
+    let Some((_, words)) = rest.split_once("with ") else {
         return Default::default();
     };
     let mut words = words
@@ -102,13 +99,26 @@ pub fn replace_target(body: &str) -> (String, String, String, Option<String>) {
         Some(tool) if ["claude", "codex", "cursor", "antigravity"].contains(&tool) => {
             target.0 = tool.to_owned()
         }
-        Some(other) => target.3 = Some(other.to_owned()),
+        // A tool amh does not know: the agent keeps its tool, model and effort.
+        Some(other) => {
+            target.3 = Some(other.to_owned());
+            return target;
+        }
         None => {}
     }
+    // Only words that look like a model count, so "with claude, it is stuck" names no model.
+    let model_like = |word: &str| {
+        word.contains('-')
+            || word.chars().any(|c| c.is_ascii_digit())
+            || [
+                "opus", "sonnet", "haiku", "fable", "terra", "sol", "luna", "astra",
+            ]
+            .contains(&word)
+    };
     for word in words {
         match word {
             "low" | "medium" | "high" | "xhigh" | "max" => target.2 = word.to_owned(),
-            _ if target.1.is_empty() => target.1 = word.to_owned(),
+            _ if target.1.is_empty() && model_like(word) => target.1 = word.to_owned(),
             _ => {}
         }
     }
@@ -1160,7 +1170,7 @@ mod tests {
             ("claude".into(), String::new(), String::new(), None)
         );
         assert_eq!(
-            t("replace this agent with codex gpt-6.1-terra high, it is stuck"),
+            t("replace this agent now with codex gpt-6.1-terra high, it is stuck"),
             ("codex".into(), "gpt-6.1-terra".into(), "high".into(), None)
         );
         assert_eq!(
@@ -1175,6 +1185,11 @@ mod tests {
         assert!(super::replace_order(
             "Replace this agent with claude opus low"
         ));
+        assert_eq!(
+            t("replace this agent with claude, it is stuck"),
+            ("claude".into(), String::new(), String::new(), None)
+        );
+        assert_eq!(t("replace this agent with gemini flash high").1, "");
     }
 
     #[test]
