@@ -112,6 +112,24 @@ pub fn write(task: &mut Task, requests: &[Request]) {
         .push((KEY.to_owned(), json!(records).to_string()));
 }
 
+/// Make `to` the creator of unresolved request `id` in `task`, so it approves the request instead of the old creator; returns the old creator.
+pub fn recreate(task: &mut Task, id: &str, to: &str) -> Result<String, String> {
+    let mut records = sync(task)?;
+    let request = records
+        .iter_mut()
+        .find(|r| r.id == id)
+        .ok_or("amh: no such request")?;
+    if request.stage == Stage::Resolved {
+        return Err(format!("amh: {id} is already resolved"));
+    }
+    if request.creator == "human" {
+        return Err(format!("amh: {id} is the human's request; its creator stays the human"));
+    }
+    let old = std::mem::replace(&mut request.creator, to.to_owned());
+    write(task, &records);
+    Ok(old)
+}
+
 /// Adopt legacy open items without changing their text or inferring external provenance.
 pub fn sync(task: &mut Task) -> Result<Vec<Request>, String> {
     let mut records = read(task)?;
@@ -946,6 +964,22 @@ mod tests {
         assert!(!blockers.contains(&blocker) && blockers.iter().any(|b| b.starts_with(EXTERNAL)));
         wait_on(&mut owner, &waiting, None)?;
         assert!(ready_items(&owner).contains(&item.as_str()));
+        Ok(())
+    }
+
+    #[test]
+    fn a_request_s_creator_can_be_moved_but_not_the_human_s() -> Result<(), String> {
+        let mut owner = task("owner.md", false);
+        let id = sync(&mut owner)?[0].id.clone();
+        let mut records = read(&owner)?;
+        records[0].creator = "old.md".to_owned();
+        write(&mut owner, &records);
+        assert_eq!(recreate(&mut owner, &id, "new.md")?, "old.md");
+        assert_eq!(read(&owner)?[0].creator, "new.md");
+        let mut records = read(&owner)?;
+        records[0].creator = "human".to_owned();
+        write(&mut owner, &records);
+        assert!(recreate(&mut owner, &id, "new.md").is_err());
         Ok(())
     }
 

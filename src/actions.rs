@@ -1234,6 +1234,39 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 task.name
             )
         }
+        ("todo", "creator") => {
+            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
+            let _lock = store.lock()?;
+            let caller = store.own(text("task_file"))?;
+            let id = need("id");
+            let to = need("to");
+            if !store.contains(to)? {
+                return Err(format!("amh: no task {to}"));
+            }
+            let mut owner = store
+                .all()?
+                .into_iter()
+                .find(|task| {
+                    requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id))
+                })
+                .ok_or("amh: no such request ID")?;
+            let creator = requests::read(&owner)?
+                .into_iter()
+                .find(|r| r.id == id)
+                .map(|r| r.creator)
+                .unwrap_or_default();
+            // Only the creator hands its request on, unless its agent is gone, e.g. a replaced manager.
+            if creator != caller.name && store.contains(&creator)? {
+                let old = store.load(&creator)?;
+                let state = omnigent::fetched_status(&settings, old.address()).0;
+                if !old.address().is_empty() && (state == "ready" || state == "running") {
+                    return Err(format!("amh: {creator} is running; only it may hand {id} on"));
+                }
+            }
+            let old = requests::recreate(&mut owner, id, to)?;
+            store.save(&owner)?;
+            format!("{id}: creator {old} -> {to}\n")
+        }
         ("todo", "take") => {
             let _lock = store.lock()?;
             let mut to = store.own(text("task_file"))?;
