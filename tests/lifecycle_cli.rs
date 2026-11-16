@@ -731,3 +731,79 @@ fn priorities_order_tasks_for_clients() -> Result<(), Box<dyn std::error::Error>
     );
     Ok(())
 }
+
+#[test]
+fn an_agent_becomes_main_manager_only_when_the_human_asked()
+-> Result<(), Box<dyn std::error::Error>> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)?
+        .as_nanos();
+    let workspace =
+        Workspace(std::env::temp_dir().join(format!("amh-become-{}-{now}", std::process::id())));
+    fs::create_dir_all(workspace.0.join("state"))?;
+    let root = workspace.0.join("records");
+    fs::create_dir_all(root.join("manager_mail"))?;
+    fs::write(
+        workspace.0.join("state/env.toml"),
+        format!(
+            "work_logs = {}\nmain_manager = \"omnigent://old\"\n\n[omnigent]\nurl = \"http://127.0.0.1:9\"\n",
+            serde_json::to_string(&root.to_string_lossy())?
+        ),
+    )?;
+    fs::write(
+        root.join("TODO.md"),
+        "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
+    )?;
+    fs::write(
+        root.join("old.md"),
+        "---\nstatus: long_running\nrunat: omnigent://old\nis_manager: true\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        root.join("new.md"),
+        "---\nstatus: long_running\nrunat: omnigent://new\nmanagerat: omnigent://old\nis_manager: true\npending_task_items: []\n---\n",
+    )?;
+    fs::write(
+        root.join("w.md"),
+        "---\nstatus: running\nrunat: omnigent://w\nmanagerat: omnigent://old\npending_task_items: []\n---\n",
+    )?;
+    let become_ = |because: Option<&str>| {
+        let mut command = workspace.command(&["manager", "become"]);
+        if let Some(words) = because {
+            command.args(["--because", words]);
+        }
+        command
+            .env("OMNIGENT_RUNNER_PRIMARY_SESSION_ID", "new")
+            .output()
+    };
+    let refused = become_(Some("please become the main manager now"))?;
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("nothing changed"));
+    fs::write(
+        root.join("manager_mail/zulip-1.txt"),
+        "Subject: [new] Zulip message\n\nPlease become   the main manager now, thanks\n",
+    )?;
+    let done = become_(Some("please become the main manager now"))?;
+    assert!(
+        done.status.success(),
+        "{}",
+        String::from_utf8_lossy(&done.stderr)
+    );
+    let env = fs::read_to_string(workspace.0.join("state/env.toml"))?;
+    assert!(env.contains("main_manager = \"omnigent://new\""));
+    assert!(fs::read_dir(workspace.0.join("state"))?.flatten().any(|e| {
+        e.file_name()
+            .to_string_lossy()
+            .starts_with("env.toml.pre-mainmgr-")
+    }));
+    assert!(
+        workspace
+            .ok(&["task", "show", "w"])?
+            .contains("managerat: omnigent://new")
+    );
+    assert!(
+        workspace
+            .ok(&["task", "show", "old"])?
+            .contains("managerat: omnigent://new")
+    );
+    Ok(())
+}

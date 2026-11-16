@@ -1112,12 +1112,30 @@ impl Watcher {
                 && task.address().starts_with(omnigent::PREFIX)
             {
                 let started_s = crate::replies::now_s();
+                let (tool, model, effort, unknown) = decide::replace_target(&own);
+                if let Some(word) = &unknown {
+                    let text = format!(
+                        "\"{word}\" names no tool (claude, codex, cursor or antigravity); {name} is replaced on its current tool."
+                    );
+                    tell_human_once(
+                        settings,
+                        store,
+                        task,
+                        &format!("replace-tool {mail}"),
+                        &text,
+                    );
+                }
+                let to = (!tool.is_empty() || !model.is_empty() || !effort.is_empty()).then_some((
+                    tool.as_str(),
+                    model.as_str(),
+                    effort.as_str(),
+                ));
                 match crate::agents::replace(
                     settings,
                     store,
                     name,
                     &decide::mail_text(mail, &stored, task.tag(), false),
-                    None,
+                    to,
                     "on the human's order",
                 ) {
                     Ok(new) => {

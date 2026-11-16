@@ -418,8 +418,24 @@ pub fn replace(
         None,
     )
     .map_err(agent)?;
-    let [tool, model, effort, workdir] =
+    let [tool, mut model, mut effort, workdir] =
         work::relaunch(&session, to.map(|t| t.0), to.map(|t| t.1), to.map(|t| t.2))?;
+    // A new tool without a model or effort takes that tool's defaults, not the old tool's.
+    let current = session["harness"]
+        .as_str()
+        .unwrap_or_default()
+        .trim_end_matches("-native");
+    if tool != current {
+        let is_manager = task.field("is_manager") == Some("true");
+        let (default_model, default_effort) =
+            omnigent::launch_default(settings, &tool, is_manager).map_err(agent)?;
+        if to.is_none_or(|t| t.1.is_empty()) {
+            model = default_model;
+        }
+        if to.is_none_or(|t| t.2.is_empty()) {
+            effort = default_effort;
+        }
+    }
     let open = crate::requests::listed(&mut task)?;
     let root = store.root.display().to_string();
     let request = work::replacement(&task, &old, &root, message, &open);

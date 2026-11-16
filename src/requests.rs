@@ -123,7 +123,9 @@ pub fn recreate(task: &mut Task, id: &str, to: &str) -> Result<String, String> {
         return Err(format!("amh: {id} is already resolved"));
     }
     if request.creator == "human" {
-        return Err(format!("amh: {id} is the human's request; its creator stays the human"));
+        return Err(format!(
+            "amh: {id} is the human's request; its creator stays the human"
+        ));
     }
     let old = std::mem::replace(&mut request.creator, to.to_owned());
     write(task, &records);

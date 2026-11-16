@@ -76,6 +76,45 @@ pub fn replace_order(body: &str) -> bool {
     starts_with_order(body, "replace this agent")
 }
 
+/// What "replace this agent with TOOL [MODEL] [EFFORT]" asks for: the tool, model and effort (empty when not given), and a word that names no tool. Pure.
+// 🧑 "I want e.g. \"replace this agent with Claude\" to also work s.t. I can replace tool used via messaging"
+pub fn replace_target(body: &str) -> (String, String, String, Option<String>) {
+    let first = body
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('>'))
+        .unwrap_or_default()
+        .trim_start_matches(['*', '_'])
+        .to_lowercase();
+    let rest = first
+        .strip_prefix("replace this agent")
+        .unwrap_or_default()
+        .trim();
+    let Some(words) = rest.strip_prefix("with ") else {
+        return Default::default();
+    };
+    let mut words = words
+        .split(|c: char| c.is_whitespace() || c == ',')
+        .map(|word| word.trim_matches(|c: char| ".!?;:*_".contains(c)))
+        .filter(|word| !word.is_empty());
+    let mut target = (String::new(), String::new(), String::new(), None);
+    match words.next() {
+        Some(tool) if ["claude", "codex", "cursor", "antigravity"].contains(&tool) => {
+            target.0 = tool.to_owned()
+        }
+        Some(other) => target.3 = Some(other.to_owned()),
+        None => {}
+    }
+    for word in words {
+        match word {
+            "low" | "medium" | "high" | "xhigh" | "max" => target.2 = word.to_owned(),
+            _ if target.1.is_empty() => target.1 = word.to_owned(),
+            _ => {}
+        }
+    }
+    target
+}
+
 /// Whether the human's own text starts by asking to terminate the agent.
 // 🧑 "Things like \"replace this agent\" and \"terminate this agent\" should immediately cause the system to do them, no?"
 pub fn terminate_order(body: &str) -> bool {
@@ -1111,6 +1150,32 @@ pub fn stall_text(task: &str, reminders: u32, n_items: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn replace_orders_name_tool_model_and_effort() {
+        let t = |body: &str| super::replace_target(body);
+        assert_eq!(t("Replace this agent"), Default::default());
+        assert_eq!(
+            t("Replace this agent with Claude"),
+            ("claude".into(), String::new(), String::new(), None)
+        );
+        assert_eq!(
+            t("replace this agent with codex gpt-6.1-terra high, it is stuck"),
+            ("codex".into(), "gpt-6.1-terra".into(), "high".into(), None)
+        );
+        assert_eq!(
+            t("**Replace this agent with Gemini**"),
+            (
+                String::new(),
+                String::new(),
+                String::new(),
+                Some("gemini".into())
+            )
+        );
+        assert!(super::replace_order(
+            "Replace this agent with claude opus low"
+        ));
+    }
 
     #[test]
     fn notices_for_unreachable_managers_go_to_the_main_manager_except_for_the_main_manager() {

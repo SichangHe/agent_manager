@@ -17,7 +17,7 @@ const OVERVIEW: &str = "What managers need to know:
 - Where a row sits in `TODO.md` follows its status; `amh task place TASK --under SECTION` pins it elsewhere when the human says so.
 - Messages: `amh tell manager`, `amh tell human`, `amh tell agent WHO`. The watcher delivers queued messages and human email, routes mail addressed `for manager` to the manager, and reminds idle agents of ready items.
 - Watching agents: `amh agent problems`, `amh agent status TASK`, `amh agent replace`, `amh agent compact`.
-- Main manager: `amh manager watchers` restarts the watcher after amh changes; `amh manager worktree` lists uncommitted changes in manager-owned repositories.
+- Main manager: `amh manager become` makes you the main manager when the human asks; `amh manager watchers` restarts the watcher after amh changes; `amh manager worktree` lists uncommitted changes in manager-owned repositories.
 - The watcher archives events and resolved requests older than 30 days, and commits and pushes work-log Markdown hourly; you need not commit task files.
 
 What every agent needs to know:
@@ -293,6 +293,10 @@ pub fn command() -> Command {
         .subcommand(Command::new("manager").about("Main manager: the watcher, replacing a manager, and repository checks.").subcommand_required(true).arg_required_else_help(true)
             .after_help("Storage: the first locked operation imports existing tasks and event history into amh.sqlite3 in AMH_STATE_DIR. SQLite then owns task state; Markdown is regenerated for reading. Use `amh edit TASK` to append human prompts. The watcher archives events and dated resolved requests after 30 days and commits work-log Markdown hourly. Set [archive] commit = false to disable automatic commits. Unknown legacy resolution dates start their retention window at migration.")
             .subcommand(Command::new("watchers").about("Restart the background watcher that takes in email and delivers pending work.")
+            )
+            .subcommand(Command::new("become").about("Make yourself the main manager, when the human asked you to.").long_about("Make yourself the main manager, when the human asked you to.\n\nAllowed when the human started your task as a manager, or with --because quoting the human's words from a message in your own thread. It backs up env.toml, sets main_manager to your session, makes every task that reported to the old main manager report to you, makes the old main manager report to you, and tells it to hand over its open items (`amh task move`) and close.")
+                .arg(Arg::new("because").long("because").value_name("WORDS").help("the human's words, from a message in your own thread, asking you to become the main manager"))
+                .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when amh cannot tell who you are"))
             )
             .subcommand(Command::new("rotate").about("Replace a manager with a fresh one that takes over its task and reports.")
                 .arg(Arg::new("who").required(true).value_name("TASK.md").help("the manager's task file"))
