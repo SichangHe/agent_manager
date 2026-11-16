@@ -269,13 +269,18 @@ impl Store {
     ///
     /// A typed line is one in the file's body that is not in the text amh last exported there.
     // lost_work_mgr.md: "amh task start rewrote vd_lit_venues.md's body and dropped the added opc line"
-    fn with_typed_lines(&self, database: &Database, task: &Task) -> Result<Option<Task>, String> {
+    fn with_typed_lines(
+        &self,
+        database: &Database,
+        task: &Task,
+        force: bool,
+    ) -> Result<Option<Task>, String> {
         let name = &task.name;
         let month = database
             .record(&format!("month:{name}"))?
             .unwrap_or_default();
         // A file untouched since the last export holds no typing; one stat instead of reading it (this runs in every save).
-        if untouched_since(&self.root.join(&month).join(name), stamp(database)?) {
+        if !force && untouched_since(&self.root.join(&month).join(name), stamp(database)?) {
             return Ok(None);
         }
         let Ok(file) = fs::read_to_string(self.root.join(&month).join(name)) else {
@@ -311,7 +316,17 @@ impl Store {
 
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
     fn export(&self, database: &Database, since: Option<i128>, full: bool) -> Result<(), String> {
+        // Exporters run outside the writer lock; this lock lets only one write task files at a time, so an older text never overwrites a newer one.
+        let exporting = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.state_dir.join("amh-export.lock"))
+            .map_err(|error| format!("amh: cannot open the export lock: {error}"))?;
+        exporting
+            .lock()
+            .map_err(|error| format!("amh: cannot take the export lock: {error}"))?;
         let mut git = None;
+        let mut untaken_names = Vec::new();
         let through = database.latest_event_id()?;
         for (name, month, exported) in database.export_states(true, hot_after(database, full)?)? {
             // A task unchanged since the last export, whose file (and any stray root copy of a filed one) is untouched since, needs nothing; full passes (no `since`) still check all.
@@ -343,6 +358,12 @@ impl Store {
                 _ => false,
             };
             if untaken {
+                untaken_names.push(name.clone());
+                continue;
+            }
+            // Someone may have saved the file since it was read above; then leave it for the import.
+            if fs::read_to_string(&path).ok() != current {
+                untaken_names.push(name.clone());
                 continue;
             }
             if current.as_deref() != Some(&text) {
@@ -354,6 +375,21 @@ impl Store {
             }
         }
         database.set_record("export:through", &through.to_string())?;
+        // Files left alone for typing are imported by the watcher's next pass whatever their mtime.
+        if !untaken_names.is_empty() {
+            let mut pending: Vec<String> = database
+                .record("export:untaken")?
+                .unwrap_or_default()
+                .lines()
+                .map(str::to_owned)
+                .collect();
+            for name in untaken_names {
+                if !pending.contains(&name) {
+                    pending.push(name);
+                }
+            }
+            database.set_record("export:untaken", &pending.join("\n"))?;
+        }
         self.export_events(database)
     }
 
@@ -637,27 +673,35 @@ impl Store {
         };
         let next_stamp = since_next();
         let (since, full) = self.export_since(&database)?;
-        for (name, month, _) in database.export_states(false, hot_after(&database, full)?)? {
-            if name == "TODO.md" || untouched_since(&self.root.join(&month).join(&name), since) {
+        let forced: Vec<String> = database
+            .record("export:untaken")?
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        database.set_record("export:untaken", "")?;
+        let listing = hot_after(&database, full || !forced.is_empty())?;
+        for (name, month, _) in database.export_states(false, listing)? {
+            let force = forced.contains(&name);
+            let touched = force || !untouched_since(&self.root.join(&month).join(&name), since);
+            if name == "TODO.md" || !touched {
                 continue;
             }
             let Some(text) = database.task(&name)? else {
                 continue;
             };
             if self
-                .with_typed_lines(&database, &Task::parse(&name, &text)?)?
+                .with_typed_lines(&database, &Task::parse(&name, &text)?, force)?
                 .is_none()
             {
                 continue;
             }
-            // Typed lines found: recheck against the committed text under the lock, then save.
+            // Typed lines found: save the committed text under the lock; the save takes them in.
             let _lock = self.lock()?;
             let Some(text) = database.task(&name)? else {
                 continue;
             };
-            if let Some(task) = self.with_typed_lines(&database, &Task::parse(&name, &text)?)? {
-                self.save(&task)?;
-            }
+            self.save_typed(&Task::parse(&name, &text)?, force)?;
         }
         self.export(&database, since, full)?;
         database.set_record("export:stamp", &next_stamp.to_string())
@@ -739,9 +783,14 @@ impl Store {
     }
 
     pub fn save(&self, task: &Task) -> Result<(), String> {
+        self.save_typed(task, false)
+    }
+
+    /// `save`; with `force`, lines typed into the file are taken in even when its mtime is older than the last export.
+    fn save_typed(&self, task: &Task, force: bool) -> Result<(), String> {
         // Routine lock passes skip closed tasks, so lines typed into a closed task's file are taken in here, before the save overwrites the file.
         let typed = match self.database()? {
-            Some(database) => self.with_typed_lines(&database, task)?,
+            Some(database) => self.with_typed_lines(&database, task, force)?,
             None => None,
         };
         let (task, events) = self.prepare(typed.as_ref().unwrap_or(task))?;

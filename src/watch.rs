@@ -1111,6 +1111,7 @@ impl Watcher {
                 && plan.target == task.address()
                 && task.address().starts_with(omnigent::PREFIX)
             {
+                let started_s = crate::replies::now_s();
                 match crate::agents::replace(
                     settings,
                     store,
@@ -1125,7 +1126,7 @@ impl Watcher {
                         ));
                         // The new agent's first turn answers the human's order.
                         if let Err(error) =
-                            crate::replies::expect(&store.state_dir, &new, crate::replies::now_s())
+                            crate::replies::expect(&store.state_dir, &new, started_s)
                         {
                             log(&error);
                         }

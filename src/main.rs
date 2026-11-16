@@ -169,6 +169,11 @@ fn detach() -> Result<String, String> {
         .arg(exe)
         .args(std::env::args_os().skip(1))
         .env("AMH_DETACHED", "1")
+        // The detached start has no terminal; it keeps whether the human ran the command, for the owed first reply.
+        .env(
+            "AMH_HUMAN_STARTED",
+            if actions::human_terminal() { "1" } else { "0" },
+        )
         .stdin(std::process::Stdio::null())
         .stdout(file.try_clone().map_err(|e| e.to_string())?)
         .stderr(file)

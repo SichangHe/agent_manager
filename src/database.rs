@@ -56,7 +56,17 @@ impl Database {
             .lock()
             .map(|known| known.contains(&key))
             .unwrap_or(false);
-        if ready {
+        // A file made anew may reuse the inode; one cheap probe confirms the schema is there.
+        let has_schema = || {
+            connection
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'events')",
+                    [],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap_or(false)
+        };
+        if ready && has_schema() {
             connection
                 .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824;")
                 .map_err(error)?;
@@ -64,7 +74,7 @@ impl Database {
         }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
+             PRAGMA synchronous=NORMAL; -- WAL: no corruption on a crash; the last commits may be lost on power loss, not on a process crash
              PRAGMA mmap_size=1073741824;
              CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (name TEXT PRIMARY KEY, text TEXT NOT NULL);

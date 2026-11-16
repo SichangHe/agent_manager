@@ -48,16 +48,24 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether the human started this agent: they ran the command in a terminal (no agent session), or it carries their quoted message.
-fn human_started(quotes_human: bool) -> bool {
-    quotes_human || omnigent::own_address().is_err()
+/// Whether the human runs this command: an interactive terminal outside any agent session (scripts and agents' shells have no terminal), or a detached start the human ran.
+pub fn human_terminal() -> bool {
+    use std::io::IsTerminal;
+    match std::env::var("AMH_HUMAN_STARTED").as_deref() {
+        Ok("1") => true,
+        Ok(_) => false,
+        Err(_) => omnigent::own_address().is_err() && io::stdin().is_terminal(),
+    }
 }
 
-/// Make the end of the new agent's first turn owed to the human, like a reply to a human message.
-fn owe_first_reply(store: &Store, address: &str) {
-    if let Err(error) =
-        crate::replies::expect(&store.state_dir, address.trim(), crate::replies::now_s())
-    {
+/// Whether the human started this agent: they ran the command, or it carries their quoted message.
+fn human_started(quotes_human: bool) -> bool {
+    quotes_human || human_terminal()
+}
+
+/// Make the end of the new agent's first turn owed to the human, like a reply to a human message; `since_s` is taken before the start, so a fast first turn still counts.
+fn owe_first_reply(store: &Store, address: &str, since_s: i64) {
+    if let Err(error) = crate::replies::expect(&store.state_dir, address.trim(), since_s) {
         eprintln!("amh: the first reply will not be forwarded: {error}");
     }
 }
@@ -1069,12 +1077,12 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("todo", "list") => {
             let mut task = store.own(text("task_file"))?;
             let before = task.render();
-            let listed = requests::listed(&mut task)?;
+            let mut listed = requests::listed(&mut task)?;
             if task.render() != before {
                 let _lock = store.lock()?;
                 let mut task = store.load(&task.name)?;
                 let before = task.render();
-                requests::listed(&mut task)?;
+                listed = requests::listed(&mut task)?;
                 if task.render() != before {
                     store.save(&task)?;
                 }
@@ -1329,10 +1337,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 lines: text("lines"),
                 account: text("account"),
             };
+            let started_s = crate::replies::now_s();
             let address = agents::start_task(&settings, &store, &new)?;
             // 🧑 "I started a new main manager but don't receive them initial response. Is the first message counted as a response to the system? Should be to the human"
             if human_started(text("email").is_some()) {
-                owe_first_reply(&store, &address);
+                owe_first_reply(&store, &address, started_s);
             }
             address + "\n"
         }
@@ -1591,6 +1600,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 task.fields.push(("account".to_owned(), account.to_owned()));
                 store.save(&task)?;
             }
+            let started_s = crate::replies::now_s();
             let new = agents::replace(
                 &settings,
                 &store,
@@ -1600,7 +1610,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 "on the human's order",
             )?;
             if human_started(false) {
-                owe_first_reply(&store, &new);
+                owe_first_reply(&store, &new, started_s);
             }
             format!("{name} now runs at {new}\n")
         }
@@ -1746,9 +1756,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         ("manager", "rotate") => {
             let (tool, model, effort) = (text("tool"), text("model"), text("effort"));
+            let started_s = crate::replies::now_s();
             let new = agents::rotate(&settings, &store, need("who"), tool, model, effort)?;
             if human_started(false) {
-                owe_first_reply(&store, &new);
+                owe_first_reply(&store, &new, started_s);
             }
             new + "\n"
         }
