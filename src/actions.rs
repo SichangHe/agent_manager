@@ -132,15 +132,26 @@ fn ask_human(store: &Store, asker: &str, what: &str) -> Result<String, String> {
 /// Release tasks blocked on a task that closed, remind about other blocks and outside waits with backoff, and date undated requests; the watcher calls this every few minutes under the store lock.
 // 🧑 "What are the waiting on? Previously I asked for the task blocked on to block on other tasks, was that ever implemented?"
 // 🧑 "Blocked tasks that are not blocked on other tasks should have long reminders with exponential backoff. Maybe 1hr, base 1.5?"
-/// The task that owns item `id` (`NAME.md#N`), loaded alone; `None` when there is no such task.
-fn item_owner(store: &Store, id: &str) -> Result<Option<Task>, String> {
-    let Some((name, _)) = id.split_once('#') else {
-        return Ok(None);
-    };
-    if !name.ends_with(".md") || name == "TODO.md" || !store.contains(name)? {
-        return Ok(None);
+/// The task that owns item `id`: first the task its name starts with (`NAME.md#N`), loaded alone; only an item handed to another task (`todo take`) needs the scan of every task.
+fn find_owner(store: &Store, id: &str) -> Result<Option<Task>, String> {
+    let holds =
+        |task: &Task| requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id));
+    if let Some((name, _)) = id.split_once('#')
+        && name.ends_with(".md")
+        && name != "TODO.md"
+        && store.contains(name)?
+    {
+        let task = store.load(name)?;
+        if holds(&task) {
+            return Ok(Some(task));
+        }
     }
-    store.load(name).map(Some)
+    Ok(store.all()?.into_iter().find(|task| holds(task)))
+}
+
+/// `find_owner`, for item blocks.
+fn item_owner(store: &Store, id: &str) -> Result<Option<Task>, String> {
+    find_owner(store, id)
 }
 
 /// The tasks that own `ids` and, through their blockers, every item those wait on.
@@ -158,7 +169,12 @@ fn reachable(store: &Store, ids: &[String]) -> Result<Vec<Task>, String> {
         {
             continue;
         }
-        let mut owner = store.load(name)?;
+        let Some(mut owner) = find_owner(store, &id)? else {
+            continue;
+        };
+        if found.iter().any(|task| task.name == owner.name) {
+            continue;
+        }
         for record in requests::sync(&mut owner)? {
             frontier.extend(
                 record
@@ -1272,13 +1288,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let _lock = store.lock()?;
             let caller = store.own(text("task_file"))?;
             let id = need("id");
-            let owner = store
-                .all()?
-                .into_iter()
-                .find(|task| {
-                    requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id))
-                })
-                .ok_or("amh: no such request ID")?;
+            let owner = find_owner(&store, id)?.ok_or("amh: no such request ID")?;
             let mut owner = owner;
             let request = requests::decide(
                 &mut owner,
@@ -1373,13 +1383,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if !store.contains(to)? {
                 return Err(format!("amh: no task {to}"));
             }
-            let mut owner = store
-                .all()?
-                .into_iter()
-                .find(|task| {
-                    requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id))
-                })
-                .ok_or("amh: no such request ID")?;
+            let mut owner = find_owner(&store, id)?.ok_or("amh: no such request ID")?;
             let creator = requests::read(&owner)?
                 .into_iter()
                 .find(|r| r.id == id)
@@ -1403,13 +1407,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let _lock = store.lock()?;
             let mut to = store.own(text("task_file"))?;
             let id = need("id");
-            let mut source = store
-                .all()?
-                .into_iter()
-                .find(|task| {
-                    requests::read(task).is_ok_and(|records| records.iter().any(|r| r.id == id))
-                })
-                .ok_or("amh: no such request ID")?;
+            let mut source = find_owner(&store, id)?.ok_or("amh: no such request ID")?;
             requests::transfer(&mut source, &mut to, id)?;
             store.save_transfer(&source, &to)?;
             String::new()
