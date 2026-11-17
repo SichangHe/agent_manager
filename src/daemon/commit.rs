@@ -14,7 +14,7 @@ const BATCH_MAX: usize = 256;
 /// Most statements one write may hold.
 pub const WRITE_MAX: usize = 64;
 /// A batch slower than this is logged.
-const SLOW_BATCH: Duration = Duration::from_millis(5);
+const SLOW_BATCH: Duration = Duration::from_millis(2);
 /// Queue waits kept for the p99 gate.
 const WAITS_KEPT: usize = 65_536;
 
@@ -165,10 +165,55 @@ fn run(
             holds.push(took.as_micros().min(u32::MAX as u128) as u32);
         }
         if took > SLOW_BATCH {
+            // What was in it: each statement's start and the bytes of its parameters, largest first.
+            // The main manager: "record, for every writer batch over 2 ms, the statements and row sizes in it"
+            let mut parts: Vec<(usize, String)> = batch
+                .iter()
+                .flat_map(|job| job.write.statements.iter())
+                .map(|statement| {
+                    let bytes: usize = statement
+                        .params
+                        .iter()
+                        .map(|param| match param {
+                            rusqlite::types::Value::Text(text) => text.len(),
+                            rusqlite::types::Value::Blob(blob) => blob.len(),
+                            _ => 8,
+                        })
+                        .sum();
+                    let head: String = statement
+                        .sql
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                        .chars()
+                        .take(70)
+                        .collect();
+                    let first = statement
+                        .params
+                        .first()
+                        .and_then(|param| match param {
+                            rusqlite::types::Value::Text(text) => {
+                                Some(text.chars().take(40).collect::<String>())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+                    (bytes, format!("{bytes}B {head} [{first}]"))
+                })
+                .collect();
+            parts.sort_by(|a, b| b.0.cmp(&a.0));
             eprintln!(
-                "amhd: commit batch of {} writes took {} ms",
+                "amhd: commit batch of {} writes, {} statements, {} bytes took {} us: {}",
                 batch.len(),
-                took.as_millis()
+                parts.len(),
+                parts.iter().map(|p| p.0).sum::<usize>(),
+                took.as_micros(),
+                parts
+                    .iter()
+                    .take(6)
+                    .map(|p| p.1.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
             );
         }
         if results

@@ -30,6 +30,7 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
 
 /// Commit dependency releases and delivery intents; the watcher sends them with `deliver_requests`.
 pub fn request_effects(store: &Store) -> Result<(), String> {
+    let _phase = crate::store::Phase::new("request_effects");
     let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let through = database.latest_event_id()?;
     let cursor = database.cursor("request_effects")?;

@@ -97,12 +97,76 @@ pub static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 pub struct Held {
     file: File,
     since: std::time::Instant,
+    state_dir: std::path::PathBuf,
+}
+
+thread_local! {
+    /// Where the time of the current store-lock hold went, for holds over 1 ms.
+    static PHASES: std::cell::RefCell<Vec<(&'static str, u128)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Times its scope as one phase of the current lock hold.
+pub struct Phase(&'static str, std::time::Instant);
+
+impl Phase {
+    pub fn new(name: &'static str) -> Self {
+        Self(name, std::time::Instant::now())
+    }
+}
+
+impl Drop for Phase {
+    fn drop(&mut self) {
+        phase(self.0, self.1);
+    }
+}
+
+/// Count `since..now` toward `name` in the current lock hold's breakdown.
+pub fn phase(name: &'static str, since: std::time::Instant) {
+    PHASES.with_borrow_mut(|phases| phases.push((name, since.elapsed().as_micros())));
+}
+
+/// A store-lock hold over 1 ms: the command and where its time went, in `amh-lock-holds.log`.
+// The main manager: "for every store-lock hold over 1 ms, the command and where the time went"
+fn log_long_hold(state_dir: &std::path::Path, held_us: u64) {
+    let phases = PHASES.with_borrow_mut(std::mem::take);
+    if held_us < 1000 {
+        return;
+    }
+    let mut sums: Vec<(&'static str, u128, usize)> = Vec::new();
+    for (name, us) in phases {
+        match sums.iter_mut().find(|s| s.0 == name) {
+            Some(s) => {
+                s.1 += us;
+                s.2 += 1;
+            }
+            None => sums.push((name, us, 1)),
+        }
+    }
+    let args: Vec<String> = crate::request::args().into_iter().skip(1).take(6).collect();
+    let line = format!(
+        "{} held {held_us} us by `{}` on {} :: {}\n",
+        chrono::Local::now().format("%F %T"),
+        args.join(" ").chars().take(160).collect::<String>(),
+        std::thread::current().name().unwrap_or("main"),
+        sums.iter()
+            .map(|(name, us, n)| format!("{name} {us}us x{n}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    if let Ok(mut file) = fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(state_dir.join("amh-lock-holds.log"))
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 impl Drop for Held {
     fn drop(&mut self) {
         let _ = self.file.set_len(0);
         let held_us = self.since.elapsed().as_micros() as u64;
+        log_long_hold(&self.state_dir, held_us);
         LOCK_HOLD_US.fetch_add(held_us, std::sync::atomic::Ordering::Relaxed);
         THREAD_LOCK_US.with(|cell| {
             let (wait, hold) = cell.get();
@@ -182,6 +246,7 @@ impl Store {
             cell.set((wait + began.elapsed().as_micros() as u64, hold));
         });
         let held_from = std::time::Instant::now();
+        PHASES.with_borrow_mut(Vec::clear);
         let importing = std::time::Instant::now();
         let me: Vec<String> = crate::request::args().into_iter().take(4).collect();
         lock.set_len(0).map_err(failed)?;
@@ -284,6 +349,7 @@ impl Store {
             Held {
                 file: lock,
                 since: held_from,
+                state_dir: self.state_dir.clone(),
             },
             LockTiming {
                 acquire_ms,
@@ -320,6 +386,7 @@ impl Store {
         task: &Task,
         force: bool,
     ) -> Result<Option<Task>, String> {
+        let _phase = Phase::new("save.typed_lines");
         let name = &task.name;
         let month = database
             .record(&format!("month:{name}"))?
@@ -842,6 +909,7 @@ impl Store {
     }
 
     pub fn load(&self, name: &str) -> Result<Task, String> {
+        let _phase = Phase::new("load");
         if name.contains('/') || !name.ends_with(".md") {
             return Err(format!("amh: no task file {name} in the work-log root"));
         }
@@ -873,6 +941,7 @@ impl Store {
 
     /// `save`; with `force`, lines typed into the file are taken in even when its mtime is older than the last export.
     fn save_typed(&self, task: &Task, force: bool) -> Result<(), String> {
+        let _phase = Phase::new("save");
         // Routine lock passes skip closed tasks, so lines typed into a closed task's file are taken in here, before the save overwrites the file.
         let typed = match self.database()? {
             Some(database) => self.with_typed_lines(&database, task, force)?,
@@ -880,6 +949,7 @@ impl Store {
         };
         let (task, events) = self.prepare(typed.as_ref().unwrap_or(task))?;
         if let Some(mut database) = self.database()? {
+            let _commit = Phase::new("save.commit");
             database.commit(&[(task.name.clone(), task.render())], &events)?;
             // Typed lines just taken in: export at once, or the next import would take them in again.
             if typed.is_some() {
@@ -992,6 +1062,7 @@ impl Store {
     }
 
     pub fn prepare(&self, task: &Task) -> Result<(Task, Vec<serde_json::Value>), String> {
+        let _phase = Phase::new("save.prepare");
         let mut task = task.clone();
         let current = requests::sync(&mut task)?;
         requests::validate(&task)?;
@@ -1195,6 +1266,7 @@ impl Store {
     /// Every task file in the root that is not done, by file name.
     /// The active tasks whose text names one of `words` (e.g. request IDs they wait on); found in SQL, so the rest are never parsed.
     pub fn active_mentioning(&self, words: &[String]) -> Result<Vec<Task>, String> {
+        let _phase = Phase::new("active_mentioning");
         let Some(database) = self.database()? else {
             return self.active();
         };
@@ -1220,6 +1292,7 @@ impl Store {
     /// The caller's task: the named file, else the one active task whose agent runs at the caller's address.
     // 🧑 "We need to pass in the task file name at launch and let the agent pass in that when they use any helper command."
     pub fn own(&self, named: Option<&str>) -> Result<Task, String> {
+        let _phase = Phase::new("own");
         let from_launch =
             crate::request::var("OMO_AGENT_TASK_FILE").filter(|name| !name.is_empty());
         if let Some(name) = named
@@ -1349,6 +1422,7 @@ impl Store {
 
     /// Put the task's row at the top of its section of the task list.
     pub fn place(&self, task: &Task) -> Result<(), String> {
+        let _phase = Phase::new("place");
         let Some(database) = self.database()? else {
             if let Some(list) =
                 taskfile::placed(&self.list()?, &task.name, task.address(), task.section())?
