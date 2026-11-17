@@ -257,8 +257,58 @@ pub fn rollback() -> Result<String, String> {
         .last()
         .cloned()
         .ok_or("amh: no earlier release is kept")?;
+    let mut said = String::new();
+    // Rolling back from the daemon to a build without it (stage-2 rollback, docs/rework-and-upgrades.md): clients first, then the units.
+    let state_dir = crate::settings::state_dir();
+    let mark = state_dir.join(crate::daemon::CLIENT_MARK);
+    if mark.exists() && !has_daemon(&releases_dir().join(&previous).join("amh")) {
+        said += &leave_daemon(&state_dir, &mark)?;
+    }
     write_history(&names)?;
-    switch(&previous)
+    Ok(said + &switch(&previous)?)
+}
+
+/// Whether the build at `binary` has the daemon (`amh daemon` without `AMH_DAEMON=1` says it is off; older builds do not know the command).
+fn has_daemon(binary: &Path) -> bool {
+    Command::new(binary)
+        .arg("daemon")
+        .env_remove("AMH_DAEMON")
+        .output()
+        .is_ok_and(|out| String::from_utf8_lossy(&out.stderr).contains("the daemon is off"))
+}
+
+/// Switch from amhd back to amh-watch: new commands run in-process, the outbox drains (60 s at most; what is left is listed to resend by hand), clients still retrying finish, then amhd stops and amh-watch takes over, also at boot.
+fn leave_daemon(state_dir: &Path, mark: &Path) -> Result<String, String> {
+    fs::remove_file(mark).map_err(|e| format!("amh: cannot remove {}: {e}", mark.display()))?;
+    let open = || -> Vec<(String, String, String)> {
+        rusqlite::Connection::open(state_dir.join("amh.sqlite3"))
+            .and_then(|db| {
+                let mut query = db.prepare("SELECT id, recipient, substr(body, 1, 80) FROM outbox WHERE state IN ('pending', 'sending')")?;
+                query.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect()
+            })
+            .unwrap_or_default()
+    };
+    let mut said = String::from("amh: commands run in-process again\n");
+    for _ in 0..60 {
+        if open().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+    }
+    for (id, to, body) in open() {
+        said += &format!("amh: not delivered by amhd; resend by hand: {id} to {to}: {body}\n");
+    }
+    // A client retries a request for about 30 s; let those finish against the daemon.
+    std::thread::sleep(std::time::Duration::from_secs(30));
+    for args in [
+        ["--user", "stop", "amhd.service"],
+        ["--user", "disable", "amhd.service"],
+        ["--user", "enable", "amh-watch.service"],
+    ] {
+        run(&home(), "systemctl", &args)?;
+    }
+    said += "amh: amhd stopped; amh-watch takes over (also at boot)\n";
+    Ok(said)
 }
 
 /// Keep the releases named in the last `KEEP` history lines, and the live one.

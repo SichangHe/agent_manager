@@ -48,6 +48,7 @@ case $verb in
     restart) stop; (unit=$(other); stop); run ;;
     try-restart) active && { stop; run; } ; exit 0 ;;
     is-active) active && echo active || { echo inactive; exit 3; } ;;
+    enable|disable|daemon-reload) ;;
     *) echo "fake systemctl: $verb unsupported" >&2; exit 1 ;;
 esac
 UNIT
@@ -123,17 +124,11 @@ for i in $(seq 20); do wait_for received "restart-$i" || fail "restart-$i lost";
 echo "20 tells across a daemon restart: all delivered"
 
 step "5. roll back to the CLI-only build $old"
-rm "$S/amhd.client"
-drained() { [ "$(open_outbox)" = 0 ]; }
-if ! wait_for drained; then
-    # Rows still backing off (e.g. notices to agents the stub does not know) are what the runbook says to list and resend by hand.
-    python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1])
-for r in d.execute("SELECT id, recipient, attempts, substr(last_error,1,80), substr(body,1,60) FROM outbox WHERE state IN (\"pending\",\"sending\")"): print("left open:", *r)' "$S/amh.sqlite3"
-    python3 -c 'import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); sys.exit(d.execute("SELECT COUNT(*) FROM outbox WHERE state IN (\"pending\",\"sending\") AND (body LIKE \"%rehearse-%\" OR body LIKE \"%restart-%\")").fetchone()[0] > 0)' "$S/amh.sqlite3" || fail "a rehearsal message never left the outbox"
-fi
-sysd --user stop amhd.service
-sysd --user start amh-watch.service
-amh release --rollback >/dev/null || fail "amh release --rollback"
+# One command: amh release --rollback leaves the daemon (marker, drain, units) when the older release has none.
+out=$(amh release --rollback 2>&1) || fail "amh release --rollback: $out"
+echo "$out" | grep "resend by hand" | grep -E "rehearse-|restart-" && fail "a rehearsal message never left the outbox"
+[ -e "$S/amhd.client" ] && fail "the cut-over marker is still there"
+sysd --user is-active amhd.service >/dev/null && fail "amhd still runs after the rollback"
 [ "$(basename "$(dirname "$(readlink "$AMH")")")" = "$old" ] || fail "rollback did not switch to $old"
 sleep 3
 sysd --user is-active amh-watch.service >/dev/null || fail "old watcher not running"

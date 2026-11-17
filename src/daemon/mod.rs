@@ -375,11 +375,22 @@ pub fn run_request(request: &serde_json::Value) -> serde_json::Value {
     drop(serving);
     let (lock_wait_us, lock_hold_us) = crate::store::thread_lock_us();
     // As the CLI does: a request that wrote refreshes the task files before it answers, so the caller reads its own write.
-    if (commit::take_wrote() || lock_hold_us > 0)
-        && let Err(error) =
-            crate::settings::load().and_then(|settings| Store::new(&settings).refresh_exports())
-    {
-        eprintln!("amhd: task files not refreshed yet (the exporter will): {error}");
+    // A message (`tell`) changes no task text its sender reads back, so its refresh runs beside the answer instead of before it.
+    if commit::take_wrote() || lock_hold_us > 0 {
+        let refresh = || {
+            if let Err(error) =
+                crate::settings::load().and_then(|settings| Store::new(&settings).refresh_exports())
+            {
+                eprintln!("amhd: task files not refreshed yet (the exporter will): {error}");
+            }
+        };
+        if values["group"] == "tell" {
+            let _ = std::thread::Builder::new()
+                .name("amhd-refresh".into())
+                .spawn(refresh);
+        } else {
+            refresh();
+        }
     }
     crate::request::serve(&env, &argv, &cwd, || {
         crate::log::record(
