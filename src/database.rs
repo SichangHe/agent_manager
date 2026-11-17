@@ -665,15 +665,103 @@ impl Database {
     }
 
     /// Fold the queued task-list moves into TODO.md (the exporter does it each pass, outside the store lock).
-    pub fn fold_todo(&mut self) -> Result<(), String> {
-        let pending: bool = self
+    /// Rewriting TODO.md (~400 KB) blocks the one SQLite writer for ~10 ms, so moves are folded in at most once a minute (or when many wait); readers see them at once through `todo_text`. `now` folds whatever waits (before a rollback).
+    pub fn fold_todo(&mut self, now: bool) -> Result<(), String> {
+        let exists: bool = self
             .0
-            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'todo_moves') AND EXISTS(SELECT 1 FROM todo_moves)", [], |row| row.get(0))
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'todo_moves')",
+                [],
+                |row| row.get(0),
+            )
             .map_err(error)?;
-        if pending {
+        if !exists {
+            return Ok(());
+        }
+        let (waiting, oldest): (i64, Option<i64>) = self
+            .0
+            .query_row("SELECT COUNT(*), MIN(seq) FROM todo_moves", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .map_err(error)?;
+        let Some(oldest) = oldest else {
+            return Ok(());
+        };
+        let due_key = format!("todo:fold_due:{oldest}");
+        let now_s = chrono::Utc::now().timestamp();
+        let due = match self.record(&due_key)? {
+            Some(at) => at.parse::<i64>().unwrap_or(0) <= now_s,
+            None => {
+                self.set_record(&due_key, &(now_s + 60).to_string())?;
+                false
+            }
+        };
+        if now || due || waiting >= 100 {
             self.todo_change(Ok)?;
+            self.0
+                .execute("DELETE FROM records WHERE name LIKE 'todo:fold_due:%'", [])
+                .map_err(error)?;
         }
         Ok(())
+    }
+
+    /// What amh last exported to `name`'s file. For a long task it is kept as the row was then (its marker says how much older body went with it), not the whole text, so recording an export writes a small row.
+    pub fn export_text(&self, name: &str) -> Result<Option<String>, String> {
+        let Some(recorded) = self.record(&format!("export:{name}"))? else {
+            return Ok(None);
+        };
+        let Some(at) = body_start(&recorded) else {
+            return Ok(Some(recorded));
+        };
+        let Some(bytes) = older_marker(&recorded[..at]) else {
+            return Ok(Some(recorded));
+        };
+        let (old, _) = self.old_body(name)?;
+        let Some(old) = old.get(..bytes) else {
+            // The older body changed since (an edit): unknown, as if never exported.
+            return Ok(None);
+        };
+        Ok(Some(format!(
+            "{}{old}{}",
+            without_older_marker(&recorded[..at]),
+            &recorded[at..]
+        )))
+    }
+
+    /// Put every export record kept in row form back as the whole text an older build compares files with; before a rollback, while the older bodies still exist.
+    pub fn expand_export_records(&self) -> Result<usize, String> {
+        let names: Vec<String> = {
+            let mut query = self
+                .0
+                .prepare("SELECT substr(name, 8) FROM records WHERE name LIKE 'export:%' AND instr(text, ?1) > 0")
+                .map_err(error)?;
+            query
+                .query_map([OLDER_BODY], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        let mut expanded = 0;
+        for name in names {
+            if let Some(text) = self.export_text(&name)? {
+                self.set_record(&format!("export:{name}"), &text)?;
+                expanded += 1;
+            }
+        }
+        Ok(expanded)
+    }
+
+    /// Record that `text` (the whole task) was exported to `name`'s file; `row` is the row it was joined from.
+    pub fn set_export_text(&self, name: &str, text: &str, row: Option<&str>) -> Result<(), String> {
+        let key = format!("export:{name}");
+        if let Some(row) = row
+            && body_start(row).is_some_and(|at| older_marker(&row[..at]).is_some())
+            && self.task_stored(name)?.as_deref() == Some(row)
+            && self.task(name)?.as_deref() == Some(text)
+        {
+            return self.set_record(&key, row);
+        }
+        self.set_record(&key, text)
     }
 
     /// The names of the active tasks whose stored row contains `word` (e.g. an address in its front matter).

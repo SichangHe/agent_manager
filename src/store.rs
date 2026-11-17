@@ -331,7 +331,7 @@ impl Store {
         let Ok(file) = fs::read_to_string(self.root.join(&month).join(name)) else {
             return Ok(None);
         };
-        let Some(last) = database.record(&format!("export:{name}"))? else {
+        let Some(last) = database.export_text(name)? else {
             return Ok(None);
         };
         if file == last || file == task.render() || name == "TODO.md" {
@@ -386,7 +386,7 @@ impl Store {
             .map_err(|error| format!("amh: cannot take the export lock: {error}"))?;
         // Task-list moves queued by `place` go into TODO.md here, outside the store lock.
         if let Err(error) = Database::open(&self.state_dir.join("amh.sqlite3"))
-            .and_then(|mut database| database.fold_todo())
+            .and_then(|mut database| database.fold_todo(false))
         {
             eprintln!("amh: folding task-list moves failed: {error}");
         }
@@ -413,8 +413,7 @@ impl Store {
                 continue;
             };
             let path = self.settle(database, &name, &text, &mut git)?;
-            let key = format!("export:{name}");
-            let recorded = database.record(&key)?;
+            let recorded = database.export_text(&name)?;
             // A file untouched since the last complete export still holds what that export recorded.
             if recorded.as_deref() == Some(&text) && untouched_since(&path, since) {
                 continue;
@@ -443,17 +442,7 @@ impl Store {
                     .map_err(|error| format!("amh: cannot export {name}: {error}"))?;
             }
             if recorded.as_deref() != Some(&text) {
-                database.set_record(&key, &text)?;
-            }
-            // A long task's row holds only its recent body: remember the row too, so the next pass sees it unchanged without joining its body.
-            if let Some(row) = row_before
-                && row != text
-                && database.task_stored(&name)?.as_ref() == Some(&row)
-            {
-                let row_key = format!("exportrow:{name}");
-                if database.record(&row_key)?.as_deref() != Some(&row) {
-                    database.set_record(&row_key, &row)?;
-                }
+                database.set_export_text(&name, &text, row_before.as_deref())?;
             }
         }
         database.set_record("export:through", &through.to_string())?;
