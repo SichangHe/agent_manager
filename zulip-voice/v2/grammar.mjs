@@ -95,7 +95,7 @@ export const isCancel = (t, cancelWord) => /^(?:cancel|cancel that|never mind|sc
 export const hasCancelWord = (text, cancelWord) => normalize(text).split(' ').some(t => t === cancelWord || soundsLikeWord(cancelWord, [t]));
 /** True when the last sentence of `text` is only a cancel phrase ("Some reply. Cancel."). */
 export const endsWithCancel = (text, cancelWord) => isCancel(text.split(/[.!?]+/).map(x => normalize(x)).filter(Boolean).at(-1) ?? '', cancelWord);
-export const NEXT_AGENT_RE = /^(next (agent|thread|unread|unread agent|unread thread)|switch to (the )?next (agent|thread|unread)|go to (the )?next (agent|thread|unread))$/;
+export const NEXT_AGENT_RE = /^(next (agent|thread|unread|unread agent|unread thread|one)|(switch|go)( to)?( the)? next( agent| thread| unread| one)?)$/;   // "switch next", "switch to next", "go next", "next agent"...
 export const SEND_LOG_RE = /^(send|upload) (the )?(log|logs|debug log)$/;
 export const SWITCH_BACK_RE = /^(switch back|go back|previous agent|(go|switch) back to (the )?previous agent|switch to (the )?previous agent)$/;
 export const POSITIVE_RE = /^(positive|yes|yeah|yep|sure|ok|okay|correct)$/;

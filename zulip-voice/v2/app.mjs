@@ -567,7 +567,11 @@ function renderPrevButton() {
 function switchNextUnread() {
   const order = rank('').map(x => x.t), at = order.findIndex(t => t.name === current);
   const next = [...order.slice(at + 1), ...order.slice(0, Math.max(0, at))].find(t => t.name !== current && t.unread > 0);
-  if (!next) { toast('No other agent has unread messages'); return false; }
+  if (!next) {   // nothing unread anywhere: still move on, to the next agent in the list order, and say so
+    const plain = [...order.slice(at + 1), ...order.slice(0, Math.max(0, at))].find(t => t.name !== current);
+    if (!plain) { toast('No other agent'); return false; }
+    toast('No unread messages elsewhere: next agent in the list'); switchTopic(plain.name); return true;
+  }
   switchTopic(next.name);
   return true;
 }
