@@ -147,7 +147,10 @@ else
     sysd --user is-active amhd.service >/dev/null || fail "the older amhd is not running after the rollback"
     wait_for test -S "$S/amhd.sock" || fail "the older amhd did not open its socket"
 fi
-python3 -c "import sqlite3,sys; t=sqlite3.connect(sys.argv[1]).execute(\"SELECT text FROM tasks WHERE name='rh-daemon.md'\").fetchone()[0]; sys.exit(0 if 'chunk-check-1 ' in t and 'older_body' not in t else 1)" "$S/amh.sqlite3" || fail "a long task row is not whole after the rollback"
+# An older build without split rows needs the row whole; one with them may split it again.
+if ! grep -q task_old_body "$H/.local/lib/amh/$old/amh"; then
+    python3 -c "import sqlite3,sys; t=sqlite3.connect(sys.argv[1]).execute(\"SELECT text FROM tasks WHERE name='rh-daemon.md'\").fetchone()[0]; sys.exit(0 if 'chunk-check-1 ' in t and 'older_body' not in t else 1)" "$S/amh.sqlite3" || fail "a long task row is not whole after the rollback"
+fi
 wait_for grep -q "chunk-check-1 " "$R/root/rh-daemon.md" || fail "the exported long task lost its older body"
 python3 -c "import sqlite3,sys; t=sqlite3.connect(sys.argv[1]).execute(\"SELECT text FROM tasks WHERE name='rh-daemon.md'\").fetchone()[0]; sys.exit(0 if 'rh-resolved-item' in t else 1)" "$S/amh.sqlite3" || fail "a resolved request is not back in its task for the older build"
 echo "long task whole after the rollback"
