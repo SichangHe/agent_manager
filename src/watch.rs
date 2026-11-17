@@ -419,6 +419,7 @@ fn take_in(
     mail: &mail::Parsed,
 ) -> Result<String, String> {
     let _lock = store.lock()?;
+    let _phase = crate::store::Phase::new("mail.all_and_route");
     let tasks = store.all()?;
     let main_manager = settings::get(settings, "main_manager");
     let task = &decide::route(&tasks, main_manager, &mail.subject, &mail.body)?.name;
@@ -509,6 +510,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
             if !crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
                 .received_mail(&key)?
             {
+                let routing = crate::store::Phase::new("zulip.all_and_route");
                 let tasks = store.all()?;
                 let mut task = decide::route(
                     &tasks,
@@ -517,6 +519,8 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
                     &crate::zulip::own_text(body),
                 )?
                 .clone();
+                drop(routing);
+                let _queue = crate::store::Phase::new("zulip.store_and_queue");
                 write_private(&stored, &decide::stored_mail(&subject, body))
                     .map_err(|error| format!("cannot store Zulip message: {error}"))?;
                 task.body = decide::queued(&task.body, &name);
@@ -1217,9 +1221,11 @@ impl Watcher {
                 self.failed_at.remove(name);
                 let _lock = store.lock()?;
                 // `amh stop` may have dropped the message meanwhile; a crash before this line delivers it again.
+                let finishing = crate::store::Phase::new("deliver.finish_message");
                 if let Err(error) = database.finish_message(id, true, "") {
                     log(&error);
                 }
+                drop(finishing);
                 crate::actions::clear_stopped(store, &plan.target)?;
             } else {
                 database.finish_message(

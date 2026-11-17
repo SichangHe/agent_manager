@@ -206,6 +206,7 @@ impl Database {
         snapshots: &[(String, String)],
         events: &[Value],
     ) -> Result<(), String> {
+        let _bypass = Bypass::new("import");
         let transaction = self.0.transaction().map_err(error)?;
         let imported: bool = transaction
             .query_row(
@@ -439,6 +440,7 @@ impl Database {
     /// Put every older body back into its task row and drop the chunks, so a build without `task_old_body` reads whole tasks (before a rollback).
     pub fn flush_old_bodies(&mut self) -> Result<usize, String> {
         // One write transaction from the first read: no save can move a chunk in between.
+        let _bypass = Bypass::new("flush_old_bodies");
         let transaction = self
             .0
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -507,6 +509,7 @@ impl Database {
         if !exists {
             return Ok(0);
         }
+        let _bypass = Bypass::new("restore_resolved");
         let transaction = self
             .0
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -650,6 +653,7 @@ impl Database {
         &mut self,
         change: impl FnOnce(String) -> Result<String, String>,
     ) -> Result<(), String> {
+        let _bypass = Bypass::new("todo_change");
         let transaction = self
             .0
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -948,6 +952,7 @@ impl Database {
             self.wake(events);
             return Ok(());
         }
+        let _bypass = Bypass::new("commit");
         let transaction = self.0.transaction().map_err(error)?;
         commit_records(&transaction, snapshots, events)?;
         run_statements(&transaction, &extra)?;
@@ -998,6 +1003,7 @@ impl Database {
                 crate::daemon::commit::Outcome::Conflict => Ok(false),
             };
         }
+        let _bypass = Bypass::new("receive_mail");
         let transaction = self.0.transaction().map_err(error)?;
         let inserted = transaction
             .execute(
@@ -1051,6 +1057,7 @@ impl Database {
                 }
             };
         }
+        let _bypass = Bypass::new("complete_message");
         let transaction = self.0.transaction().map_err(error)?;
         let changed = transaction.execute(
             "UPDATE messages SET state = 'sent', attempts = attempts + 1, last_error = '' WHERE id = ?1 AND state = 'pending'", [id]
@@ -1170,6 +1177,7 @@ impl Database {
                 }
             }
         }
+        let _bypass = Bypass::new("remember_ids");
         let tx = self
             .0
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -1285,6 +1293,7 @@ impl Database {
             }
             return Ok(());
         }
+        let _bypass = Bypass::new("prune_events");
         let transaction = self.0.transaction().map_err(error)?;
         for id in ids {
             transaction
@@ -1952,3 +1961,29 @@ fn run_statements(
 
 /// A WAL larger than this is checkpointed by the committing process itself.
 const WAL_MAX: u64 = 64 << 20;
+
+/// A write made outside the daemon's single writer: logged (with its thread) when it takes over 1 ms in the daemon, where it makes the writer wait.
+// The main manager: "release the logging of writes that bypass the single writer (with thread)"
+struct Bypass(&'static str, std::time::Instant);
+
+impl Bypass {
+    fn new(what: &'static str) -> Self {
+        Self(what, std::time::Instant::now())
+    }
+}
+
+impl Drop for Bypass {
+    fn drop(&mut self) {
+        let took = self.1.elapsed();
+        if took > Duration::from_millis(1) && crate::daemon::commit::installed() {
+            use std::io::Write as _;
+            let _ = writeln!(
+                std::io::stderr(),
+                "amhd: direct write {} on {} took {} us",
+                self.0,
+                std::thread::current().name().unwrap_or("?"),
+                took.as_micros()
+            );
+        }
+    }
+}

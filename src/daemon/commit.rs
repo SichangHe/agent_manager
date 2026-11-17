@@ -316,6 +316,11 @@ pub fn install(queue: Queue) {
     let _ = GLOBAL.set(queue);
 }
 
+/// Whether this process is the daemon (its writer queue is installed).
+pub fn installed() -> bool {
+    GLOBAL.get().is_some()
+}
+
 /// The daemon's writer queue, when this process is the daemon and the caller is not the writer itself.
 pub fn global() -> Option<&'static Queue> {
     if ON_WRITER.get() {
@@ -337,6 +342,13 @@ pub fn route(write: impl FnOnce() -> Write) -> Option<Result<Outcome, String>> {
     let queue = global()?;
     let write = write();
     if write.statements.len() > WRITE_MAX {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr(),
+            "amhd: a write of {} statements bypasses the writer queue on {}",
+            write.statements.len(),
+            std::thread::current().name().unwrap_or("?")
+        );
         return None;
     }
     Some(queue.submit(write))

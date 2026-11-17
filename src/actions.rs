@@ -17,6 +17,7 @@ use crate::tasks::{self, Task};
 use crate::{decide, guest, omnigent, requests, settings, taskfile, view, watch, work};
 
 pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
+    let _phase = crate::store::Phase::new("clear_stopped");
     for mut task in store
         .all()?
         .into_iter()
@@ -36,8 +37,11 @@ pub fn request_effects(store: &Store) -> Result<(), String> {
     let cursor = database.cursor("request_effects")?;
     if cursor < through {
         // Only requests resolved since the last pass can release a waiter; it used to parse all ~7,600 tasks inside the lock on every change.
+        let finding = crate::store::Phase::new("request_effects.subjects_since");
         let resolved = database.subjects_since(cursor, "request resolved")?;
+        drop(finding);
         if !resolved.is_empty() {
+            let _phase = crate::store::Phase::new("request_effects.unblock");
             for mut task in store.active_mentioning(&resolved)? {
                 if requests::unblock(&mut task, &resolved)? {
                     store.save(&task)?;
