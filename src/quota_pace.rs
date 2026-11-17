@@ -74,7 +74,9 @@ fn insert(db: &Connection, b: &Bucket) -> Result<(), String> {
 /// Keep one sample per account and proxy reading; the first call also takes in the samples `quota-events.jsonl` already holds.
 pub fn record(state_dir: &Path, buckets: &[Bucket]) -> Result<(), String> {
     let mut db = open(state_dir)?;
-    let tx = db.transaction().map_err(|e| format!("amh: {e}"))?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|e| format!("amh: {e}"))?;
     let backfilled: bool = tx
         .query_row(
             "SELECT EXISTS (SELECT 1 FROM meta WHERE key = 'backfilled')",
@@ -90,10 +92,11 @@ pub fn record(state_dir: &Path, buckets: &[Bucket]) -> Result<(), String> {
                 .ok()
                 .and_then(|v| Bucket::from_json(&v["sample"]))
             {
-                insert(&tx, &b)?;
+                // A bad old row is skipped, never retried.
+                let _ = insert(&tx, &b);
             }
         }
-        tx.execute("INSERT INTO meta VALUES ('backfilled', '1')", [])
+        tx.execute("INSERT OR IGNORE INTO meta VALUES ('backfilled', '1')", [])
             .map_err(|e| format!("amh: {e}"))?;
     }
     for b in buckets {
@@ -147,6 +150,7 @@ fn account_pace(
         .iter()
         .filter(|s| match (s.reset, reset) {
             (Some(a), Some(b)) => (a - b).abs() <= SAME_RESET_S,
+            (None, Some(_)) => false,
             _ => true,
         })
         .map(|s| ((s.t - now) as f64 / 3600.0, s.used))
@@ -178,6 +182,7 @@ fn account_pace(
 }
 
 /// under, on, or over pace: whether the rate's uncertainty interval lies below, around, or above the needed rate.
+#[cfg(test)]
 fn verdict(rate: f64, unc: f64, needed: f64) -> &'static str {
     if needed <= 0.0 {
         return "nothing left to use";
@@ -255,15 +260,22 @@ pub fn report(
     for (pool, accounts) in providers {
         let mut rate = 0.0;
         let mut unc2 = 0.0;
-        let mut needed = 0.0;
         let mut unknown = 0;
         let mut absorbing = 0;
         let mut exhausted = Vec::new();
         let mut dry = Vec::new();
         let mut periods = Vec::new();
+        let mut five_hour_only = Vec::new();
+        let mut blocked = Vec::new();
         for a in &accounts {
-            let w = &a["windows"][a["binding"].as_str().unwrap_or("7d")];
-            if let Some(reset_h) = w["resets_in_h"].as_f64() {
+            // An account with only a 5h window renews every 5 h: it does not fit the band of 7d periods and is listed apart.
+            if a["binding"] == "5h" {
+                five_hour_only.push(a["account"].clone());
+                continue;
+            }
+            let w = &a["windows"]["7d"];
+            // A reset already past (stale reading) is unknown until the next read; it adds nothing to the band.
+            if let Some(reset_h) = w["resets_in_h"].as_f64().filter(|h| *h > 0.0) {
                 let left = if w["exhausted"] == true {
                     0.0
                 } else {
@@ -275,8 +287,12 @@ pub fn report(
                 exhausted.push(json!({"account": a["account"], "resets_in_h": w["resets_in_h"]}));
                 continue;
             }
-            absorbing += 1;
-            needed += w["needed_pct_per_h"].as_f64().unwrap_or(0.0);
+            // Exhausted on its 5h window: its 7d quota stays in the band, but it takes no load until the 5h reset.
+            if a["status"] == "exhausted" {
+                blocked.push(json!({"account": a["account"], "until_in_h": a["windows"]["5h"]["resets_in_h"]}));
+            } else {
+                absorbing += 1;
+            }
             match w["rate_pct_per_h"].as_f64() {
                 Some(r) => {
                     rate += r;
@@ -289,20 +305,22 @@ pub fn report(
             }
         }
         let unc = unc2.sqrt();
-        let _ = needed;
         let (needed, ceiling) = band(&periods);
+        let ceiling = ceiling.filter(|c| c.is_finite());
         let known = unknown < absorbing;
         let factor = (needed > 0.0 && known).then(|| rate / needed);
         let pool_verdict = if !known {
             "unknown"
         } else if rate + unc < needed {
             "under"
-        } else if rate - unc > ceiling {
+        } else if ceiling.is_some_and(|c| rate - unc > c) {
             "over"
         } else {
             "on"
         };
-        let aim = rate.clamp(needed, ceiling.max(needed));
+        let aim = rate
+            .max(needed)
+            .min(ceiling.unwrap_or(f64::INFINITY).max(needed));
         out.insert(
             pool,
             json!({
@@ -318,7 +336,10 @@ pub fn report(
                 "factor_high": factor.map(|_| (rate + unc) / needed),
                 "verdict": pool_verdict,
                 "scale_concurrency_by": (known && rate > 0.0).then(|| aim / rate),
+                "scale_reason": if !known { "no burn measured yet" } else if rate <= 0.0 && needed > 0.0 { "no burn now: increase" } else if aim > rate { "below the floor" } else if aim < rate { "above the ceiling" } else { "inside the band" },
+                "partial": unknown > 0,
                 "accounts_absorbing": absorbing, "accounts_without_rate": unknown,
+                "blocked_on_5h": blocked, "five_hour_only": five_hour_only,
                 "exhausted": exhausted, "runs_dry_before_reset": dry,
                 "accounts": accounts,
             }),
@@ -331,19 +352,25 @@ pub fn report(
 /// Floor: by each reset, at least the quota expiring at or before it must be used, or it is lost: max over resets of expiring / hours.
 /// Ceiling: by each reset, at most the quota available before it (all left now plus the full refills of accounts that reset earlier) can be used, or the provider runs dry and waits: min over resets of available / hours.
 /// Load can move between accounts, so the provider is treated as one pool of equal-sized accounts.
-pub fn band(periods: &[(f64, f64)]) -> (f64, f64) {
-    let mut resets: Vec<f64> = periods.iter().map(|p| p.1).filter(|t| *t > 0.0).collect();
+pub fn band(periods: &[(f64, f64)]) -> (f64, Option<f64>) {
+    // A reset under an hour away would demand an absurd burn to use what is left; that remainder is lost either way.
+    let mut resets: Vec<f64> = periods.iter().map(|p| p.1).filter(|t| *t >= 1.0).collect();
     resets.sort_by(f64::total_cmp);
-    let left: f64 = periods.iter().map(|p| p.0).sum();
+    let left: f64 = periods.iter().filter(|p| p.1 >= 1.0).map(|p| p.0).sum();
     let mut floor: f64 = 0.0;
-    let mut ceiling = f64::INFINITY;
+    let mut ceiling: Option<f64> = None;
     for t in resets {
-        let expiring: f64 = periods.iter().filter(|p| p.1 <= t).map(|p| p.0).sum();
+        let expiring: f64 = periods
+            .iter()
+            .filter(|p| p.1 >= 1.0 && p.1 <= t)
+            .map(|p| p.0)
+            .sum();
         let refilled = 100.0 * periods.iter().filter(|p| p.1 < t).count() as f64;
         floor = floor.max(expiring / t);
-        ceiling = ceiling.min((left + refilled) / t);
+        let here = (left + refilled) / t;
+        ceiling = Some(ceiling.map_or(here, |c: f64| c.min(here)));
     }
-    (floor, if ceiling.is_finite() { ceiling } else { 0.0 })
+    (floor, ceiling)
 }
 
 fn h(x: &Value) -> String {
@@ -423,7 +450,7 @@ pub fn text(report: &Value) -> String {
             }
         }
     }
-    out + "(* the window the verdict uses; x = burn / needed; scale agent concurrency by 1/x to land on pace)\n"
+    out + "(* the window the verdict uses; x = burn / floor; the --json scale_concurrency_by brings the burn into [floor, ceiling])\n"
 }
 
 #[cfg(test)]
@@ -482,7 +509,7 @@ mod band_tests {
         assert!((floor - 81.0 / 154.0).abs() < 1e-9);
         // Before the refill at 41.5 h only 81 % is there (at most 81/41.5 %/h).
         // After it, 181 % over 154 h is the tighter limit.
-        assert!((ceiling - 181.0 / 154.0).abs() < 1e-9);
+        assert!((ceiling.unwrap() - 181.0 / 154.0).abs() < 1e-9);
         // An account about to reset with much left raises the floor.
         let (floor, _) = super::band(&[(50.0, 10.0), (90.0, 100.0)]);
         assert!((floor - 5.0).abs() < 1e-9);

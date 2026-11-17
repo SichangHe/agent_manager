@@ -1392,7 +1392,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 .ok_or("amh: no quota snapshot yet; is `amh quota serve` running?")?;
             let window_h = text("window").map_or(Ok(crate::quota_pace::WINDOW_H), |w| {
                 w.parse::<f64>()
-                    .map_err(|_| format!("amh: --window wants hours, not {w}"))
+                    .ok()
+                    .filter(|h| h.is_finite() && *h >= 0.5)
+                    .ok_or_else(|| format!("amh: --window wants hours (at least 0.5), not {w}"))
             })?;
             let report = crate::quota_pace::report(
                 &store.state_dir,
