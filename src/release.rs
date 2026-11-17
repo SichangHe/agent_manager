@@ -9,7 +9,7 @@ use std::process::Command;
 /// How many releases stay on disk besides the live one.
 const KEEP: usize = 5;
 /// The branch every release must be on.
-const BRANCH: &str = "origin/revive";
+const BRANCH: &str = "origin/main";
 
 fn home() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
@@ -128,7 +128,7 @@ fn switch(name: &str) -> Result<String, String> {
 
 /// Build the clean commit checked out in `repo`, test it, install it read-only and switch to it.
 ///
-/// Refused when the tree has changes, when the commit is not on `origin/revive` (unless `hotfix`), or when the live release is not an ancestor of it.
+/// Refused when the tree has changes, when the commit is not on `origin/main` (unless `hotfix`), or when the live release is not an ancestor of it.
 pub fn release(repo: &Path, hotfix: bool) -> Result<String, String> {
     let _lock = locked()?;
     let mut said = String::new();
