@@ -44,7 +44,11 @@ pub fn archive_events(
 }
 
 /// Move requests resolved over 30 days ago from `resolved_items` (where they go when resolved) to the dated archive files.
-fn archive_resolved_items(store: &Store, now: DateTime<Utc>) -> Result<usize, String> {
+fn archive_resolved_items(
+    store: &Store,
+    now: DateTime<Utc>,
+    referenced: &BTreeSet<String>,
+) -> Result<usize, String> {
     let Some(database) = store.database()? else {
         return Ok(0);
     };
@@ -62,10 +66,16 @@ fn archive_resolved_items(store: &Store, now: DateTime<Utc>) -> Result<usize, St
             .map_err(|e| format!("amh: SQLite: {e}"))?
     };
     let mut days: BTreeMap<String, Vec<Value>> = BTreeMap::new();
-    for (_, owner, resolved_at, record) in &rows {
+    let mut moved = Vec::new();
+    for (id, owner, resolved_at, record) in &rows {
+        // Still named as a blocker by an open request: kept, as before. A date that does not parse: kept.
         let Ok(time) = DateTime::parse_from_rfc3339(resolved_at) else {
             continue;
         };
+        if referenced.contains(id) || time >= now - Duration::days(30) {
+            continue;
+        }
+        moved.push(id.clone());
         let mut record: Value = serde_json::from_str(record).unwrap_or_default();
         record["owner"] = Value::from(owner.clone());
         days.entry(time.with_timezone(&Utc).format("%Y-%m-%d").to_string())
@@ -77,7 +87,7 @@ fn archive_resolved_items(store: &Store, now: DateTime<Utc>) -> Result<usize, St
         persist_batch(&store.root.join("archive"), &day, "requests", &records)?;
         count += records.len();
     }
-    for (id, ..) in &rows {
+    for id in &moved {
         database
             .sql()
             .execute("DELETE FROM resolved_items WHERE id = ?1", [id])
@@ -88,7 +98,6 @@ fn archive_resolved_items(store: &Store, now: DateTime<Utc>) -> Result<usize, St
 
 /// Archive old resolved requests only after their dated records are durably stored.
 pub fn archive_requests(store: &Store, now: DateTime<Utc>) -> Result<usize, String> {
-    let mut count = archive_resolved_items(store, now)?;
     let mut tasks = store.all()?;
     let mut referenced = BTreeSet::new();
     for task in &tasks {
@@ -96,6 +105,7 @@ pub fn archive_requests(store: &Store, now: DateTime<Utc>) -> Result<usize, Stri
             referenced.extend(request.blockers);
         }
     }
+    let mut count = archive_resolved_items(store, now, &referenced)?;
     let cutoff = now - Duration::days(30);
     for task in &mut tasks {
         let records = requests::read(task)?;
@@ -257,8 +267,8 @@ mod tests {
             ],
         );
         store.save(&task)?;
-        // Resolved requests leave the task text when it is saved (to `resolved_items`); those resolved over 30 days ago go on to the archive.
-        assert_eq!(archive_requests(&store, now)?, 2);
+        // Resolved requests leave the task text when it is saved (to `resolved_items`); those resolved over 30 days ago and named by no open request go on to the archive.
+        assert_eq!(archive_requests(&store, now)?, 1);
         let stored = store.load("a.md")?;
         assert_eq!(
             requests::read(&stored)?
@@ -268,8 +278,8 @@ mod tests {
             vec!["a:4"]
         );
         let database = store.database()?.ok_or("no database")?;
-        assert!(!database.resolved_item("a:1")? && !database.resolved_item("a:2")?);
-        assert!(database.resolved_item("a:3")?);
+        assert!(!database.resolved_item("a:1")?);
+        assert!(database.resolved_item("a:2")? && database.resolved_item("a:3")?);
         assert_eq!(stored.body, "history\n");
         assert_eq!(stored.field("request_next"), Some("5"));
         assert_eq!(archive_requests(&store, now)?, 0);
