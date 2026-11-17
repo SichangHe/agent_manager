@@ -1387,6 +1387,25 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             address + "\n"
         }
+        ("quota", "pace") => {
+            let snapshot = crate::quota_observer::load_snapshot(&store.state_dir)
+                .ok_or("amh: no quota snapshot yet; is `amh quota serve` running?")?;
+            let window_h = text("window").map_or(Ok(crate::quota_pace::WINDOW_H), |w| {
+                w.parse::<f64>()
+                    .map_err(|_| format!("amh: --window wants hours, not {w}"))
+            })?;
+            let report = crate::quota_pace::report(
+                &store.state_dir,
+                &snapshot.buckets,
+                chrono::Utc::now().timestamp(),
+                window_h,
+            )?;
+            if flag("json") {
+                format!("{report}\n")
+            } else {
+                crate::quota_pace::text(&report)
+            }
+        }
         ("quota", "status") => {
             crate::quota_observer::status(&store.state_dir, chrono::Utc::now().timestamp())?
         }

@@ -19,6 +19,7 @@ mod org;
 mod quota;
 mod quota_core;
 mod quota_observer;
+mod quota_pace;
 mod release;
 mod replies;
 mod requests;

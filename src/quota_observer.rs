@@ -870,6 +870,9 @@ pub fn cycle(
     }
     crate::taskfile::write(&snapshot_path(&files.dir), &snapshot.to_json().to_string())
         .map_err(|e| format!("cannot write the snapshot: {e}"))?;
+    if let Err(e) = crate::quota_pace::record(&files.dir, &snapshot.buckets) {
+        log(&format!("cannot record usage samples: {e}"));
+    }
     Ok(snapshot)
 }
 
@@ -1011,7 +1014,15 @@ pub fn status(state_dir: &Path, now: i64) -> Result<String, String> {
         .filter(|e| e["event"].is_string())
         .collect();
     events.drain(..events.len().saturating_sub(10));
-    Ok(status_text(&snapshot, now, &events))
+    let pace = crate::quota_pace::report(
+        state_dir,
+        &snapshot.buckets,
+        now,
+        crate::quota_pace::WINDOW_H,
+    )
+    .map(|r| crate::quota_pace::summary_lines(&r))
+    .unwrap_or_else(|e| format!("pace: {e}\n"));
+    Ok(status_text(&snapshot, now, &events) + &pace)
 }
 
 #[cfg(test)]
