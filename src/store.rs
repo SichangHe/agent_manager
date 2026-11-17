@@ -1231,11 +1231,18 @@ impl Store {
             return self.load(name);
         }
         let address = omnigent::own_address()?;
-        let mut matches: Vec<Task> = self
-            .active()?
-            .into_iter()
-            .filter(|task| task.address() == address)
-            .collect();
+        // Only the active tasks whose row names the address (an index-free scan in SQLite, no parsing of every task: that held the store lock ~25 ms).
+        let mut matches: Vec<Task> = match self.database()? {
+            Some(database) => database
+                .active_names_mentioning(&address)?
+                .into_iter()
+                .map(|name| self.load(&name))
+                .collect::<Result<Vec<_>, _>>()?,
+            None => self.active()?,
+        }
+        .into_iter()
+        .filter(|task| task.address() == address)
+        .collect();
         match matches.len() {
             1 => Ok(matches.remove(0)),
             n => Err(format!(
@@ -1293,10 +1300,27 @@ impl Store {
 
     /// Put the task's row at the top of its section of the task list.
     pub fn place(&self, task: &Task) -> Result<(), String> {
-        match taskfile::placed(&self.list()?, &task.name, task.address(), task.section())? {
-            Some(list) => self.write("TODO.md", &list),
-            None => Ok(()),
+        // TODO.md is large (~400 KB): skip reading and parsing it when this task was placed the same way and the list has not changed since.
+        let database = self.database()?;
+        let key = format!("placed:{}", task.name);
+        let seen = format!("{}|{}", task.section(), task.address());
+        let stamp = |database: &Database| -> Result<String, String> {
+            Ok(format!("{seen}|{}", database.list_stamp(&task.name)?))
+        };
+        if let Some(database) = &database
+            && database.record(&key)?.as_deref() == Some(stamp(database)?.as_str())
+        {
+            return Ok(());
         }
+        if let Some(list) =
+            taskfile::placed(&self.list()?, &task.name, task.address(), task.section())?
+        {
+            self.write("TODO.md", &list)?;
+        }
+        if let Some(database) = &database {
+            database.set_record(&key, &stamp(database)?)?;
+        }
+        Ok(())
     }
 }
 

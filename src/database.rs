@@ -486,6 +486,28 @@ impl Database {
             .map_err(error)
     }
 
+    /// What changes when TODO.md changes around task `name`: the list's length, its ends, and where `name` stands in it, read without copying the text out.
+    pub fn list_stamp(&self, name: &str) -> Result<String, String> {
+        self.0
+            .prepare_cached("SELECT length(text) || ':' || instr(text, ?1) || ':' || substr(text, 1, 64) || substr(text, -64) FROM tasks WHERE name = 'TODO.md'")
+            .and_then(|mut query| query.query_row([name], |row| row.get(0)).optional())
+            .map(|stamp: Option<String>| stamp.unwrap_or_default())
+            .map_err(error)
+    }
+
+    /// The names of the active tasks whose stored row contains `word` (e.g. an address in its front matter).
+    pub fn active_names_mentioning(&self, word: &str) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT name FROM tasks WHERE status IN ('running', 'long_running', 'blocked') AND instr(text, ?1) > 0 ORDER BY name")
+            .map_err(error)?;
+        query
+            .query_map([word], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+
     /// The active tasks whose text contains any of `words`.
     pub fn active_tasks_mentioning(
         &self,
