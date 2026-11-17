@@ -286,9 +286,13 @@ fn flush_task_bodies() -> Result<String, String> {
             .args(["--user", "stop", unit])
             .status();
     }
-    let moved = crate::database::Database::open(&path)?.flush_old_bodies()?;
+    let mut database = crate::database::Database::open(&path)?;
+    let moved = database.flush_old_bodies()?;
+    // Queued task-list moves and resolved requests go back where an older build reads them.
+    database.fold_todo()?;
+    let restored = database.restore_resolved()?;
     Ok(format!(
-        "amh: {moved} long task bodies joined back for the older build\n"
+        "amh: {moved} long task bodies joined back and {restored} resolved requests put back for the older build\n"
     ))
 }
 

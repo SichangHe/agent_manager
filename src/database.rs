@@ -142,7 +142,8 @@ impl Database {
              CREATE TABLE IF NOT EXISTS records (name TEXT PRIMARY KEY, text TEXT NOT NULL);
              CREATE INDEX IF NOT EXISTS events_by_subject ON events(subject, id);
              CREATE TABLE IF NOT EXISTS task_old_body (name TEXT NOT NULL, seq INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (name, seq));
-             CREATE TABLE IF NOT EXISTS resolved_items (id TEXT PRIMARY KEY, owner TEXT NOT NULL, resolved_at TEXT, record TEXT NOT NULL CHECK(json_valid(record)));"
+             CREATE TABLE IF NOT EXISTS resolved_items (id TEXT PRIMARY KEY, owner TEXT NOT NULL, resolved_at TEXT, record TEXT NOT NULL CHECK(json_valid(record)));
+             CREATE TABLE IF NOT EXISTS todo_moves (seq INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT NOT NULL, section TEXT NOT NULL);"
         ).map_err(error)?;
         // When a failed message may be tried again (Unix seconds); added after the table existed.
         let has_retry: bool = connection
@@ -474,6 +475,90 @@ impl Database {
         Ok(bodies.len())
     }
 
+    /// Up to `limit` task rows larger than `bytes`, largest first: those still holding resolved requests or a long body from before they were split.
+    pub fn large_rows(&self, bytes: usize, limit: usize) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT name FROM tasks WHERE name != 'TODO.md' AND length(CAST(text AS BLOB)) > ?1 ORDER BY length(CAST(text AS BLOB)) DESC LIMIT ?2")
+            .map_err(error)?;
+        query
+            .query_map(params![bytes as i64, limit as i64], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+
+    /// Put each request kept in `resolved_items` back into its owner's `request_records` (where an older build looks for it), before a rollback; returns how many.
+    pub fn restore_resolved(&mut self) -> Result<usize, String> {
+        let exists: bool = self
+            .0
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'resolved_items')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !exists {
+            return Ok(0);
+        }
+        let transaction = self
+            .0
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let rows: Vec<(String, String)> = {
+            let mut query = transaction
+                .prepare("SELECT owner, record FROM resolved_items ORDER BY owner, resolved_at")
+                .map_err(error)?;
+            query
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        let mut by_owner: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+        for (owner, record) in rows {
+            if let Ok(record) = serde_json::from_str::<Value>(&record) {
+                by_owner.entry(owner).or_default().push(record);
+            }
+        }
+        let mut restored = 0;
+        for (owner, records) in by_owner {
+            let text: Option<String> = transaction
+                .query_row("SELECT text FROM tasks WHERE name = ?1", [&owner], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(error)?;
+            let Some(text) = text else { continue };
+            let Ok(mut task) = crate::tasks::Task::parse(&owner, &text) else {
+                continue;
+            };
+            let mut list: Vec<Value> = task
+                .field(crate::requests::KEY)
+                .and_then(|field| serde_json::from_str(field).ok())
+                .unwrap_or_default();
+            for record in records {
+                if !list.iter().any(|known| known["id"] == record["id"]) {
+                    list.push(record);
+                    restored += 1;
+                }
+            }
+            task.fields.retain(|(key, _)| key != crate::requests::KEY);
+            task.fields.push((
+                crate::requests::KEY.to_owned(),
+                Value::Array(list).to_string(),
+            ));
+            transaction
+                .execute(
+                    "UPDATE tasks SET text = ?2 WHERE name = ?1",
+                    params![owner, task.render()],
+                )
+                .map_err(error)?;
+        }
+        transaction.commit().map_err(error)?;
+        Ok(restored)
+    }
+
     /// Time of the task's latest status change to `done`, if the event is still in the database.
     pub fn done_time(&self, name: &str) -> Result<Option<String>, String> {
         self.0
@@ -486,13 +571,100 @@ impl Database {
             .map_err(error)
     }
 
-    /// What changes when TODO.md changes around task `name`: the list's length, its ends, and where `name` stands in it, read without copying the text out.
-    pub fn list_stamp(&self, name: &str) -> Result<String, String> {
+    /// Queue moving task `name` (at `address`) to the top of `section` of the task list; folded into TODO.md outside the store lock (`fold_todo`), and shown at once by `todo_text`.
+    // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": placing a task rewrote the ~400 KB TODO.md inside the lock.
+    pub fn todo_move(&self, name: &str, address: &str, section: &str) -> Result<(), String> {
+        let params: Vec<rusqlite::types::Value> = vec![
+            name.to_owned().into(),
+            address.to_owned().into(),
+            section.to_owned().into(),
+        ];
+        if let Some(done) = one(
+            "INSERT INTO todo_moves (name, address, section) VALUES (?1, ?2, ?3)",
+            params.clone(),
+        ) {
+            return done;
+        }
         self.0
-            .prepare_cached("SELECT length(text) || ':' || instr(text, ?1) || ':' || substr(text, 1, 64) || substr(text, -64) FROM tasks WHERE name = 'TODO.md'")
-            .and_then(|mut query| query.query_row([name], |row| row.get(0)).optional())
-            .map(|stamp: Option<String>| stamp.unwrap_or_default())
-            .map_err(error)
+            .execute(
+                "INSERT INTO todo_moves (name, address, section) VALUES (?1, ?2, ?3)",
+                rusqlite::params_from_iter(params),
+            )
+            .map_err(error)?;
+        Ok(())
+    }
+
+    /// TODO.md with the queued moves applied, and the last move folded in.
+    fn folded_todo(connection: &Connection) -> Result<Option<(String, i64)>, String> {
+        let text: Option<String> = connection
+            .query_row("SELECT text FROM tasks WHERE name = 'TODO.md'", [], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?;
+        let Some(mut text) = text else {
+            return Ok(None);
+        };
+        let mut last = 0;
+        let mut query = connection
+            .prepare_cached("SELECT seq, name, address, section FROM todo_moves ORDER BY seq")
+            .map_err(error)?;
+        let moves: Vec<(i64, String, String, String)> = query
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?;
+        for (seq, name, address, section) in moves {
+            if let Some(next) = crate::taskfile::placed(&text, &name, &address, &section)? {
+                text = next;
+            }
+            last = seq;
+        }
+        Ok(Some((text, last)))
+    }
+
+    /// The task list as it reads now: TODO.md with the queued moves applied.
+    pub fn todo_text(&self) -> Result<Option<String>, String> {
+        Ok(Self::folded_todo(&self.0)?.map(|(text, _)| text))
+    }
+
+    /// Change TODO.md in one write transaction: queued moves are applied first and dropped, then `change`. Writers of TODO.md go through here, so none overwrites another's change.
+    pub fn todo_change(
+        &mut self,
+        change: impl FnOnce(String) -> Result<String, String>,
+    ) -> Result<(), String> {
+        let transaction = self
+            .0
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let Some((text, last)) = Self::folded_todo(&transaction)? else {
+            return Ok(());
+        };
+        let changed = change(text)?;
+        transaction
+            .execute(
+                "INSERT INTO tasks (name, text) VALUES ('TODO.md', ?1) ON CONFLICT(name) DO UPDATE SET text = excluded.text",
+                [&changed],
+            )
+            .map_err(error)?;
+        transaction
+            .execute("DELETE FROM todo_moves WHERE seq <= ?1", [last])
+            .map_err(error)?;
+        transaction.commit().map_err(error)
+    }
+
+    /// Fold the queued task-list moves into TODO.md (the exporter does it each pass, outside the store lock).
+    pub fn fold_todo(&mut self) -> Result<(), String> {
+        let pending: bool = self
+            .0
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'todo_moves') AND EXISTS(SELECT 1 FROM todo_moves)", [], |row| row.get(0))
+            .map_err(error)?;
+        if pending {
+            self.todo_change(Ok)?;
+        }
+        Ok(())
     }
 
     /// The names of the active tasks whose stored row contains `word` (e.g. an address in its front matter).
@@ -1604,9 +1776,9 @@ fn pending_message(id: i64) -> crate::daemon::commit::Precondition {
 }
 
 /// A task body longer than this in the task row moves its older part to `task_old_body`.
-const OLD_BODY_AT: usize = 32 * 1024;
+const OLD_BODY_AT: usize = 12 * 1024;
 /// How much recent body the task row keeps after such a move.
-const KEEP_RECENT: usize = 8 * 1024;
+const KEEP_RECENT: usize = 4 * 1024;
 
 /// Where the body starts in a task text (`---` frontmatter `---`), if it has frontmatter.
 fn body_start(text: &str) -> Option<usize> {

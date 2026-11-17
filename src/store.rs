@@ -384,6 +384,8 @@ impl Store {
         exporting
             .lock()
             .map_err(|error| format!("amh: cannot take the export lock: {error}"))?;
+        // Task-list moves queued by `place` go into TODO.md here, outside the store lock.
+        Database::open(&self.state_dir.join("amh.sqlite3"))?.fold_todo()?;
         let mut git = None;
         let mut untaken_names = Vec::new();
         let through = database.latest_event_id()?;
@@ -1141,7 +1143,7 @@ impl Store {
     pub fn list(&self) -> Result<String, String> {
         if let Some(database) = self.database()? {
             return database
-                .task("TODO.md")?
+                .todo_text()?
                 .ok_or_else(|| "amh: no TODO.md in database".to_owned());
         }
         fs::read_to_string(self.root.join("TODO.md"))
@@ -1270,7 +1272,23 @@ impl Store {
             .position(|line| line.trim().eq_ignore_ascii_case(&section))
             .ok_or_else(|| format!("amh: TODO.md has no `{section}` section"))?;
         lines.insert(at + 1, &row);
-        self.write("TODO.md", &(lines.join("\n") + "\n"))
+        let text = lines.join("\n") + "\n";
+        if let Some(mut database) = self.database()? {
+            let entry = entry.to_owned();
+            let section = section.clone();
+            // Again inside one write transaction, on the list as it is then.
+            return database.todo_change(move |list| {
+                let row = format!("- {entry}");
+                let mut lines: Vec<_> = list.lines().filter(|line| line.trim() != row).collect();
+                let at = lines
+                    .iter()
+                    .position(|line| line.trim().eq_ignore_ascii_case(&section))
+                    .ok_or_else(|| format!("amh: TODO.md has no `{section}` section"))?;
+                lines.insert(at + 1, &row);
+                Ok(lines.join("\n") + "\n")
+            });
+        }
+        self.write("TODO.md", &text)
     }
 
     /// The plain bullets of one section of the task list, one per line.
@@ -1295,32 +1313,58 @@ impl Store {
         if lines.len() == list.lines().count() {
             return Err(format!("amh: the task list has no entry `{row}`"));
         }
+        if let Some(mut database) = self.database()? {
+            return database.todo_change(move |list| {
+                let lines: Vec<_> = list.lines().filter(|line| line.trim() != row).collect();
+                Ok(lines.join("\n") + "\n")
+            });
+        }
         self.write("TODO.md", &(lines.join("\n") + "\n"))
+    }
+
+    /// Save up to `limit` large task rows again, each under its own short lock, so they shed resolved requests and old body before a command touches them; returns how many. A row that stays large (e.g. a body inside one long code fence) is skipped next time.
+    pub fn compact_rows(&self, limit: usize) -> Result<usize, String> {
+        let Some(database) = self.database()? else {
+            return Ok(0);
+        };
+        let mut done = 0;
+        for name in database.large_rows(14 * 1024, limit * 4)? {
+            if done == limit {
+                break;
+            }
+            let key = format!("compacted:{name}");
+            let size = database.task_stored(&name)?.map_or(0, |text| text.len());
+            if database.record(&key)?.as_deref() == Some(size.to_string().as_str()) {
+                continue;
+            }
+            let _lock = self.lock()?;
+            let task = self.load(&name)?;
+            self.save(&task)?;
+            let after = database.task_stored(&name)?.map_or(0, |text| text.len());
+            database.set_record(&key, &after.to_string())?;
+            done += 1;
+        }
+        Ok(done)
     }
 
     /// Put the task's row at the top of its section of the task list.
     pub fn place(&self, task: &Task) -> Result<(), String> {
-        // TODO.md is large (~400 KB): skip reading and parsing it when this task was placed the same way and the list has not changed since.
-        let database = self.database()?;
+        let Some(database) = self.database()? else {
+            if let Some(list) =
+                taskfile::placed(&self.list()?, &task.name, task.address(), task.section())?
+            {
+                self.write("TODO.md", &list)?;
+            }
+            return Ok(());
+        };
+        // Queued, not written: the exporter folds moves into TODO.md (~400 KB) outside the store lock. A task already placed this way queues nothing.
         let key = format!("placed:{}", task.name);
         let seen = format!("{}|{}", task.section(), task.address());
-        let stamp = |database: &Database| -> Result<String, String> {
-            Ok(format!("{seen}|{}", database.list_stamp(&task.name)?))
-        };
-        if let Some(database) = &database
-            && database.record(&key)?.as_deref() == Some(stamp(database)?.as_str())
-        {
+        if database.record(&key)?.as_deref() == Some(seen.as_str()) {
             return Ok(());
         }
-        if let Some(list) =
-            taskfile::placed(&self.list()?, &task.name, task.address(), task.section())?
-        {
-            self.write("TODO.md", &list)?;
-        }
-        if let Some(database) = &database {
-            database.set_record(&key, &stamp(database)?)?;
-        }
-        Ok(())
+        database.todo_move(&task.name, task.address(), task.section())?;
+        database.set_record(&key, &seen)
     }
 }
 

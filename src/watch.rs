@@ -1692,6 +1692,10 @@ pub fn run() -> u8 {
             log(&line);
         }
         log_elapsed("turn replies", phase);
+        // Large rows from before the split shrink a few per pass, outside any command.
+        if let Err(error) = store.compact_rows(3) {
+            log(&format!("compacting task rows failed: {error}"));
+        }
         // Commits no longer checkpoint the WAL themselves (that cost milliseconds under the store lock); the watcher does it each pass.
         if let Ok(Some(database)) = store.database() {
             let _ = database.checkpoint();
