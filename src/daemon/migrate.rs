@@ -15,7 +15,10 @@ pub const STATE_FILES: [&str; 4] = [
 ];
 
 /// Additive schema steps, by version: only new tables, new nullable or defaulted columns, and copies; never a drop, rename, or type change, so binaries of older versions keep working on a newer schema.
-const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4)];
+const MIGRATIONS: &[(i64, &str)] = &[(1, V1), (2, V2), (3, V3), (4, V4), (5, V5)];
+
+/// Pruning day-old request outcomes finds them by time.
+const V5: &str = "CREATE INDEX IF NOT EXISTS request_outcomes_at ON request_outcomes (at);";
 
 /// The watcher keeps delivering its own `messages` queue, so V1's copies of its pending notices would be sent twice (and all pending ones at cut-over were notices to held agents): dead-letter them.
 const V4: &str = "

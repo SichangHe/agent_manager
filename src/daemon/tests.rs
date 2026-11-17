@@ -92,14 +92,15 @@ fn commit_queue_batches_and_isolates_refused_writes() -> Result {
             .map(|i| statement("INSERT INTO a (id) VALUES (?1)", 20_000 + i))
             .collect(),
     };
-    assert!(queue.submit(oversize).is_err());
+    // An over-size write is taken whole, as one job: every write goes through the one writer.
+    assert_eq!(queue.submit(oversize)?, Outcome::Committed);
     let connection = Connection::open(&path)?;
     let count = |table: &str| {
         connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| {
             r.get::<_, i64>(0)
         })
     };
-    assert_eq!((count("a")?, count("b")?), (400, 400));
+    assert_eq!((count("a")?, count("b")?), (465, 400));
     assert!(queue.wait_p99_us() < 1_000_000);
     std::fs::remove_dir_all(dir)?;
     Ok(())
@@ -221,7 +222,7 @@ fn migration_is_atomic_idempotent_and_keeps_old_tables() -> Result {
     connection.execute_batch("DROP TABLE leases")?;
     migrate::migrate(&mut connection)?;
     migrate::migrate(&mut connection)?;
-    assert_eq!(versions(&connection)?, vec![1, 2, 3, 4]);
+    assert_eq!(versions(&connection)?, vec![1, 2, 3, 4, 5]);
     // A newer binary's version is tolerated.
     connection.execute("INSERT INTO schema_version (version) VALUES (99)", [])?;
     migrate::migrate(&mut connection)?;

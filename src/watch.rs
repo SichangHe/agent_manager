@@ -418,11 +418,11 @@ fn take_in(
     name: &str,
     mail: &mail::Parsed,
 ) -> Result<String, String> {
-    let _lock = store.lock()?;
-    let _phase = crate::store::Phase::new("mail.all_and_route");
+    // Routing reads every task: done before the lock.
     let tasks = store.all()?;
     let main_manager = settings::get(settings, "main_manager");
-    let task = &decide::route(&tasks, main_manager, &mail.subject, &mail.body)?.name;
+    let task = &decide::route(&tasks, main_manager, &mail.subject, &mail.body)?.name.clone();
+    let _lock = store.lock()?;
     write_private(stored, &decide::stored_mail(&mail.subject, &mail.body))
         .map_err(|error| format!("cannot write {}: {error}", stored.display()))?;
     let mut task = store.load(task)?;
@@ -505,21 +505,31 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
         let name = format!("zulip-{id}.txt");
         let stored = store.root.join("manager_mail").join(&name);
         {
-            let _lock = store.lock()?;
             let key = format!("zulip:{id}");
-            if !crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+            // Routing reads every task: done before the lock, which then covers only queuing to the chosen task (read again).
+            let routed = if crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
                 .received_mail(&key)?
             {
-                let routing = crate::store::Phase::new("zulip.all_and_route");
+                None
+            } else {
                 let tasks = store.all()?;
-                let mut task = decide::route(
-                    &tasks,
-                    settings::get(settings, "main_manager"),
-                    &subject,
-                    &crate::zulip::own_text(body),
-                )?
-                .clone();
-                drop(routing);
+                Some(
+                    decide::route(
+                        &tasks,
+                        settings::get(settings, "main_manager"),
+                        &subject,
+                        &crate::zulip::own_text(body),
+                    )?
+                    .name
+                    .clone(),
+                )
+            };
+            let _lock = store.lock()?;
+            if let Some(routed) = routed
+                && !crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+                    .received_mail(&key)?
+            {
+                let mut task = store.load(&routed)?;
                 let _queue = crate::store::Phase::new("zulip.store_and_queue");
                 write_private(&stored, &decide::stored_mail(&subject, body))
                     .map_err(|error| format!("cannot store Zulip message: {error}"))?;

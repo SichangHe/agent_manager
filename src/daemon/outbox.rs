@@ -404,16 +404,23 @@ pub fn claim(state_dir: &Path, id: &str) -> Result<Option<(u8, String, String)>,
                 sql: "SELECT NOT EXISTS (SELECT 1 FROM request_outcomes WHERE id = ?1)".into(),
                 params: vec![id.to_owned().into()],
             }],
-            statements: vec![
-                super::commit::statement(
+            statements: {
+                let mut statements = vec![super::commit::statement(
                     "INSERT INTO request_outcomes (id, boot) VALUES (?1, ?2)",
                     vec![id.to_owned().into(), boot().to_owned().into()],
-                ),
-                super::commit::statement(
-                    "DELETE FROM request_outcomes WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')",
-                    vec![],
-                ),
-            ],
+                )];
+                // Day-old outcomes go at most once a minute: the delete scanned ~18 MB of stored replies in every request's write (17 ms in the writer).
+                static PRUNED: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+                let now_s = chrono::Utc::now().timestamp();
+                if now_s - PRUNED.load(std::sync::atomic::Ordering::Relaxed) >= 60 {
+                    PRUNED.store(now_s, std::sync::atomic::Ordering::Relaxed);
+                    statements.push(super::commit::statement(
+                        "DELETE FROM request_outcomes WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 day')",
+                        vec![],
+                    ));
+                }
+                statements
+            },
         },
     )?;
     if inserted == Outcome::Committed {

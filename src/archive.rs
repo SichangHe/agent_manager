@@ -88,10 +88,7 @@ fn archive_resolved_items(
         count += records.len();
     }
     for id in &moved {
-        database
-            .sql()
-            .execute("DELETE FROM resolved_items WHERE id = ?1", [id])
-            .map_err(|e| format!("amh: SQLite: {e}"))?;
+        database.delete_resolved(id)?;
     }
     Ok(count)
 }

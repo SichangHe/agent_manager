@@ -651,8 +651,41 @@ impl Database {
     /// Change TODO.md in one write transaction: queued moves are applied first and dropped, then `change`. Writers of TODO.md go through here, so none overwrites another's change.
     pub fn todo_change(
         &mut self,
-        change: impl FnOnce(String) -> Result<String, String>,
+        change: impl Fn(String) -> Result<String, String>,
     ) -> Result<(), String> {
+        // In the daemon, through the single writer: read, change, and commit only if TODO.md is still what was read (else again).
+        if crate::daemon::commit::global().is_some() {
+            loop {
+                let Some((text, last)) = Self::folded_todo(&self.0)? else {
+                    return Err("amh: no TODO.md in database".to_owned());
+                };
+                let base: Option<String> = self
+                    .0
+                    .query_row("SELECT text FROM tasks WHERE name = 'TODO.md'", [], |row| row.get(0))
+                    .optional()
+                    .map_err(error)?;
+                let changed = change(text)?;
+                let done = crate::daemon::commit::route(|| crate::daemon::commit::Write {
+                    preconditions: vec![crate::daemon::commit::Precondition {
+                        sql: "SELECT (SELECT text FROM tasks WHERE name = 'TODO.md') IS ?1".into(),
+                        params: vec![base.clone().map_or(rusqlite::types::Value::Null, Into::into)],
+                    }],
+                    statements: vec![
+                        crate::daemon::commit::statement(
+                            "INSERT INTO tasks (name, text) VALUES ('TODO.md', ?1) ON CONFLICT(name) DO UPDATE SET text = excluded.text",
+                            vec![changed.clone().into()],
+                        ),
+                        crate::daemon::commit::statement("DELETE FROM todo_moves WHERE seq <= ?1", vec![last.into()]),
+                    ],
+                });
+                match done {
+                    Some(Ok(crate::daemon::commit::Outcome::Committed)) => return Ok(()),
+                    Some(Ok(crate::daemon::commit::Outcome::Conflict)) => continue,
+                    Some(Err(e)) => return Err(e),
+                    None => break,
+                }
+            }
+        }
         let _bypass = Bypass::new("todo_change");
         let transaction = self
             .0
@@ -695,9 +728,8 @@ impl Database {
             })
             .map_err(error)?;
         let Some(oldest) = oldest else {
-            self.0
-                .execute("DELETE FROM records WHERE name LIKE 'todo:fold_due:%'", [])
-                .map_err(error)?;
+            // The exporter calls this many times a second: write only when there is something to drop (an unconditional DELETE took the write lock each time and kept the daemon's writer waiting).
+            self.drop_fold_due()?;
             return Ok(());
         };
         let due_key = format!("todo:fold_due:{oldest}");
@@ -711,11 +743,33 @@ impl Database {
         };
         if now || due || waiting >= 100 {
             self.todo_change(Ok)?;
-            self.0
-                .execute("DELETE FROM records WHERE name LIKE 'todo:fold_due:%'", [])
-                .map_err(error)?;
+            self.drop_fold_due()?;
         }
         Ok(())
+    }
+
+    fn drop_fold_due(&self) -> Result<(), String> {
+        let any: bool = self
+            .0
+            .query_row("SELECT EXISTS(SELECT 1 FROM records WHERE name LIKE 'todo:fold_due:%')", [], |row| row.get(0))
+            .map_err(error)?;
+        if !any {
+            return Ok(());
+        }
+        let sql = "DELETE FROM records WHERE name LIKE 'todo:fold_due:%'";
+        if let Some(done) = one(sql, vec![]) {
+            return done;
+        }
+        self.0.execute(sql, []).map_err(error).map(|_| ())
+    }
+
+    /// Delete one archived request from `resolved_items`, through the daemon's writer when there is one.
+    pub fn delete_resolved(&self, id: &str) -> Result<(), String> {
+        let sql = "DELETE FROM resolved_items WHERE id = ?1";
+        if let Some(done) = one(sql, vec![id.to_owned().into()]) {
+            return done;
+        }
+        self.0.execute(sql, [id]).map_err(error).map(|_| ())
     }
 
     /// What amh last exported to `name`'s file. For a long task it is kept as the row was then (its marker says how much older body went with it), not the whole text, so recording an export writes a small row.
@@ -739,6 +793,40 @@ impl Database {
             without_older_marker(&recorded[..at]),
             &recorded[at..]
         )))
+    }
+
+    /// Once: export records of split tasks still kept whole go to row form, when they match the task as it is now; returns how many.
+    pub fn convert_export_records(&self) -> Result<usize, String> {
+        if self.record("export:rowform-v1")?.is_some() {
+            return Ok(0);
+        }
+        let names: Vec<String> = {
+            let mut query = self
+                .0
+                .prepare("SELECT DISTINCT name FROM task_old_body")
+                .map_err(error)?;
+            query
+                .query_map([], |row| row.get(0))
+                .map_err(error)?
+                .collect::<Result<_, _>>()
+                .map_err(error)?
+        };
+        let mut converted = 0;
+        for name in names {
+            let (Some(recorded), Some(row), Some(whole)) = (
+                self.record(&format!("export:{name}"))?,
+                self.task_stored(&name)?,
+                self.task(&name)?,
+            ) else {
+                continue;
+            };
+            if recorded == whole && recorded != row {
+                self.set_export_text(&name, &whole, Some(&row))?;
+                converted += 1;
+            }
+        }
+        self.set_record("export:rowform-v1", &converted.to_string())?;
+        Ok(converted)
     }
 
     /// Put every export record kept in row form back as the whole text an older build compares files with; before a rollback, while the older bodies still exist.
@@ -1218,7 +1306,8 @@ impl Database {
     pub fn subjects_since(&self, after: i64, kind: &str) -> Result<Vec<String>, String> {
         let mut query = self
             .0
-            .prepare("SELECT DISTINCT subject FROM events WHERE id > ?1 AND kind = ?2")
+            // NOT INDEXED: walk the id range; with DISTINCT, SQLite chose a full scan of `events_by_subject` (~7 ms under the store lock).
+            .prepare_cached("SELECT DISTINCT subject FROM events NOT INDEXED WHERE id > ?1 AND kind = ?2")
             .map_err(error)?;
         let rows = query
             .query_map(params![after, kind], |row| row.get::<_, String>(0))

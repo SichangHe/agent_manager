@@ -11,7 +11,7 @@ use crate::database::Statement;
 
 /// Most writes one batch takes.
 const BATCH_MAX: usize = 256;
-/// Most statements one write may hold.
+/// How many statements callers that can split their writes put in one (e.g. the chunked edit import); larger writes are still taken whole.
 pub const WRITE_MAX: usize = 64;
 /// A batch slower than this is logged.
 const SLOW_BATCH: Duration = Duration::from_millis(2);
@@ -266,12 +266,6 @@ fn commit(connection: &mut Connection, batch: &[Job]) -> Vec<Result<Outcome, Str
 }
 
 fn apply(transaction: &rusqlite::Transaction<'_>, write: &Write) -> Result<Outcome, String> {
-    if write.statements.len() > WRITE_MAX {
-        return Err(format!(
-            "amh: a write holds {} statements; at most {WRITE_MAX} are allowed",
-            write.statements.len()
-        ));
-    }
     for precondition in &write.preconditions {
         let holds: i64 = transaction
             .prepare_cached(&precondition.sql)
@@ -341,16 +335,7 @@ pub fn statement(sql: &str, params: Vec<rusqlite::types::Value>) -> Statement {
 pub fn route(write: impl FnOnce() -> Write) -> Option<Result<Outcome, String>> {
     let queue = global()?;
     let write = write();
-    if write.statements.len() > WRITE_MAX {
-        use std::io::Write as _;
-        let _ = writeln!(
-            std::io::stderr(),
-            "amhd: a write of {} statements bypasses the writer queue on {}",
-            write.statements.len(),
-            std::thread::current().name().unwrap_or("?")
-        );
-        return None;
-    }
+    // Every write goes through the one writer, an over-size one too (as one job).
     Some(queue.submit(write))
 }
 

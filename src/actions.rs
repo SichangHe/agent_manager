@@ -18,8 +18,16 @@ use crate::{decide, guest, omnigent, requests, settings, taskfile, view, watch, 
 
 pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
     let _phase = crate::store::Phase::new("clear_stopped");
-    for mut task in store
-        .all()?
+    // Only active tasks whose row names the address (found in SQL), not every task parsed (~100 ms under the lock after each delivery).
+    let candidates: Vec<Task> = match store.database()? {
+        Some(database) => database
+            .active_names_mentioning(address)?
+            .into_iter()
+            .map(|name| store.load(&name))
+            .collect::<Result<_, _>>()?,
+        None => store.all()?,
+    };
+    for mut task in candidates
         .into_iter()
         .filter(|task| task.address() == address && task.field("agent_stopped") == Some("true"))
     {

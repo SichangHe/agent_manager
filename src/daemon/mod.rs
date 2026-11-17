@@ -135,6 +135,12 @@ fn serve() -> Result<(), String> {
     let (committed, commits) = mpsc::channel();
     let (queue, _commit_thread) = commit::Queue::start(&path, committed)?;
     commit::install(queue.clone());
+    // Once: existing export records of split tasks go to the small row form (through the writer, now installed).
+    match crate::database::Database::open(&path).and_then(|database| database.convert_export_records()) {
+        Ok(0) => {}
+        Ok(n) => eprintln!("amhd: {n} export records now in row form"),
+        Err(error) => eprintln!("amhd: converting export records failed: {error}"),
+    }
     let database = edits::initialized(&store)?;
     edits::resume_all(&database, &queue)?;
     edits::import_all(&store, &queue, None)?;
