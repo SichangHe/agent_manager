@@ -261,25 +261,65 @@ pub fn rollback() -> Result<String, String> {
     // Rolling back from the daemon to a build without it (stage-2 rollback, docs/rework-and-upgrades.md): clients first, then the units.
     let state_dir = crate::settings::state_dir();
     let mark = state_dir.join(crate::daemon::CLIENT_MARK);
-    if mark.exists() && !has_daemon(&releases_dir().join(&previous).join("amh")) {
+    let daemon_live = mark.exists()
+        || Command::new("systemctl")
+            .args(["--user", "is-active", "--quiet", "amhd.service"])
+            .status()
+            .is_ok_and(|s| s.success());
+    if daemon_live && !has_daemon(&releases_dir().join(&previous).join("amh"))? {
         said += &leave_daemon(&state_dir, &mark)?;
     }
     write_history(&names)?;
     Ok(said + &switch(&previous)?)
 }
 
-/// Whether the build at `binary` has the daemon (`amh daemon` without `AMH_DAEMON=1` says it is off; older builds do not know the command).
-fn has_daemon(binary: &Path) -> bool {
-    Command::new(binary)
+/// Whether the build at `binary` has the daemon: `amh daemon` without `AMH_DAEMON=1` says it is off; older builds reject the command. Anything else is an error, never a guess.
+fn has_daemon(binary: &Path) -> Result<bool, String> {
+    let mut child = Command::new(binary)
         .arg("daemon")
         .env_remove("AMH_DAEMON")
-        .output()
-        .is_ok_and(|out| String::from_utf8_lossy(&out.stderr).contains("the daemon is off"))
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("amh: cannot run {}: {e}", binary.display()))?;
+    let began = std::time::Instant::now();
+    while child.try_wait().map_err(|e| format!("amh: {e}"))?.is_none() {
+        if began.elapsed() > std::time::Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "amh: `{} daemon` did not exit; cannot tell whether it has the daemon",
+                binary.display()
+            ));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let mut stderr = String::new();
+    if let Some(mut pipe) = child.stderr.take() {
+        let _ = std::io::Read::read_to_string(&mut pipe, &mut stderr);
+    }
+    if stderr.contains("the daemon is off") {
+        Ok(true)
+    } else if stderr.contains("unrecognized subcommand") {
+        Ok(false)
+    } else {
+        Err(format!(
+            "amh: cannot tell whether {} has the daemon: {}",
+            binary.display(),
+            stderr.trim()
+        ))
+    }
 }
 
 /// Switch from amhd back to amh-watch: new commands run in-process, the outbox drains (60 s at most; what is left is listed to resend by hand), clients still retrying finish, then amhd stops and amh-watch takes over, also at boot.
 fn leave_daemon(state_dir: &Path, mark: &Path) -> Result<String, String> {
-    fs::remove_file(mark).map_err(|e| format!("amh: cannot remove {}: {e}", mark.display()))?;
+    // Each step may already be done by an earlier, interrupted rollback.
+    if mark.exists() {
+        fs::remove_file(mark).map_err(|e| format!("amh: cannot remove {}: {e}", mark.display()))?;
+    }
+    let mut said = String::from("amh: commands run in-process again\n");
+    // A client retries a request for about 30 s; let those reach the daemon and queue first, then drain.
+    std::thread::sleep(std::time::Duration::from_secs(30));
     let open = || -> Vec<(String, String, String)> {
         rusqlite::Connection::open(state_dir.join("amh.sqlite3"))
             .and_then(|db| {
@@ -288,25 +328,23 @@ fn leave_daemon(state_dir: &Path, mark: &Path) -> Result<String, String> {
             })
             .unwrap_or_default()
     };
-    let mut said = String::from("amh: commands run in-process again\n");
     for _ in 0..60 {
         if open().is_empty() {
             break;
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
     }
+    run(&home(), "systemctl", &["--user", "stop", "amhd.service"])?;
+    // Listed after the stop, so nothing can still be queued behind the list.
     for (id, to, body) in open() {
         said += &format!("amh: not delivered by amhd; resend by hand: {id} to {to}: {body}\n");
     }
-    // A client retries a request for about 30 s; let those finish against the daemon.
-    std::thread::sleep(std::time::Duration::from_secs(30));
-    for args in [
-        ["--user", "stop", "amhd.service"],
-        ["--user", "disable", "amhd.service"],
-        ["--user", "enable", "amh-watch.service"],
-    ] {
-        run(&home(), "systemctl", &args)?;
-    }
+    run(&home(), "systemctl", &["--user", "disable", "amhd.service"])?;
+    run(
+        &home(),
+        "systemctl",
+        &["--user", "enable", "amh-watch.service"],
+    )?;
     said += "amh: amhd stopped; amh-watch takes over (also at boot)\n";
     Ok(said)
 }

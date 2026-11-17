@@ -31,6 +31,34 @@ pub fn stopping() -> bool {
     STOPPING.load(std::sync::atomic::Ordering::SeqCst)
 }
 
+/// Ask the one refresher thread to refresh the task files; requests made while it runs share its next pass.
+fn refresh_later() {
+    static REFRESHER: std::sync::OnceLock<Option<std::sync::mpsc::Sender<()>>> =
+        std::sync::OnceLock::new();
+    let sender = REFRESHER.get_or_init(|| {
+        let (send, receive) = std::sync::mpsc::channel::<()>();
+        std::thread::Builder::new()
+            .name("amhd-refresh".into())
+            .spawn(move || {
+                while receive.recv().is_ok() {
+                    while receive.try_recv().is_ok() {}
+                    if let Err(error) = crate::settings::load()
+                        .and_then(|settings| Store::new(&settings).refresh_exports())
+                    {
+                        eprintln!(
+                            "amhd: task files not refreshed yet (the exporter will): {error}"
+                        );
+                    }
+                }
+            })
+            .ok()
+            .map(|_| send)
+    });
+    if let Some(sender) = sender {
+        let _ = sender.send(());
+    }
+}
+
 /// The state-dir file whose presence sends every client command through the daemon (stage 2 cut-over); removing it is the first step of a rollback.
 pub const CLIENT_MARK: &str = "amhd.client";
 
@@ -84,6 +112,11 @@ pub fn run() -> u8 {
 }
 
 fn serve() -> Result<(), String> {
+    // A stop during a slow start is clean too: the main loop sees it once serving begins.
+    // SAFETY: the handler only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+    }
     let settings = crate::settings::load()?;
     let store = Store::new(&settings);
     let _single = single_instance(&store.state_dir)?;
@@ -129,10 +162,6 @@ fn serve() -> Result<(), String> {
         })
         .map_err(|e| format!("amh: cannot start the watcher: {e}"))?;
     outbox::start(settings.clone(), store.state_dir.clone())?;
-    // SAFETY: the handler only stores to an atomic.
-    unsafe {
-        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
-    }
     listen(&store.state_dir)?;
     notify_systemd("READY=1");
     for beat in 1u64.. {
@@ -325,13 +354,18 @@ fn listen(state_dir: &Path) -> Result<(), String> {
         .spawn(move || {
             for stream in listener.incoming().flatten() {
                 // While stopping, a new connection is closed unanswered: its client retries the same request against the next daemon.
+                ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 if stopping() {
+                    ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
                     continue;
                 }
-                ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let _ = std::thread::Builder::new()
+                if std::thread::Builder::new()
                     .name("amhd-request".into())
-                    .spawn(move || answer(stream));
+                    .spawn(move || answer(stream))
+                    .is_err()
+                {
+                    ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                }
             }
         })
         .map_err(|e| format!("amh: cannot start the listener: {e}"))?;
@@ -434,9 +468,7 @@ pub fn run_request(request: &serde_json::Value) -> serde_json::Value {
             }
         };
         if values["group"] == "tell" {
-            let _ = std::thread::Builder::new()
-                .name("amhd-refresh".into())
-                .spawn(refresh);
+            refresh_later();
         } else {
             refresh();
         }
