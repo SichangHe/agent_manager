@@ -4,7 +4,7 @@
 #   SRC_STATE_DIR    live state dir to copy (read only: SQLite backup API, holds and scan files)
 #   SRC_WORK_LOGS    live work_logs folder (its top-level *.md are copied)
 #   OLD_RELEASE_DIR  the live CLI-only release directory (copied as the fake home's live release)
-#   NEW_CHECKOUT     clean git checkout of the daemon build to release (with --hotfix: it is not on origin/revive yet)
+#   NEW_CHECKOUT     clean git checkout of the daemon build to release (with --hotfix: it is not on origin/main yet)
 # Everything runs under a fake HOME with a fake `systemctl` (process-managed units), the Omnigent stub, no Zulip and no mail credentials.
 # Env: REHEARSE_KEEP=1 keeps the folder.
 set -euo pipefail

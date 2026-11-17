@@ -22,7 +22,7 @@
 
 ## Cut-over
 
-1. Merge `amhd` into `revive` and push. In a clean checkout of `origin/revive`, run `bench/rehearse.sh LIVE_STATE WORK_LOGS LIVE_RELEASE_DIR CHECKOUT`. It must end with `REHEARSAL PASSED`.
+1. Merge `amhd` into `main` and push. In a clean checkout of `origin/main`, run `bench/rehearse.sh LIVE_STATE WORK_LOGS LIVE_RELEASE_DIR CHECKOUT`. It must end with `REHEARSAL PASSED`.
 2. Every `amh` on any agent's PATH must be the release symlink: `which -a amh` and `readlink -f` each. A separate binary (today `~/.local/bin/amh`, an October build) ignores `amhd.client` and writes beside the daemon. Replace it with a symlink to `~/.cargo/bin/amh`.
 3. `cpu-run LOW -c 8 -o OWNER -e END -- amh release` in that checkout. This is the new build in CLI mode, with `amh-watch` restarted on it. Check `amh agent list`, `amh todo list`, and `tail amh-watch.log`.
 4. Install the unit: copy `systemd/amhd.service` to `~/.config/systemd/user/`, then run `systemctl --user daemon-reload` and `systemd-analyze --user verify amhd.service`. Its PATH and working directory must match `amh-watch.service`.
