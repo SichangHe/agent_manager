@@ -33,7 +33,9 @@ Misses (what the transcript was)
 - noise (std 0.03) is the weak spot for every path; with the full reply it drops to 14% (the transcript becomes "bill"/other words, or an extra word)
 
 False positives
-- keyword spotter over 4.9 h of speech: see the end of this file (run in progress when this was written)
+- keyword spotter over 4.9 h of speech (the same stream as the earlier word studies), app settings: ATTENTION 5 false accepts (about 1 per hour), KATANA 0, TOMATO 0, MACARONI 0
+- caveat: the stream is generated and agent speech; its text contains the word "attention" at least once, so some of the 5 may be real utterances, not errors; I did not align the triggers with the text
+- inference: katana, tomato and macaroni are safe at this exposure (below about 0.6 per hour, 95% bound); the start word is the only one that fires on ordinary speech, but triggering it only opens a reply session that closes by itself after 8 s of silence
 
 Takeaways (inference)
 - start word, cancel word and the navigation commands are reliable on clean speech; the weak points are "stop", "back" and everything in noise
