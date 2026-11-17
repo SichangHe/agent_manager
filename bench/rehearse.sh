@@ -67,6 +67,8 @@ stub_pid=$!
 for _ in $(seq 100); do [ -s "$R/port" ] && break; sleep 0.05; done
 url="http://127.0.0.1:$(cat "$R/port")"
 python3 "$here/isolate_env.py" /nonexistent "$R/root" "$url" >"$S/env.toml"
+# The live limit (2 starts/min) queues the smoke starts behind the watcher's own restarts of copied agents; lift it as the load bench does.
+mkdir -p "$H/.config/amh"; printf '[launch]\nstarts_per_minute = 1000\n' >"$H/.config/amh/config.toml"
 
 export REHEARSE_UNITS=$R/units
 amh() { env -i HOME="$H" PATH="$R/bin:$here/bin:/usr/bin:/bin" TMPDIR="$R/tmp" REHEARSE_UNITS="$R/units" "$AMH" "$@"; }
