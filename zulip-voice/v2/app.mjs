@@ -416,6 +416,7 @@ const pastWatermark = it => after(it, watermark());
 /** What was paused (by a voice session or otherwise) and is not finished: resumes it mid-chunk, else falls back to autoplay. */
 let pausedItem = null;
 function resumeAfterPause() {
+  { const wait = vctl.soundLeftMs?.() ?? 0; if (wait > 0 && wait < 3000) { clearTimeout(resumeAfterPause.t); resumeAfterPause.t = setTimeout(resumeAfterPause, wait + 60); return; } }   // let a chime finish first
   player.unlock(); setFollow(true); if (nowMsgId !== null) scrollToNow();
   const st = player.position().status;
   if (st === 'paused') { player.resume(); return; }
@@ -430,6 +431,7 @@ function resumeAfterPause() {
 }
 
 function maybeAutoplay() {
+  { const wait = vctl.soundLeftMs?.() ?? 0; if (wait > 0 && wait < 3000) { clearTimeout(maybeAutoplay.t); maybeAutoplay.t = setTimeout(maybeAutoplay, wait + 60); return; } }   // a chime (e.g. cancel) is still playing: reading starts after it, never over it
   if (replacementWait) return;
   if (!autoplay || !current || vctl.userSpeaking() || player.position().status !== 'idle') return;   // never start speech while the user speaks
   // Forward only: anything older than the newest read message counts as read and is never played again.

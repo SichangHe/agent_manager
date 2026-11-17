@@ -275,8 +275,8 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     /** iOS can pause the pad on its own (audio session change, notification): restart it while it is meant to be on. Returns true if it had to. */
     ambientKeep() { if (!ambientOn || !ambientEl.paused) return false; ambientEl.volume = 1; ambientEl.play().catch(() => {}); return true; },
     /** Plays a short synthesized earcon on the speech element (no AudioContext): same output path and level as speech, about -13 LUFS like the clips. */
-    earcon(notes, noteS) {
-      const hz = 24000, gain = 0.45, n = Math.round(noteS * hz), pcm = new Int16Array(n * notes.length);
+    earcon(notes, noteS, volume = 0.45) {
+      const hz = 24000, gain = volume, n = Math.round(noteS * hz), pcm = new Int16Array(n * notes.length);
       notes.forEach((f, k) => { for (let i = 0; i < n; i++) { const env = Math.min(1, i / (hz * 0.01), (n - i) / (hz * 0.03)); pcm[k * n + i] = Math.round(Math.sin(2 * Math.PI * f * i / hz) * env * gain * 32767); } });
       const head = new DataView(new ArrayBuffer(44)), w = (o, t) => [...t].forEach((c, i) => head.setUint8(o + i, c.charCodeAt(0)));
       w(0, 'RIFF'); head.setUint32(4, 36 + pcm.byteLength, true); w(8, 'WAVEfmt '); head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true); head.setUint32(24, hz, true); head.setUint32(28, hz * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true); w(36, 'data'); head.setUint32(40, pcm.byteLength, true);

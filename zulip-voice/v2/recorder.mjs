@@ -62,7 +62,7 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], cancel: [900, 620], command: [740, 0, 740], tick: [1568], updated: [988, 740, 988], interrupted: [1000, 850, 720, 620], empty: [1100, 0, 1100], error: [1400, 1000, 1400, 1000], limited: [1568, 0, 1568, 0, 1568]};   // every note is 600-1600 Hz: phone speakers play lower tones too quietly
+export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], cancel: [1319, 1047, 784], command: [740, 0, 740], tick: [1568], updated: [988, 740, 988], interrupted: [1000, 850, 720, 620], empty: [1100, 0, 1100], error: [1400, 1000, 1400, 1000], limited: [1568, 0, 1568, 0, 1568]};   // every note is 600-1600 Hz: phone speakers play lower tones too quietly
 
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio, onSpeechOnset}) {
   /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
@@ -211,6 +211,8 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
       onEarcon?.(kind);   // played by the app on an <audio> element: no extra AudioContext, same output path and level as speech
       earconUntilMs = performance.now() + notes.length * EARCON_NOTE_S * 1000 + 250;
     },
+    /** Milliseconds until the chime in progress has finished (0 if none): playback must not start over it. */
+    earconLeftMs: () => Math.max(0, earconUntilMs - 250 - performance.now()),
     /** Ignore the microphone for `ms` (our own speech or chime is playing). */
     muteFor(ms, keepSpotting = false) { earconUntilMs = performance.now() + ms + 250; if (!keepSpotting) speechMuteUntilMs = earconUntilMs; },   // keepSpotting: our own prompt is playing but start words may still interrupt it
     unmute() { earconUntilMs = speechMuteUntilMs = 0; },
