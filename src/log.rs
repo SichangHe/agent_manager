@@ -18,7 +18,12 @@ pub fn caller() -> String {
         format!("tmux-pane:{pane}")
     } else {
         set("USER").map_or_else(
-            || format!("terminal:{}", std::process::id()),
+            || {
+                format!(
+                    "terminal:{}",
+                    set("AMH_CLIENT_PID").unwrap_or_else(|| std::process::id().to_string())
+                )
+            },
             |user| format!("user:{user}"),
         )
     }

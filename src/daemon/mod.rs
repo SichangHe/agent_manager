@@ -385,10 +385,21 @@ pub fn run_request(request: &serde_json::Value) -> serde_json::Value {
         crate::log::record(
             &values.to_string(),
             &format!(
-                "exit={code} duration_us={} lock_wait_us={} lock_hold_us={} via=amhd",
+                "exit={code} duration_us={} lock_wait_us={} lock_hold_us={} via=amhd{}",
                 began.elapsed().as_micros(),
                 lock_wait_us,
-                lock_hold_us
+                lock_hold_us,
+                // The first line of a failure, so refusals (e.g. held agents) can be told from faults.
+                match err.lines().find(|line| !line.trim().is_empty()) {
+                    Some(line) if code != 0 => format!(
+                        " error=\"{}\"",
+                        line.chars()
+                            .filter(|c| !matches!(c, '{' | '}' | '"'))
+                            .take(120)
+                            .collect::<String>()
+                    ),
+                    _ => String::new(),
+                }
             ),
         )
     });

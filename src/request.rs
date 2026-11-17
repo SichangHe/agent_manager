@@ -6,7 +6,8 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 
 /// The environment variables a request may carry; everything else is the daemon's own.
-pub const ALLOWED: [&str; 5] = [
+pub const ALLOWED: [&str; 6] = [
+    "AMH_CLIENT_PID",
     "OMNIGENT_RUNNER_PRIMARY_SESSION_ID",
     "OMO_AGENT_TASK_FILE",
     "AMH_HUMAN_STARTED",

@@ -136,6 +136,11 @@ fn through_daemon(values: &Value) -> Option<ExitCode> {
         let human = if actions::human_terminal() { "1" } else { "0" };
         env.insert("AMH_HUMAN_STARTED".to_owned(), human.into());
     }
+    // The daemon names an unidentified caller by the client's pid, not its own.
+    env.insert(
+        "AMH_CLIENT_PID".to_owned(),
+        std::process::id().to_string().into(),
+    );
     let id = format!(
         "{}-{}",
         std::process::id(),
