@@ -221,7 +221,7 @@ fn migration_is_atomic_idempotent_and_keeps_old_tables() -> Result {
     connection.execute_batch("DROP TABLE leases")?;
     migrate::migrate(&mut connection)?;
     migrate::migrate(&mut connection)?;
-    assert_eq!(versions(&connection)?, vec![1, 2, 3]);
+    assert_eq!(versions(&connection)?, vec![1, 2, 3, 4]);
     // A newer binary's version is tolerated.
     connection.execute("INSERT INTO schema_version (version) VALUES (99)", [])?;
     migrate::migrate(&mut connection)?;
@@ -229,7 +229,7 @@ fn migration_is_atomic_idempotent_and_keeps_old_tables() -> Result {
         connection.query_row("SELECT recipient, body, state FROM outbox", [], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
-    assert_eq!(outbox, ("w".into(), "hi".into(), "pending".into()));
+    assert_eq!(outbox, ("w".into(), "hi".into(), "dead".into()));
     drop(connection);
     // The old in-process path still works on the migrated schema.
     let mut database = Database::open(&path)?;
