@@ -38,4 +38,5 @@ for (const name of files) {
   if (name === 'app.mjs') text = text.replace("const BUILD = 'v2.0'", `const BUILD = 'v2.0-${version}'`);
   await writeFile(resolve(output, name), text);
 }
+await writeFile(resolve(output, 'version.txt'), version + '\n');   // the page polls this to tell the user a newer build exists
 console.log(`Built ${files.length} files, version ${version}, into ${output}; nothing published.`);

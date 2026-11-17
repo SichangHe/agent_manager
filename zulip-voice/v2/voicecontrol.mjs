@@ -457,6 +457,7 @@ export function createVoiceControl(ctx) {
   const textSetting = (id, key, fallback, clean) => { $(id).value = store.get(key, fallback); $(id).onchange = e => store.set(key, clean(e.target.value.trim()) || fallback); };
   textSetting('set-phrase', 'voice2-resume-phrase', RESUME_DEFAULT, v => v);
   textSetting('set-start', 'voice2-start-word', START_DEFAULT, v => v.toLowerCase());
+  textSetting('set-cancel', 'voice2-cancel-word', CANCEL_WORD_DEFAULT, v => v.toLowerCase());
   textSetting('set-cmd', 'voice2-cmd-word', CMD_DEFAULT, v => v.toLowerCase());
   $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
   $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));

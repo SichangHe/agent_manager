@@ -1012,6 +1012,20 @@ addEventListener('keydown', e => {
   action();
 });
 
+// ---- update notice: a page never updates itself; tell the user when a newer build is published ----
+let updateShown = false;
+async function checkForUpdate() {
+  const mine = BUILD.replace(/^v2\.0-?/, '');
+  if (!mine || updateShown) return;   // unbuilt page: nothing to compare
+  try {
+    const r = await fetch('version.txt?t=' + Date.now(), {cache: 'no-store'});
+    const latest = r.ok ? (await r.text()).trim() : '';
+    if (/^[0-9a-f]{10}$/.test(latest) && latest !== mine) { updateShown = true; log('app', `update available: ${mine} -> ${latest}`); showBanner('New version available. Tap to reload.', 'tap', () => location.reload()); }
+  } catch { /* offline: try again later */ }
+}
+setTimeout(checkForUpdate, 8000); setInterval(checkForUpdate, 300000);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') checkForUpdate(); });
+
 // ---- start ----
 renderRate(); renderAuto(); renderPrevButton(); $('prev-agent').onclick = switchBack; $('next-unread').onclick = switchNextUnread;
 // A saved Voice control setting re-arms after reload: try at once, else on the first tap anywhere.
