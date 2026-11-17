@@ -197,8 +197,12 @@ fn serve() -> Result<(), String> {
         if beat % 300 == 0 {
             notify_systemd("WATCHDOG=1");
         }
-        if beat % 30_000 == 0 {
-            eprintln!("amhd: commit-queue wait p99 {} us", queue.wait_p99_us());
+        if beat % 6_000 == 0 {
+            eprintln!(
+                "amhd: commit-queue wait p99 {} us, writer hold p99 {} us",
+                queue.wait_p99_us(),
+                queue.hold_p99_us()
+            );
         }
     }
     Ok(())

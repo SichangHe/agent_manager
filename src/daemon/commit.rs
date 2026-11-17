@@ -11,8 +11,6 @@ use crate::database::Statement;
 
 /// Most writes one batch takes.
 const BATCH_MAX: usize = 256;
-/// Longest a batch waits for more writes after its first.
-const BATCH_WINDOW: Duration = Duration::from_millis(2);
 /// Most statements one write may hold.
 pub const WRITE_MAX: usize = 64;
 /// A batch slower than this is logged.
@@ -51,6 +49,8 @@ struct Job {
 pub struct Queue {
     jobs: mpsc::Sender<Job>,
     waits_us: Arc<Mutex<Vec<u32>>>,
+    /// How long each batch's transaction took, from BEGIN to COMMIT: the writer's hold.
+    holds_us: Arc<Mutex<Vec<u32>>>,
 }
 
 impl Queue {
@@ -62,12 +62,20 @@ impl Queue {
         let connection = writer(path)?;
         let (jobs, receiver) = mpsc::channel();
         let waits_us = Arc::new(Mutex::new(Vec::new()));
-        let waits = waits_us.clone();
+        let holds_us = Arc::new(Mutex::new(Vec::new()));
+        let (waits, holds) = (waits_us.clone(), holds_us.clone());
         let thread = std::thread::Builder::new()
             .name("amhd-commit".into())
-            .spawn(move || run(connection, receiver, waits, committed))
+            .spawn(move || run(connection, receiver, waits, holds, committed))
             .map_err(|error| format!("amh: cannot start the commit thread: {error}"))?;
-        Ok((Self { jobs, waits_us }, thread))
+        Ok((
+            Self {
+                jobs,
+                waits_us,
+                holds_us,
+            },
+            thread,
+        ))
     }
 
     /// Block until the write is durable (fsynced) or refused; only then does the caller answer its client.
@@ -88,10 +96,19 @@ impl Queue {
 
     /// The 99th percentile of recent waits from enqueue to batch start, in microseconds.
     pub fn wait_p99_us(&self) -> u32 {
-        let mut waits = self.waits_us.lock().map(|w| w.clone()).unwrap_or_default();
-        waits.sort_unstable();
-        waits.get(waits.len() * 99 / 100).copied().unwrap_or(0)
+        p99(&self.waits_us)
     }
+
+    /// The 99th percentile of recent batch transactions, BEGIN to COMMIT, in microseconds.
+    pub fn hold_p99_us(&self) -> u32 {
+        p99(&self.holds_us)
+    }
+}
+
+fn p99(kept: &Mutex<Vec<u32>>) -> u32 {
+    let mut values = kept.lock().map(|w| w.clone()).unwrap_or_default();
+    values.sort_unstable();
+    values.get(values.len() * 99 / 100).copied().unwrap_or(0)
 }
 
 fn writer(path: &Path) -> Result<Connection, String> {
@@ -101,7 +118,9 @@ fn writer(path: &Path) -> Result<Connection, String> {
         .busy_timeout(Duration::from_secs(30))
         .map_err(error)?;
     connection
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+        // WAL with synchronous=NORMAL, as the rest of the store: a commit survives a crash of amhd (WAL is in the OS cache); only a power loss can drop the last commits. FULL would fsync every commit.
+        // 🧑 "Locking should be in us not ms"
+        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
         .map_err(error)?;
     Ok(connection)
 }
@@ -110,15 +129,15 @@ fn run(
     mut connection: Connection,
     receiver: mpsc::Receiver<Job>,
     waits_us: Arc<Mutex<Vec<u32>>>,
+    holds_us: Arc<Mutex<Vec<u32>>>,
     committed: mpsc::Sender<()>,
 ) {
     ON_WRITER.set(true);
     while let Ok(first) = receiver.recv() {
-        let began = Instant::now();
+        // Group commit without waiting: a batch is whatever queued while the last one committed.
         let mut batch = vec![first];
         while batch.len() < BATCH_MAX {
-            let left = BATCH_WINDOW.saturating_sub(began.elapsed());
-            match receiver.recv_timeout(left) {
+            match receiver.try_recv() {
                 Ok(job) => batch.push(job),
                 Err(_) => break,
             }
@@ -137,6 +156,12 @@ fn run(
         }
         let results = commit(&mut connection, &batch);
         let took = started.elapsed();
+        if let Ok(mut holds) = holds_us.lock() {
+            if holds.len() >= WAITS_KEPT {
+                holds.clear();
+            }
+            holds.push(took.as_micros().min(u32::MAX as u128) as u32);
+        }
         if took > SLOW_BATCH {
             eprintln!(
                 "amhd: commit batch of {} writes took {} ms",
@@ -202,11 +227,10 @@ fn apply(transaction: &rusqlite::Transaction<'_>, write: &Write) -> Result<Outco
     }
     for precondition in &write.preconditions {
         let holds: i64 = transaction
-            .query_row(
-                &precondition.sql,
-                params_from_iter(&precondition.params),
-                |row| row.get(0),
-            )
+            .prepare_cached(&precondition.sql)
+            .and_then(|mut query| {
+                query.query_row(params_from_iter(&precondition.params), |row| row.get(0))
+            })
             .map_err(error)?;
         if holds == 0 {
             return Ok(Outcome::Conflict);
@@ -214,7 +238,8 @@ fn apply(transaction: &rusqlite::Transaction<'_>, write: &Write) -> Result<Outco
     }
     for statement in &write.statements {
         transaction
-            .execute(&statement.sql, params_from_iter(&statement.params))
+            .prepare_cached(&statement.sql)
+            .and_then(|mut query| query.execute(params_from_iter(&statement.params)))
             .map_err(error)?;
     }
     Ok(Outcome::Committed)
