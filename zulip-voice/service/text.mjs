@@ -49,12 +49,22 @@ export function parseAgentMessage(content) {
   return {title: first ? first[0].trim() : '', body: (first ? text.slice(first[0].length) : text).trim(), switchTo, attachments: extracted.attachments, footers: split.footers};
 }
 
-/** Markdown-ish blocks: `{kind: 'p'|'li'|'h'|'code', text}`. */
+/** Markdown-ish blocks: `{kind: 'p'|'li'|'h'|'code'|'table', text} (a table also has `head` and `rows`)`. */
 export function parseBlocks(body) {
   const blocks = [];
-  let paragraph = [], code = null;
+  let paragraph = [], code = null, table = [];
   const flush = () => { if (paragraph.length) blocks.push({kind: 'p', text: paragraph.join(' ')}); paragraph = []; };
+  const cells = line => line.trim().replace(/^\|/, '').replace(/\|$/, '').split('|').map(c => c.trim());
+  /** Pipe lines are a table only when the second one is a separator row (`|---|:--:|`); otherwise they are plain text. */
+  const flushTable = () => {
+    if (!table.length) return;
+    if (table.length >= 2 && /^[\s|:-]+$/.test(table[1]) && table[1].includes('-')) blocks.push({kind: 'table', head: cells(table[0]), rows: table.slice(2).map(cells), text: ''});
+    else paragraph.push(...table.map(l => l.trim()));
+    table = [];
+  };
   for (const line of body.split('\n')) {
+    if (!code && /^\s*\|.*\|\s*$/.test(line)) { flush(); table.push(line); continue; }
+    flushTable();
     if (/^\s*```/.test(line)) {
       if (code) { blocks.push({kind: 'code', text: code.join('\n')}); code = null; } else { flush(); code = []; }
     } else if (code) code.push(line);
@@ -64,6 +74,7 @@ export function parseBlocks(body) {
     else paragraph.push(line.trim());
   }
   if (code) blocks.push({kind: 'code', text: code.join('\n')});
+  flushTable();
   flush();
   return blocks;
 }
@@ -89,7 +100,15 @@ export function messageChunks(body) {
   const chunks = [];
   const blocks = parseBlocks(body);
   blocks.forEach((block, b) => {
-    if (block.kind === 'code') return;
+    if (block.kind === 'code') return;   // not read aloud
+    if (block.kind === 'table') {   // "Table start.", then per row "Row N." and every cell as its own chunk (its own audio clip: long pauses between cells)
+      chunks.push({block: b, text: 'Table start.', r: -1, c: -1});
+      [block.head, ...block.rows].forEach((row, r) => {
+        if (r > 0) chunks.push({block: b, text: `Row ${r}.`, r, c: -1});   // the header is read right after "Table start." and is not a numbered row
+        block.head.forEach((_, c) => { const text = (row[c] ?? '').trim(); if (text) chunks.push({block: b, text: /[.!?]$/.test(text) ? text : text + '.', r, c}); });
+      });
+      return;
+    }
     let group = '';
     const emit = () => { if (group) chunks.push({block: b, text: group}); group = ''; };
     for (const sentence of splitSentences(block.text)) {
@@ -193,17 +212,18 @@ export function soundsLikeWord(word, parts) {
 export function looksLikeClippedEndWord(word) { const k = soundKey(word); return k.length >= 5 && distance(k, CONTROL.tomato.key) <= 2; }
 
 /* ---- Reply assembly rules shared by the client and the relay's `send` ---- */
-const COMMAND_VOCAB = new Set('attention katana tomato bamboo cancel never mind skip jump forward backward back next previous message messages again stop play resume switch to agent agents number one two three four five six seven eight nine ten positive negative yes no over send pencil'.split(' '));
+const COMMAND_VOCAB = new Set('attention katana tomato macaroni bamboo cancel never mind skip jump forward backward back next previous message messages again stop play resume switch to agent agents number one two three four five six seven eight nine ten positive negative yes no over send pencil'.split(' '));
 /**
  * `texts` (one transcript per clip, in order) -> `{text, discard}`. Rules: a transcript containing the cancel word ("bamboo", phonetic: "Rambo") discards everything; "cancel"/"never mind"
  * as the last utterance discards everything; in each clip the command word and all that follows it is dropped; stray end words go; a reply made only of control words is empty.
  */
-export function assembleReply(texts, {cancelWord = 'bamboo', commandWord = 'katana'} = {}) {
+export function assembleReply(texts, {cancelWord = 'macaroni', commandWord = 'katana'} = {}) {
   const tokens = t => t.split(/\s+/).filter(Boolean), flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
   const parts = [];
   for (const raw of texts) {
     const words = tokens(raw ?? '');
     if (words.some(w => flat(w) === cancelWord || soundsLikeWord(cancelWord, [flat(w)]))) return {text: '', discard: true, why: 'cancel word'};
+    if (words.some(w => soundsLikeWord('kangaroo', [flat(w)]))) return {text: '', discard: true, why: 'retired end word (command speech)'};   // "kangaroo" no longer ends a reply: hearing it (Cangaroo, Canguro) means control speech, so nothing is sent
     const at = words.findIndex(w => flat(w) === commandWord || soundsLikeWord(commandWord, [flat(w)]));
     const kept = stripTrailingControl(removeControlWords(stripTrailingControl(at >= 0 ? words.slice(0, at) : words, 'tomato', ['over'])), 'kangaroo');
     if (kept.length) parts.push(kept.join(' '));

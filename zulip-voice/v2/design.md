@@ -17,7 +17,13 @@ shape
   - `voice.mjs`: STT/TTS/ping over the relay channel; pre-rendered clip cache
   - `player.mjs`: clip queue on two `<audio>` elements
   - `recorder.mjs`: mic to 16 kHz WAV clips cut at pauses
-  - `view.mjs`: DOM builders; `app.mjs`: wiring only
+  - `kws.mjs`: on-device keyword spotter (sherpa-onnx WebAssembly)
+  - `grammar.mjs`: pure; voice-command grammar (start/end/command/cancel words, navigation phrases, agent-name ranking)
+  - `voicecontrol.mjs`: hands-free sessions (standby, input, command modes), switch question; owns the recorder and spotter
+  - `dictation.mjs`: manual dictation from the microphone button
+  - `reads.mjs`: read flags, queued and flushed to Zulip
+  - `account.mjs`: login, id discovery, relay muting; `store.mjs`: localStorage JSON; `chrome.mjs`: toast, banner, tap flash, level meter
+  - `view.mjs`: DOM builders; `app.mjs`: wiring, feed, playback order, switching, sending
   - `log.mjs`: debug timeline; `build.mjs`: hashed static bundle
 - tests: `test/unit.mjs`, `test/e2e.mjs` (real WebKit iPhone viewport, real Zulip, relay and GPU); see `test/lib.mjs`
 

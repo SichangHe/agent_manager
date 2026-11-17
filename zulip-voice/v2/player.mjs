@@ -33,6 +33,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
 
   const setStatus = next => { if (next !== status) { log('audio', `${status} -> ${next}${index >= 0 ? ' item ' + index : ''}${next === 'error' ? ' ' + error : ''}`); status = next; } onStatus?.({status, index, error}); };
 
+  let sayGen = 0;
   const localParts = new Map();   // bundles this client asked for on demand: `${msgId}:${firstIdx}` -> part
 
   /** `{part, startMs, endMs}`: the bundle holding item `it` (from the service's pre-render or an on-demand batch) and its time range. */
@@ -134,7 +135,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     warming = false;
   }
 
-  async function playIndex(i, attempt = 0) {
+  async function playIndex(i, attempt = 0, auto = false) {
     const myGen = ++gen;
     index = i;
     const item = items[i];
@@ -152,10 +153,24 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       return;
     }
     if (status === 'paused') { active = r.slot; r.slot.el.currentTime = r.seekMs / 1000; r.slot.chunk = {endMs: r.bundle.endMs}; return; }
-    start(r.slot, myGen, r.seekMs, r.bundle);
+    start(r.slot, myGen, r.seekMs, r.bundle, auto);
   }
 
-  function start(slot, myGen, seekMs, bundle) {
+  function start(slot, myGen, seekMs, bundle, auto = false) {
+    if (bundle === undefined && items[index]) {   // resume/unlock of the loaded slot: keep the chunk boundary, else the highlight freezes while the bundle plays on
+      const b = bundleOf(items[index]);
+      if (b && slot.bundleId === variantId(b.part)) bundle = b;
+    }
+    if (auto && bundle && !slot.el.paused && pausedMs === null) {   // chunk-to-chunk inside one playing bundle: the audio clock decides, never the timer (a starved timer must not replay or desync)
+      const cur = slot.el.currentTime * 1000;
+      if (cur >= bundle.endMs - 25 && items[index + 1]) {   // the timer was late and the audio already passed this whole chunk: it was heard, move on
+        const done = index, before = gen; log('audio', `late: chunk ${items[done]?.key} already passed (${Math.round(cur - bundle.endMs)}ms ago)`);
+        clips.delete(done); onItemStart?.(items[done], done); onItemEnd?.(items[done], done);
+        if (gen === before) playIndex(done + 1, 0, true);
+        return;
+      }
+      if (cur >= seekMs - 120 && cur < bundle.endMs - 25) seekMs = cur;   // already inside this chunk: keep playing, do not jump back
+    }
     if (pausedMs !== null && seekMs !== undefined && (!bundle || pausedMs - RESUME_BACKUP_MS < bundle.endMs)) { seekMs = Math.max(seekMs, pausedMs - RESUME_BACKUP_MS); }
     pausedMs = null;
     for (const s of slots) if (s !== slot) { s.appPause = true; s.el.pause(); }
@@ -185,7 +200,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     const before = gen;
     onItemEnd?.(items[done], done);
     if (gen !== before) return; // `onItemEnd` replaced the queue
-    playIndex(done + 1);
+    playIndex(done + 1, 0, true);
   }
 
   for (const slot of slots) {
@@ -200,12 +215,17 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       log('audio', `external pause at t=${slot.el.currentTime.toFixed(2)}: resuming in place`);   // e.g. iOS interrupting for the microphone or a notification
       slot.el.play().catch(err => log('audio', `external pause resume failed: ${err.name}`));
     });
+    slot.el.addEventListener('error', () => { if (slot === active && status === 'playing') lastProgressMs = -1e9; });   // the element itself failed: reload at the next 1 s tick, do not wait out the 7 s stall timer
     for (const name of ['waiting', 'stalled', 'error', 'suspend', 'emptied']) slot.el.addEventListener(name, () => { if (slot === active) log('audio', `el ${name} t=${slot.el.currentTime.toFixed(2)} rs=${slot.el.readyState}`); });
   }
 
   setInterval(() => {   // chunk boundaries inside a bundle
     if (status !== 'playing' || !active?.chunk || active.el.paused) return;
-    if (active.el.currentTime * 1000 >= active.chunk.endMs - 25) { active.chunk = null; itemEnded(); } else warmNext();
+    if (active.el.currentTime * 1000 >= active.chunk.endMs - 25) {
+      const next = items[index + 1], nb = next && bundleOf(next);
+      if (!nb || active.bundleId !== variantId(nb.part) || Math.abs(nb.startMs - active.chunk.endMs) > 60) { active.appPause = true; active.el.pause(); }   // the next chunk is not the audio that follows: never let the old bundle play on under the next highlight
+      active.chunk = null; itemEnded();
+    } else warmNext();
   }, 40);
 
   setInterval(() => {
@@ -228,15 +248,17 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       if (status === 'blocked') start(active, gen);
     },
     isUnlocked: () => unlocked,
-    /** A soft looping pad (two low sines with a slow swell), made locally; `ambient(true)` fades it in over 2 s, `ambient(false)` fades it out. */
+    /** Faint relaxing music (soft bell-like pentatonic notes), made locally; `ambient(true)` fades it in over 2 s where volume works, `ambient(false)` stops it at once. */
     ambient(on) {
       if (on === ambientOn) return;
       ambientOn = on; clearInterval(ambientFade);
       if (on) {
         if (!unlocked) { ambientOn = false; return; }
         if (!ambientUrl) {
-          const hz = 8000, secs = 12, n = hz * secs, pcm = new Int16Array(n);
-          for (let i = 0; i < n; i++) { const t = i / hz, swell = 0.7 + 0.3 * Math.sin(2 * Math.PI * t / secs * 1); pcm[i] = Math.round((Math.sin(2 * Math.PI * 196 * t) * 0.6 + Math.sin(2 * Math.PI * 294 * t) * 0.4) * swell * 0.12 * 32767); }   // whole periods per loop: no click at the seam
+          const hz = 16000, secs = 20, n = hz * secs, pcm = new Int16Array(n), buf = new Float32Array(n);   // slow bell-like pentatonic notes, 2 s apart, each ringing out for ~4 s; the tail wraps round so the loop is seamless
+          const tune = [523, 659, 784, 659, 587, 784, 880, 659, 523, 587];
+          tune.forEach((f, k) => { const start = Math.round(k * 2 * hz); for (let i = 0; i < hz * 4.5; i++) { const t = i / hz, env = Math.min(1, t / 0.05) * Math.exp(-t * 1.1), v = (Math.sin(2 * Math.PI * f * t) + 0.25 * Math.sin(4 * Math.PI * f * t) * Math.exp(-t * 2)) * env; buf[(start + i) % n] += v; } });
+          for (let i = 0; i < n; i++) pcm[i] = Math.round(Math.max(-1, Math.min(1, buf[i] * 0.09)) * 32767);
           const head = new DataView(new ArrayBuffer(44)), w = (o, t) => [...t].forEach((c, i) => head.setUint8(o + i, c.charCodeAt(0)));
           w(0, 'RIFF'); head.setUint32(4, 36 + pcm.byteLength, true); w(8, 'WAVEfmt '); head.setUint32(16, 16, true); head.setUint16(20, 1, true); head.setUint16(22, 1, true); head.setUint32(24, hz, true); head.setUint32(28, hz * 2, true); head.setUint16(32, 2, true); head.setUint16(34, 16, true); w(36, 'data'); head.setUint32(40, pcm.byteLength, true);
           ambientUrl = URL.createObjectURL(new Blob([head, pcm], {type: 'audio/wav'}));
@@ -245,10 +267,13 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
         ambientEl.volume = 0; ambientEl.play().catch(() => {});
         ambientFade = setInterval(() => { ambientEl.volume = Math.min(1, ambientEl.volume + 0.05); if (ambientEl.volume >= 1) clearInterval(ambientFade); }, 100);   // iOS ignores volume: the pad is already quiet
       } else {
-        ambientFade = setInterval(() => { ambientEl.volume = Math.max(0, ambientEl.volume - 0.25); if (ambientEl.volume <= 0) { clearInterval(ambientFade); ambientEl.pause(); } }, 60);
+        // iOS ignores `volume` (it stays 1), so a fade-out can never reach 0 and stop the pad: pause at once
+        ambientEl.volume = 0; ambientEl.pause();
       }
     },
     ambientOn: () => ambientOn,
+    /** iOS can pause the pad on its own (audio session change, notification): restart it while it is meant to be on. Returns true if it had to. */
+    ambientKeep() { if (!ambientOn || !ambientEl.paused) return false; ambientEl.volume = 1; ambientEl.play().catch(() => {}); return true; },
     /** Plays a short synthesized earcon on the speech element (no AudioContext): same output path and level as speech, about -13 LUFS like the clips. */
     earcon(notes, noteS) {
       const hz = 24000, gain = 0.45, n = Math.round(noteS * hz), pcm = new Int16Array(n * notes.length);
@@ -259,11 +284,14 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       earEl.src = url; earEl.play().catch(() => {}); earEl.onended = () => URL.revokeObjectURL(url);
     },
     /** Speaks `text` (a short prompt) on its own element, without touching the queue. Resolves with the spoken duration in ms (0 on failure). */
+    stopSay() { sayGen++; sayEl.pause(); },
     async say(text) {
+      const myGen = ++sayGen;
       const r = await voice.ttsBatch([text.replace(/[_-]/g, ' ')]);
       if (!r.ok) return 0;
       const u = await voice.clipUrl(r.clip, URL_FRESH_MS);
       if (!u.ok) return 0;
+      if (myGen !== sayGen) return 0;   // interrupted while it was being made
       sayEl.src = u.url;
       await sayEl.play().catch(() => {});
       return r.clip.durationMs ?? 2000;
@@ -279,7 +307,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       if (status !== 'playing' && status !== 'loading' && status !== 'blocked') return;
       const b = status === 'playing' && items[index] ? bundleOf(items[index]) : null;
       pausedMs = b && active ? active.el.currentTime * 1000 : null;
-      pausedDone = !!b && pausedMs >= b.startMs + HEARD_FRACTION * (b.endMs - b.startMs);
+      pausedDone = !!b && pausedMs >= b.startMs + HEARD_FRACTION * (b.endMs - b.startMs) && pausedMs < b.endMs - 25;   // past the chunk's end: resume plays on from the audio clock and the boundary timer catches up
       if (active) { active.appPause = true; active.el.pause(); }
       setStatus('paused');
     },
@@ -290,6 +318,13 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     setRate(value) { rate = value; for (const s of slots) { s.el.playbackRate = value; s.el.defaultPlaybackRate = value; } },
     currentTime: () => (status === 'playing' || status === 'paused') && active ? active.el.currentTime : 0,
     position: () => ({index, status, queued: items.length}),
+    /** Key of the chunk the audio clock is in right now (null when not playing from a known bundle). */
+    audible() {
+      if (status !== 'playing' || !active || active.el.paused) return null;
+      const t = active.el.currentTime * 1000;
+      for (let j = Math.max(0, index - 2); j < Math.min(items.length, index + 4); j++) { const b = bundleOf(items[j]); if (b && active.bundleId === variantId(b.part) && t >= b.startMs - 1 && t < b.endMs) return items[j].key; }
+      return null;
+    },
     snapshot: () => ({status, index, queued: items.length, rate, unlocked, slots: slots.map(s => ({bundle: s.bundleId?.slice(-12), ready: s.ready, paused: s.el.paused, t: +s.el.currentTime.toFixed(1), rs: s.el.readyState})), clips: clips.size}),
   };
 }

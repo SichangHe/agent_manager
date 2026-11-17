@@ -5,7 +5,7 @@
  */
 import {parseBpe, encodeBpe} from './bpe.mjs';
 const KWS_BASE = './kws/';   // build.mjs rewrites this to the hashed asset directory
-const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A @KATANA\n▁BA M B O O @BAMBOO';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
+const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A @KATANA\n▁MA C AR ON I @MACARONI';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
 const THRESHOLD = 0.25;   // tuned in research-kws: 41/42 clips, no false hit in 35 minutes of agent speech
 
 const loadScript = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });

@@ -1,0 +1,19 @@
+back | noisy | af_bella | "That." -> none
+play | noisy | af_bella | "Plane." -> none
+switch to human manager | noisy | af_bella | "Which to human manager." -> none
+switch back | noisy | af_bella | "Which box?" -> none
+send log | noisy | af_bella | "Send love." -> none
+next agent | fast | bf_emma | "Next agenter." -> nav:1:chunk:1
+back | noisy | bm_george | "Mark." -> none
+stop | normal | bm_george | "Znobby." -> none
+stop | fast | bm_george | "Snobble." -> none
+stop | slow | bm_george | "Zdob." -> none
+stop | quiet | bm_george | "Snob." -> none
+stop | noisy | bm_george | "Snow." -> none
+stop | pitchup | bm_george | "Snob." -> none
+stop | pitchdown | bm_george | "Snob." -> none
+play | noisy | bm_george | "Plane." -> none
+cancel | noisy | bm_george | "Cancelled." -> none
+back | slow | af_sarah | "Backed." -> none
+back | noisy | af_sarah | "Bats." -> none
+back | pitchdown | af_sarah | "Backs." -> none

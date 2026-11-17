@@ -40,7 +40,9 @@
         <canvas id="level" width="120" height="24" hidden></canvas>
       </div>
       <button type="button" id="cancel-rec" class="icon" aria-label="Discard recording" hidden><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button type="button" id="next-unread" class="icon round" hidden aria-label="Next agent with unread messages"><span class="arrow">⇥</span><span id="next-unread-count"></span></button>
       <button type="button" id="prev-agent" class="icon round" hidden aria-label="Back to the previous agent"><span class="arrow">↩</span><span id="prev-agent-name"></span></button>
+      <button type="button" id="attach" class="icon round" aria-label="Attach a file or photo"><svg viewBox="0 0 24 24" class="i"><path d="M21 11l-8.5 8.5a5 5 0 01-7-7L14 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L15 7"/></svg></button><input type="file" id="attach-input" multiple hidden>
       <button type="button" id="listen" class="icon round" data-state="off" aria-label="Voice control: off"><svg viewBox="0 0 24 24" class="i"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4"/></svg><span id="listen-label"></span></button>
       <button type="button" id="mic" class="icon round" aria-label="Dictate"><svg viewBox="0 0 24 24" class="i mic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg><svg viewBox="0 0 24 24" class="i done"><path d="M5 13l4 4L19 7"/></svg></button>
       <button type="submit" id="send" class="icon round accent" aria-label="Send" disabled><svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
@@ -50,9 +52,28 @@
   <div id="tap-flash" aria-hidden="true"></div>
 </div>
 
-<dialog id="picker" aria-label="Choose agent"><div class="sheet">
+<dialog id="picker" class="top" aria-label="Choose agent"><div class="sheet">
   <div class="sheet-head"><input id="search" type="search" placeholder="Search agents" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <ul id="topics"></ul>
+</div></dialog>
+
+<dialog id="keys-sheet" aria-label="Keyboard shortcuts"><div class="sheet">
+  <div class="sheet-head"><h2>Keyboard shortcuts</h2><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+  <section><dl class="keys">
+    <dt>Space</dt><dd>play / pause</dd>
+    <dt>&larr; / &rarr;</dt><dd>previous / next chunk</dd>
+    <dt>Shift + &larr; / &rarr;</dt><dd>previous / next message</dd>
+    <dt>[ / ]</dt><dd>slower / faster</dd>
+    <dt>a</dt><dd>auto-read on / off</dd>
+    <dt>m</dt><dd>dictate; again: stop and keep text</dd>
+    <dt>Esc</dt><dd>discard recording; leave the text box</dd>
+    <dt>Enter</dt><dd>send (in the text box)</dd>
+    <dt>i</dt><dd>type a reply</dd>
+    <dt>/</dt><dd>find agent</dd>
+    <dt>Alt + &uarr; / &darr;</dt><dd>previous / next agent in the list</dd>
+    <dt>v</dt><dd>voice control on / off</dd>
+    <dt>?</dt><dd>this list</dd>
+  </dl></section>
 </div></dialog>
 
 <dialog id="settings-sheet" aria-label="Settings"><div class="sheet">
@@ -61,7 +82,7 @@
     <label class="row"><span>Autoplay new messages</span><input id="set-auto" type="checkbox"></label>
     <label class="row"><span>Voice control</span><input id="set-voice" type="checkbox"></label>
     <label class="row"><span>End phrase (default: tomato; to say the word itself, say "roo" or type it)</span><input id="set-phrase" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
-    <p class="muted" style="font-size:13px"><b>Input mode:</b> say the start word ("attention"), then talk: everything you say is your reply. Finish it with <b>tomato</b> (sends). Say <b>bamboo</b> anywhere, in any mode, to cancel and discard at once (the old <b>cancel</b> still works through the server).<br><b>Command mode:</b> while replying, say the command word (default <b>katana</b>; a double thump; or say "attention katana" together). Now only commands are heard, nothing becomes text, and each one answers with a tick. They chain in one breath. Commands: <b>skip forward</b> / <b>skip backward</b> (add a count: <b>skip forward three</b>; up to ten; past the last chunk it ends reading), <b>previous message</b>, <b>next message</b>, <b>again</b>, <b>stop</b>, <b>play</b>, <b>switch to NAME</b>, <b>switch back</b> (old <b>next</b>/<b>back</b> still work). Switching is silent apart from the spoken question and "Now on NAME"; a low falling note means it was declined, cancelled or timed out. Answers to "Switch to NAME?": <b>positive</b> / <b>negative</b> (or yes / no), or <b>number one</b>, <b>number two</b>… Navigation and switching leave command mode; four seconds of quiet, or <b>tomato</b>, return to input mode with your draft kept.</p>
+    <p class="muted" style="font-size:13px"><b><span class="mn" data-m="input">input</span> mode:</b> say the start word ("attention"), then talk: everything you say is your reply. Finish it with <b>tomato</b> (sends). Say <b>macaroni</b> anywhere, in any mode, to cancel and discard at once (the old <b>cancel</b> still works through the server).<br><b><span class="mn" data-m="command">command</span> mode:</b> say the command word (default <b>katana</b>; a double thump) from standby on its own: no start word is needed. While input mode is open (including right after "attention") it does nothing. Now only commands are heard, nothing becomes text, and each one answers with a tick. They chain in one breath. Commands: <b>skip forward</b> / <b>skip backward</b> (add a count: <b>skip forward three</b>; up to ten; past the last chunk it ends reading), <b>previous message</b>, <b>next message</b>, <b>again</b>, <b>stop</b>, <b>play</b>, <b>switch to NAME</b>, <b>switch back</b> (old <b>next</b>/<b>back</b> still work). Confirming a switch (<b>positive</b>) answers at once with the same double thump; then the new agent's unread messages start, or, if there are none, "Now on NAME" is spoken (never over a message); a falling pair means it was declined, cancelled or timed out. Answers to "Switch to NAME?": <b>positive</b> / <b>negative</b> (or yes / no), or <b>number one</b>, <b>number two</b>… Navigation and switching leave command mode; four seconds of quiet, or <b>tomato</b>, return to input mode with your draft kept.</p>
     <label class="row"><span>Command word (default: katana)</span><input id="set-cmd" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
     <label class="row"><span>Start word (default: attention)</span><input id="set-start" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
     <label class="row"><span>Long silence finishes a reply (seconds, 0 = off)</span><input id="set-silence" type="number" min="0" max="30" step="1" style="width:70px;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
@@ -70,6 +91,7 @@
     <label class="row"><span>Speed <b id="set-rate-text"></b></span><input id="set-rate" type="range" min="0.5" max="3" step="0.1"></label>
   </section>
   <section>
+    <button id="open-keys" class="wide">Keyboard shortcuts (?)</button>
     <button id="open-debug" class="wide">Connection and debug log</button>
     <button id="reload" class="wide">Reload app</button>
   </section>
@@ -88,7 +110,7 @@
 
 <dialog id="login" aria-label="Sign in"><form class="sheet" id="login-form">
   <h2>Voice</h2>
-  <a id="howto" href="https://github.com/SichangHe/agent_manager/tree/main/zulip-voice#readme" target="_blank" rel="noopener">New here? How to use this</a>
+  <a id="howto" href="using.html" target="_blank" rel="noopener">New here? How to use this</a>
   <p class="muted">Paste your zuliprc once. The key stays in this browser.</p>
   <textarea name="zuliprc" rows="6" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="[api]&#10;email=…&#10;key=…&#10;site=https://…"></textarea>
   <p id="login-error" class="error" role="status"></p>

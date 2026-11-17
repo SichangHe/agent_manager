@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Using Voice</title>
+<style>
+  :root { --bg: #fff; --fg: #1b1b1f; --muted: #6b6f76; --line: #e6e7ea; --panel: #f4f5f7; --accent: #2f6fed; font: 17px/1.5 -apple-system, system-ui, Roboto, sans-serif; -webkit-text-size-adjust: 100%; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #000; --fg: #ececf0; --muted: #8e9199; --line: #26272b; --panel: #17181b; --accent: #4c8dff; } }
+  body { margin: 0; background: var(--bg); color: var(--fg); }
+  main { max-width: 42rem; margin: 0 auto; padding: 16px 16px calc(40px + env(safe-area-inset-bottom, 0px)); }
+  h1 { font-size: 26px; margin: 8px 0 4px; } h2 { font-size: 20px; margin: 30px 0 6px; padding-top: 6px; border-top: 1px solid var(--line); }
+  p, li { margin: 6px 0; } ul { padding-left: 1.2em; margin: 6px 0; } .muted { color: var(--muted); font-size: 15px; }
+  code, kbd { background: var(--panel); border-radius: 6px; padding: 1px 6px; font: 15px ui-monospace, Menlo, monospace; }
+  a { color: var(--accent); } .open { display: inline-block; margin: 10px 0 0; padding: 10px 18px; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 700; text-decoration: none; }
+  .wrap { overflow-x: auto; } table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 15px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; } th { background: var(--panel); }
+</style>
+</head>
+<body>
+<main>
+<h1>Using Voice</h1>
+<p>Read your AI agents' messages aloud and talk back to them, from your phone. This page is for people who already have the app connected to their Zulip account. <a href="https://github.com/SichangHe/agent_manager/tree/main/zulip-voice#readme">Setting up the server is described here.</a></p>
+<a class="open" href="./">Open the app</a>
+
+<h2>First minutes</h2>
+<ul>
+  <li>Tap <b>Connect</b> and paste your <code>zuliprc</code> (Zulip: Settings, Account &amp; privacy, Manage your API key, Download zuliprc). The key stays in this browser only.</li>
+  <li>Tap anywhere once after opening the app: iOS only allows sound after a tap.</li>
+  <li>Pick an agent with the chip at the top left. Its number shows unread messages in other agents.</li>
+  <li>Tap a message or a sentence to read from there. Tap again to pause. <b>Auto</b> reads new messages by itself.</li>
+</ul>
+
+<h2>The screen</h2>
+<ul>
+  <li><b>Previous / next</b>: one chunk back or forward; tap quickly to skip many.</li>
+  <li><b>Speed</b>: <code>-</code> and <code>+</code> in steps of 0.1.</li>
+  <li><b>Mic button</b>: dictate. It pulses amber while the microphone starts, turns red with a chime when you can talk. Check mark keeps the text, arrow sends at once, X discards.</li>
+  <li><b>Paperclip</b>: attach a photo or file. It uploads to Zulip and its link goes into the message box; tap send.</li>
+  <li><b>Next-unread button</b> (appears when another agent has unread messages): jump to the next agent with unread messages, in the order of the agent list.</li>
+  <li><b>Back arrow</b>: return to the agent you just left.</li>
+  <li><b>Mark read</b> (small button on an unread message): clears the blue dot without playing it, and marks earlier messages in that agent read too.</li>
+  <li><b>Images and files</b> show inline with their file name underneath, so you can tell which one an agent means. Hide folds one; tap its chip to show it again. Markdown tables are shown as tables and read cell by cell.</li>
+  <li>The agent list follows the priority order set by the human manager (lowest number first), then newest first.</li>
+  <li>Green, amber or red dot at the top right: connection. Tap it for the debug view.</li>
+</ul>
+
+<h2>Hands-free voice control</h2>
+<p>Turn it on with the waveform button next to the mic (needs microphone access). The app listens on your phone: nothing is uploaded until you start a reply. Use headphones; speakers can feed back into the microphone.</p>
+<div class="wrap"><table>
+<tr><th>Say</th><th>What happens</th></tr>
+<tr><td><code>attention</code></td><td>Input mode: reading pauses, a rising chime plays, and everything you say is typed as your reply.</td></tr>
+<tr><td><code>tomato</code></td><td>Ends and sends your reply (a long silence also sends it). Reading resumes.</td></tr>
+<tr><td><code>macaroni</code></td><td>Cancels and discards the reply or command, anywhere.</td></tr>
+<tr><td><code>katana</code></td><td>Command mode (from standby; not while you are dictating).</td></tr>
+</table></div>
+<p class="muted">The four words can be changed in Settings. Anything you say outside a session is ignored.</p>
+<p><b>Commands</b> (in command mode; the app says what it did):</p>
+<ul>
+  <li><code>next</code>, <code>back</code>, <code>again</code>; <code>next message</code>, <code>previous message</code>; <code>skip forward three</code></li>
+  <li><code>stop</code> / <code>pause</code>, <code>play</code> / <code>resume</code></li>
+  <li><code>switch to NAME</code> (fuzzy match; if several match it offers the top three: say first, second or third)</li>
+  <li><code>next agent</code> (next agent with unread messages), <code>switch back</code></li>
+  <li><code>send log</code> (sends the debug log to the server)</li>
+  <li><code>tomato</code> leaves command mode; <code>macaroni</code> cancels</li>
+</ul>
+<p>If none of your words is a command, the app says "Command not recognized" and shows the list. Command mode ends after 8 seconds of silence.</p>
+
+<h2>What the sounds mean</h2>
+<ul>
+  <li>Rising two notes: ready, go ahead. Falling two notes: done or sent.</li>
+  <li>Double short beep: command mode. Single high tick: a command was done.</li>
+  <li>Two flat beeps: nothing was sent (nothing recognised, cancelled, duplicate, or empty session).</li>
+  <li>Four alternating tones: a send failed after retries. Three fast beeps: Zulip is rate limiting.</li>
+  <li>Falling four notes: playback was interrupted. Faint bell music after 5 seconds of waiting: audio is loading.</li>
+</ul>
+
+<h2>When something goes wrong</h2>
+<ul>
+  <li>Tap the connection dot, then <b>Send to server</b> (or say <code>send log</code>), and tell whoever runs the service.</li>
+  <li><b>Self-test</b> in the debug view checks ping, audio, speech, microphone and reconnecting in one tap.</li>
+  <li>Unsent messages and voice recordings survive reloads and bad connections and are retried.</li>
+  <li>iOS may discard the page in the background; reopening it restores your place.</li>
+</ul>
+
+<h2>Limits</h2>
+<ul>
+  <li>English only. A personal client for one Zulip account.</li>
+  <li>Zulip carries all text and audio, so a rate limit (about 200 calls a minute) can slow things down; playback itself makes no calls.</li>
+</ul>
+</main>
+</body>
+</html>
