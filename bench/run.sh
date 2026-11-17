@@ -45,7 +45,7 @@ one_run() {
     if [ "${BENCH_DRILL:-}" = 1 ]; then script=drills.py; client=1; fi
     env -i HOME="$tmp/home" PATH="$here/bin:/usr/bin:/bin" TMPDIR="$tmp/tmp" \
         AMH_STATE_DIR="$tmp/state" AMH_CFG_DIR="$tmp/cfg" AMH_CLIENT="$client" \
-        BENCH_DRILL_OLD="${BENCH_DRILL_OLD:-}" DRILL_RATE="${DRILL_RATE:-54}" DRILL_EVERY_S="${DRILL_EVERY_S:-6}" \
+        BENCH_DRILL_OLD="${BENCH_DRILL_OLD:-}" DRILL_RATE="${DRILL_RATE:-54}" DRILL_EVERY_S="${DRILL_EVERY_S:-6}" DRILL_TELL_SHARE="${DRILL_TELL_SHARE:-0.3}" \
         python3 "$here/$script" "$amh" "$url" "$tmp/work" "$@"
     [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
     cleanup

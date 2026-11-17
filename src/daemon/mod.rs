@@ -22,6 +22,8 @@ pub static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 /// The longest a stopping daemon waits for in-flight requests and sends.
 const DRAIN: Duration = Duration::from_secs(5);
+/// The longest a stopping daemon waits for the watcher's runs to reach a phase boundary; a slower phase (IMAP intake) is abandoned and redone by the next daemon, its receipts being keyed. Clients wait about 30 s for a restart.
+const WATCH_DRAIN: Duration = Duration::from_secs(8);
 
 extern "C" fn on_term(_: libc::c_int) {
     STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -156,6 +158,9 @@ fn serve() -> Result<(), String> {
             // The watcher must keep running: restart it when it returns or panics.
             loop {
                 let code = std::panic::catch_unwind(crate::watch::run);
+                if stopping() {
+                    return;
+                }
                 eprintln!("amhd: the watcher ended ({code:?}); restarting it in 10 s");
                 std::thread::sleep(Duration::from_secs(10));
             }
@@ -174,11 +179,18 @@ fn serve() -> Result<(), String> {
             {
                 std::thread::sleep(Duration::from_millis(5));
             }
+            // Watcher runs finish their current phase (a slow one, e.g. IMAP intake, gets up to WATCH_DRAIN) and start no other.
+            while crate::watch::BUSY.load(std::sync::atomic::Ordering::SeqCst) > 0
+                && began.elapsed() < WATCH_DRAIN
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
             eprintln!(
-                "amhd: stopping after {} ms; {} requests and {} sends still in flight",
+                "amhd: stopping after {} ms; {} requests, {} sends and {} watcher runs still in flight",
                 began.elapsed().as_millis(),
                 ACTIVE.load(std::sync::atomic::Ordering::SeqCst),
-                outbox::in_flight()
+                outbox::in_flight(),
+                crate::watch::BUSY.load(std::sync::atomic::Ordering::SeqCst)
             );
             std::process::exit(0);
         }

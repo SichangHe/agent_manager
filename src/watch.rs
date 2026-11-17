@@ -1014,6 +1014,7 @@ fn poll_mail() {
         },
     };
     loop {
+        let Some(_busy) = busy() else { park_forever() };
         match settings::load() {
             Ok(settings) => {
                 let began = Instant::now();
@@ -1022,6 +1023,7 @@ fn poll_mail() {
             }
             Err(error) => log(&format!("mail settings failed: {error}")),
         }
+        drop(_busy);
         thread::sleep(MAIL_POLL);
     }
 }
@@ -1355,6 +1357,7 @@ fn scan_agents() {
         stalls_loaded: false,
     };
     loop {
+        let Some(_busy) = busy() else { park_forever() };
         let began = Instant::now();
         let scanned = settings::load().and_then(|settings| {
             let store = Store::new(&settings);
@@ -1450,9 +1453,39 @@ fn notify_consolidation(settings: &Settings, store: &Store) -> Result<(), String
 
 /// Run `work` forever on its own thread, one run at a time, sleeping `every` between runs; each run reads the settings afresh.
 // The rework design's stage 0: "Zulip intake, archive and git commit leave the sequential loop: one single-flight thread each, with I/O deadlines"
+/// Watcher runs in progress; amhd's clean stop waits for them (each run ends at its next phase boundary once the daemon is stopping).
+pub static BUSY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one run as in progress until dropped.
+struct Busy;
+
+impl Drop for Busy {
+    fn drop(&mut self) {
+        BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Start a run, or `None` when the daemon is stopping (no new run starts then).
+fn busy() -> Option<Busy> {
+    BUSY.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if crate::daemon::stopping() {
+        BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        return None;
+    }
+    Some(Busy)
+}
+
+/// Park a watcher thread for good: the daemon is stopping.
+fn park_forever() -> ! {
+    loop {
+        thread::park();
+    }
+}
+
 fn every(name: &'static str, every: Duration, work: fn(&Settings, &Store) -> Duration) {
     let spawned = thread::Builder::new().name(name.to_owned()).spawn(move || {
         loop {
+            let Some(_busy) = busy() else { park_forever() };
             // A panic ends only this run; the thread goes on, so the duty never stops silently.
             let ran = std::panic::catch_unwind(|| match settings::load() {
                 Ok(settings) => work(&settings, &Store::new(&settings)),
@@ -1465,6 +1498,7 @@ fn every(name: &'static str, every: Duration, work: fn(&Settings, &Store) -> Dur
                 log(&format!("{name}: the run panicked; trying again later"));
                 every
             });
+            drop(_busy);
             thread::sleep(wait);
         }
     });
@@ -1587,6 +1621,7 @@ pub fn run() -> u8 {
     every("archive", ARCHIVE_EVERY, archive_once);
     every("git commit", COMMIT_EVERY, commit_once);
     loop {
+        let Some(_busy) = busy() else { return 0 };
         let settings = match settings::load() {
             Ok(settings) => settings,
             Err(error) => {
@@ -1614,12 +1649,18 @@ pub fn run() -> u8 {
             log(&format!("request effects failed: {error}"));
         }
         log_elapsed("request state updates", phase);
+        if crate::daemon::stopping() {
+            return 0;
+        }
         // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": task files are imported and exported here, outside the lock.
         let phase = Instant::now();
         if let Err(error) = store.sync_files() {
             log(&format!("task file sync failed: {error}"));
         }
         log_elapsed("task file sync", phase);
+        if crate::daemon::stopping() {
+            return 0;
+        }
         if last_maintain.is_none_or(|at| at.elapsed() >= MAINTAIN_EVERY) {
             let phase = Instant::now();
             last_maintain = Some(Instant::now());
@@ -1635,20 +1676,32 @@ pub fn run() -> u8 {
                 Err(error) => log(&format!("wait upkeep failed: {error}")),
             }
             log_elapsed("wait upkeep", phase);
+            if crate::daemon::stopping() {
+                return 0;
+            }
         }
         let phase = Instant::now();
         let scanned = watcher.deliver_pending(&settings, &store);
         log_elapsed("message delivery", phase);
+        if crate::daemon::stopping() {
+            return 0;
+        }
         let phase = Instant::now();
         for line in crate::replies::forward(&settings, &store) {
             log(&line);
         }
         log_elapsed("turn replies", phase);
+        if crate::daemon::stopping() {
+            return 0;
+        }
         let phase = Instant::now();
         if let Err(error) = crate::actions::deliver_requests(&settings, &store) {
             log(&format!("request notifications failed: {error}"));
         }
         log_elapsed("request notifications", phase);
+        if crate::daemon::stopping() {
+            return 0;
+        }
         if last_compress.is_none_or(|last| last.elapsed() > COMPRESS_EVERY) {
             let phase = Instant::now();
             last_compress = Some(Instant::now());
@@ -1656,6 +1709,9 @@ pub fn run() -> u8 {
                 log(&format!("status consolidation check failed: {error}"));
             }
             log_elapsed("consolidation check", phase);
+            if crate::daemon::stopping() {
+                return 0;
+            }
         }
         if last_flush.is_none_or(|last| last.elapsed() > FLUSH_EVERY) {
             let phase = Instant::now();
@@ -1674,12 +1730,18 @@ pub fn run() -> u8 {
                 }
             }
             log_elapsed("outbox flush", phase);
+            if crate::daemon::stopping() {
+                return 0;
+            }
         }
         let phase = Instant::now();
         for line in jobs.tick(&settings, &store) {
             log(&line);
         }
         log_elapsed("scheduled jobs", phase);
+        if crate::daemon::stopping() {
+            return 0;
+        }
         if crate::zulip::enabled(&settings)
             && last_zulip_cleanup.is_none_or(|last| last.elapsed().as_secs() >= 86400)
         {
@@ -1690,10 +1752,14 @@ pub fn run() -> u8 {
                 Err(error) => log(&format!("Zulip cleanup failed: {error}")),
             }
             log_elapsed("Zulip cleanup", phase);
+            if crate::daemon::stopping() {
+                return 0;
+            }
         }
         if let Err(error) = scanned {
             log(&format!("task scan failed: {error}"));
         }
+        drop(_busy);
         let timeout = MAIL_POLL;
         match &wake {
             Some(socket) => {

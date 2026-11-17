@@ -22,6 +22,7 @@ from load import N_SEEDS, Runner, stub, pct  # noqa: E402
 
 SWITCHES, EVERY_S = 20, float(os.environ.get("DRILL_EVERY_S", "6"))
 RATE = float(os.environ.get("DRILL_RATE", "54"))
+TELL_SHARE = float(os.environ.get("DRILL_TELL_SHARE", "0.3"))
 STATE = os.environ["AMH_STATE_DIR"]
 SOCKET = os.path.join(STATE, "amhd.sock")
 
@@ -92,7 +93,7 @@ def main():
             due += rng.expovariate(RATE)
             time.sleep(max(0, due - time.time()))
             seq[0] += 1
-            t = threading.Thread(target=one, args=("tell" if rng.random() < 0.3 else "status", seq[0]))
+            t = threading.Thread(target=one, args=("tell" if rng.random() < TELL_SHARE else "status", seq[0]))
             t.start()
             threads.append(t)
         for t in threads:
