@@ -976,8 +976,8 @@ async function syncWakeLock() {
   catch (error) { log('wake', `not granted: ${error.name}`); }
 }
 setInterval(syncWakeLock, 2000);
-setTimeout(checkVoice, 4000);   // first priorities, then every 5 min while the page is visible (one relay round trip)
-setInterval(() => { if (document.visibilityState === 'visible' && (voice.pendingCount?.() ?? 0) === 0) checkVoice(); }, 300000);
+setTimeout(checkVoice, 4000);   // first priorities, then every minute while the page is visible (one relay round trip): an urgent task drops back to its place once the human has read its message
+setInterval(() => { if (document.visibilityState === 'visible' && (voice.pendingCount?.() ?? 0) === 0) checkVoice(); }, 60000);
 document.addEventListener('visibilitychange', syncWakeLock);
 
 // ---- desktop keyboard shortcuts (ignored while typing; Esc leaves the text box) ----
