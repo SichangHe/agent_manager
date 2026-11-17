@@ -6,7 +6,7 @@ Talk to your AI agents and listen to their replies, from your phone, using Zulip
 ## What it is
 
 - a phone web app: read agent messages aloud, dictate replies, skip around
-- a voice service on your server: speech to text (Whisper) and text to speech (Kokoro), on a GPU
+- a voice service on your server: speech to text (Qwen3-ASR or Whisper) and text to speech (Kokoro), on a GPU
 - a Neovim plugin can use the same service: https://github.com/SichangHe/nvim_zulip
 - Zulip carries everything, including audio, so the phone never connects to your server directly
   - no VPN, tunnel, or open port needed
@@ -39,7 +39,7 @@ You need: a Zulip organization, a Linux machine with an NVIDIA GPU (two GPUs rec
    - bot key in an env file, e.g. `~/.config/amh/zulip.env`: `ZULIP_SITE=https://YOUR.zulipchat.com`, `ZULIP_BOT_EMAIL=...`, `ZULIP_BOT_API_KEY=...`
 3. GPU workers (`audio-service.py`, run with `uv run`), one process each:
    - text to speech: `VOICE_AUDIO_KIND=tts VOICE_AUDIO_PORT=8770 CUDA_VISIBLE_DEVICES=0`
-   - speech to text: `VOICE_AUDIO_KIND=stt VOICE_AUDIO_PORT=8771 CUDA_VISIBLE_DEVICES=1 VOICE_STT_MODEL=turbo`
+   - speech to text: `VOICE_AUDIO_KIND=stt VOICE_AUDIO_PORT=8771 CUDA_VISIBLE_DEVICES=1 VOICE_STT_ENGINE=qwen3 VOICE_STT_MODEL=Qwen/Qwen3-ASR-0.6B-hf` (or `VOICE_STT_ENGINE=whisper VOICE_STT_MODEL=turbo`)
    - they listen on loopback only; the first start downloads models
 4. Relay service: `node service/relay.mjs` with
    - `VOICE_HUMAN_ID` your Zulip user id, `VOICE_RELAY_STREAM_ID` id of `voice-relay`, `VOICE_TASK_STREAM_ID` id of the agents channel
@@ -51,26 +51,16 @@ You need: a Zulip organization, a Linux machine with an NVIDIA GPU (two GPUs rec
 
 ## Using the phone app
 
-1. open the web app, tap Connect, paste your `zuliprc` (the `[api]` section: `site`, `email`, `key`)
-   - get it in Zulip: Settings > Account & privacy > Manage your API key, then Download zuliprc
-   - the key is stored only in this browser
-2. tap once anywhere (iOS requires a tap before it plays sound)
-3. controls
-   - agent chip (top left): switch agent; badge counts unread elsewhere
-   - dot (top right): connection; tap it for the debug view
-   - tap a message or sentence: read from there on
-   - previous / next: one chunk back or forward; hold for a whole message; tapping fast skips many
-   - play/pause; `-` `+` speed in 0.1 steps; Auto: read new messages automatically
-   - mic: dictate; check mark stops and keeps text, arrow sends at once, X discards
-   - images and files show inline; swipe an image sideways to fold it; Settings can hide all
-   - settings (top right gear): autoplay, speed, hide attachments, sign out
-4. voice control (Settings > Voice control, or the waveform button next to the mic; needs the microphone)
-   - say the start word first (default "attention"); the app stays silent for anything else, so noise and talk around you are ignored
-   - input mode: after the start word everything you say is your reply, shown live in the draft; finish with `tomato` (or a long silence): it is sent and reading resumes; `bamboo` (anywhere, any mode) cancels and discards at once; the old `cancel` still works via the server
-   - command mode: say the command word (default `katana`; double thump) while replying. Now only commands are heard and nothing becomes text; each one answers with a tick, and they chain in one breath ("next three, back one"): `skip forward`/`skip backward` (add a count: `skip forward three`, up to ten; past the last chunk it ends reading), `previous message`, `next message`, `again`, `stop`, `play`, `switch to NAME` (answer `positive`/`negative` or `number one`/`two`/`three`), `switch back`; the old `next`/`back`/`yes`/`no`/`cancel` still work through the server. Sounds: rising pair = ready for your reply, double thump = command mode, tick = a command ran, falling pair = reply sent, low falling pair = declined/cancelled; a switch is only the spoken question and "Now on NAME". Recognition runs on the device by default (Settings can turn it off). Navigation and switching leave command mode; four seconds of quiet or `tomato` return to input mode with the draft kept
-   - channels: the agent list shows topics of every subscribed, non-muted channel (other than AMH, a small label names the channel); replies go to the channel of the open topic
-   - the start word, command word, end phrase and long-silence time are editable in Settings
-5. read state only moves forward: reading or skipping a message marks all earlier ones read
+The user guide for people who just use the app (connecting, controls, voice words and commands, sounds, troubleshooting) is `v2/using.html`, published next to the app: https://sichangheagentvoicechat.github.io/using.html. The app's "How to use this" button opens it.
+
+Behaviour that matters to whoever runs the service
+- voice control words (defaults): start `attention`, command `katana`, end `tomato`, cancel `macaroni`; all editable in the app's Settings. The word list and the on-device spotter are in `v2/kws.mjs`, `v2/grammar.mjs`, `v2/voicecontrol.mjs`
+- Zulip call budget: with the on-device spotter ready, speech without a start word is never uploaded; a spoken reply is cut into longer clips (1.1 s pause, up to 30 s); messages from all threads arriving together share one audio bundle; a 429 backs off
+- channels: the agent list shows topics of every subscribed, non-muted channel (other than AMH, a small label names the channel); replies go to the channel of the open topic
+- agent order: the relay runs `amh task priorities --json` (optional; `{}` if `amh` is missing) and returns it in its ping reply; the app lists agents by priority (lowest first, unset last), then newest first
+- an agent switches the human by ending a message with a line `[switch: TOPIC]`
+- read state only moves forward: reading or skipping a message marks all earlier ones read
+- uploads from the app's paperclip go to Zulip as the human; tables are read cell by cell ("Table start", header, "Row 1", ...)
 
 ## Debugging
 
@@ -92,4 +82,4 @@ You need: a Zulip organization, a Linux machine with an NVIDIA GPU (two GPUs rec
 
 - client design: `v2/design.md`; service protocol (for other clients such as nvim): `service/protocol.md`
 - older design notes: `notes-history.md`
-- build the static bundle: `node v2/build.mjs OUTPUT_DIR` (publishing is separate)
+- build the static bundle: `node v2/build.mjs OUTPUT_DIR` (publishing is separate; the bundle includes `using.html`, the user guide)

@@ -8,3 +8,10 @@ research-kws/trig/e4_*
 research-kws/trig/e3_*
 research-kws/trig/e2_*
 research-kws/trig/fa16*
+# added with the stress studies
+__pycache__/
+*.pyc
+.venv/
+research-kws/trig/c[0-9]*_*.txt
+research-kws/trig/*.wav
+research-kws/clips/

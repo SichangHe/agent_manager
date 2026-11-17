@@ -5,7 +5,7 @@ const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
 /** `call` resolves to `{ok: true, data}` or `{ok: false, kind: 'network'|'timeout'|'aborted'|'http', status, code, error, uncertain}`. */
 export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(...a)) {
   const authorization = 'Basic ' + btoa(String.fromCharCode(...new TextEncoder().encode(email + ':' + key)));
-  let rateLimitedUntilMs = 0;
+  let rateLimitedUntilMs = 0, consecutive429 = 0, last429Ms = 0;
   let totalCalls = 0;
   const callTimes = [];   // start times of API calls in the last minute, for the budget display and tests
   async function call(method, path, fields = {}, {timeoutMs = 15000, signal} = {}) {
@@ -29,7 +29,9 @@ export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(.
     try { data = await response.json(); } catch { data = {}; }
     const ms = Math.round(performance.now() - started);
     if (response.status === 429) {
-      rateLimitedUntilMs = Date.now() + (Number(data['retry-after'] ?? response.headers.get('retry-after')) || 10) * 1000;
+      consecutive429 = Date.now() - last429Ms < 120000 ? consecutive429 + 1 : 1; last429Ms = Date.now();
+      const asked = Number(data['retry-after'] ?? response.headers.get('retry-after')) || 0;   // never less than 3 s, doubling while it keeps happening (a 0 s answer used to cause 3 calls in 3 s)
+      rateLimitedUntilMs = Date.now() + Math.min(60, Math.max(3, asked) * 2 ** (consecutive429 - 1)) * 1000 + Math.random() * 500;
       log('http', `${label} 429 rate limited until +${Math.round((rateLimitedUntilMs - Date.now()) / 1000)}s`);
     }
     if (!response.ok || data.result !== 'success') {

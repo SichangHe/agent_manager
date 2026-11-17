@@ -6,6 +6,7 @@
 const TARGET_HZ = 16000;
 const MAX_CLIP_S = 10;
 const PAUSE_MS = 700;
+const REPLY_PAUSE_MS = 1100, REPLY_MAX_CLIP_S = 30;   // a spoken reply (voice control) is cut into fewer, longer clips: fewer uploads and transcriptions
 const LISTEN_PAUSE_MS = 250;   // a start-word clip ends sooner: the command is one short word
 const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
@@ -61,12 +62,13 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], error: [220, 180], switch: [660, 990, 1320], cancel: [262, 196], command: [330, 0, 330], tick: [1568], updated: [988, 740, 988], interrupted: [523, 415, 330, 262]};
+export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], cancel: [900, 620], command: [740, 0, 740], tick: [1568], updated: [988, 740, 988], interrupted: [1000, 850, 720, 620], empty: [1100, 0, 1100], error: [1400, 1000, 1400, 1000], limited: [1568, 0, 1568, 0, 1568]};   // every note is 600-1600 Hz: phone speakers play lower tones too quietly
 
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio, onSpeechOnset}) {
   /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
   const setSession = type => { try { if (navigator.audioSession.type !== type) { navigator.audioSession.type = type; log('route', `audioSession.type -> ${type}`); } } catch { /* unsupported */ } };
-  let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, sustainMs = 0, idleTimer = 0;
+  let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, speechMuteUntilMs = 0, overPromptFired = false, sustainMs = 0, idleTimer = 0;
+  let flowWaiters = [], framesSeen = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
 
   function cut(final) {
@@ -88,8 +90,9 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
 
   function onFrame(frame) {
     if (!ctx || (!capturing && !listening)) return;   // frames after stop(), or while idle in the grace period
-    if (listening && !capturing && onKwsAudio && performance.now() >= earconUntilMs) onKwsAudio(toKwsRate(frame));
+    if (listening && !capturing && onKwsAudio && performance.now() >= speechMuteUntilMs) onKwsAudio(toKwsRate(frame));
     const ms = frame.length / ctx.sampleRate * 1000;
+    if (capturing && flowWaiters.length && (framesSeen++ >= 2 || frame.some(x => x !== 0))) { const w = flowWaiters.splice(0); w.forEach(f => f(true)); }   // the microphone really delivers audio now (some start with a silent gap)
     let sum = 0;
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
     const level = Math.sqrt(sum / frame.length);
@@ -97,7 +100,10 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     if (!speaking) noise = noise * 0.98 + level * 0.02;
     onLevel?.(Math.min(1, level * 8));
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
-      if (performance.now() < earconUntilMs) { sustainMs = 0; preroll = []; return; }   // our own chime must not count as speech
+      if (performance.now() < earconUntilMs) {   // our own chime or prompt must not count as speech: no barge-in, no clip
+        if (performance.now() >= speechMuteUntilMs && speaking) { sustainMs += ms; if (sustainMs >= BARGE_MS && !overPromptFired) { overPromptFired = true; log('mic', 'speech over our own prompt: spotters restarted'); onSpeechOnset?.(); } } else { sustainMs = 0; if (!speaking) overPromptFired = false; }   // but the keyword spotters still restart on a start word spoken over it
+        preroll = []; return;
+      }
       if (!speaking && sustainMs >= 80 && sustainMs < BARGE_MS) log('mic', `near miss: speech ${Math.round(sustainMs)}ms < ${BARGE_MS}ms (level ${level.toFixed(3)}, floor ${noise.toFixed(3)})`);
       sustainMs = speaking ? sustainMs + ms : 0;
       preroll.push(frame); while (preroll.length * ms > LISTEN_PREROLL_MS) preroll.shift();   // ring buffer: speech before the decision is kept
@@ -110,7 +116,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     if (!frames.length) { frames = preroll; preroll = []; clipMs = frames.length * ms; }
     frames.push(frame); clipMs += ms;
     if (speaking) { speechMs += ms; silentMs = 0; } else silentMs += ms;
-    if (silentMs >= (capturing || replyMode ? PAUSE_MS : LISTEN_PAUSE_MS) || clipMs >= MAX_CLIP_S * 1000) cut(false);
+    if (silentMs >= (replyMode && !capturing ? REPLY_PAUSE_MS : capturing || replyMode ? PAUSE_MS : LISTEN_PAUSE_MS) || clipMs >= (replyMode && !capturing ? REPLY_MAX_CLIP_S : MAX_CLIP_S) * 1000) cut(false);
   }
 
   /** Builds the context, stream and worklet once; released by `teardown` as soon as neither dictation nor voice control needs it. */
@@ -175,7 +181,7 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     },
     async start() {
       if (capturing) return {ok: true};
-      capturing = true;
+      capturing = true; framesSeen = 0;
       frames = []; preroll = []; speechMs = silentMs = clipMs = 0; clipsOut = 0; sustainMs = 0;
       try {
         warm ??= built();
@@ -189,6 +195,8 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
         return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied. Allow it in Settings > Safari > Microphone.' : `Microphone unavailable (${error.name}).`};
       }
     },
+    /** Resolves true when audio frames are really arriving while capturing; false after `timeoutMs`. */
+    whenFlowing(timeoutMs = 3000) { return new Promise(res => { flowWaiters.push(res); setTimeout(() => { const i = flowWaiters.indexOf(res); if (i >= 0) { flowWaiters.splice(i, 1); res(false); } }, timeoutMs); }); },
     /** Emits the last partial clip and stops capturing; the microphone is released after the grace period. Also cancels a startup in progress. */
     stop() {
       if (capturing && ctx && frames.length) cut(true);
@@ -197,20 +205,23 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
       sustainMs = 0; frames = []; preroll = [];
       if (!capturing && !listening) teardown();
     },
-    /** Short quiet chime on the warm audio context: `ready` (rising), `done` (falling), `error` (low). Voice detection ignores it while it plays. */
+    /** Short quiet chime on the warm audio context: one of EARCON_NOTES. Voice detection ignores it while it plays. */
     beep(kind) {
       const notes = EARCON_NOTES[kind];
       onEarcon?.(kind);   // played by the app on an <audio> element: no extra AudioContext, same output path and level as speech
       earconUntilMs = performance.now() + notes.length * EARCON_NOTE_S * 1000 + 250;
     },
     /** Ignore the microphone for `ms` (our own speech or chime is playing). */
-    muteFor(ms) { earconUntilMs = performance.now() + ms + 250; },
+    muteFor(ms, keepSpotting = false) { earconUntilMs = performance.now() + ms + 250; if (!keepSpotting) speechMuteUntilMs = earconUntilMs; },   // keepSpotting: our own prompt is playing but start words may still interrupt it
+    unmute() { earconUntilMs = speechMuteUntilMs = 0; },
     /** Cuts the clip in progress right now and hands it over (a spotted end word does not wait for a pause in speech). */
     flush() { if (listening && !capturing && frames.length) { speechMs = Math.max(speechMs, replyMode ? REPLY_MIN_SPEECH_MS : MIN_SPEECH_MS); cut(true); } },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
     setReplyMode(on) { replyMode = on; },
     /** Noisy-room mode: higher level and longer duration needed to start a start-word clip. */
     setBackoff(on) { backoff = on; },
+    /** True while an utterance is being recorded (speech since the last clip cut): the user is talking right now. */
+    inUtterance: () => frames.length > 0,
     active: () => capturing,
     /** True while the microphone stream is open (dictation or voice control). */
     micOpen: () => !!ctx,

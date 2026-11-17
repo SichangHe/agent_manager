@@ -4,7 +4,7 @@
  */
 import {mkdir, readFile, writeFile, rename, appendFile, stat} from 'node:fs/promises';
 import {resolve} from 'node:path';
-import {spawn} from 'node:child_process';
+import {spawn, execFile} from 'node:child_process';
 import {tmpdir} from 'node:os';
 import {unlink} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
@@ -15,7 +15,7 @@ const MAX_BATCH = 20;
 const MAX_TAIL_BATCH = 60;       // chunks in one pre-rendered tail bundle (about 4 minutes of speech)
 const SHORT_MESSAGE_CHUNKS = 3;  // messages up to this many chunks are rendered as a single bundle
 const SEND_DEADLINE_MS = 6000;   // `send` posts what is transcribed by now; slower clips are added by an edit
-const COALESCE_MS = 1500;        // messages arriving within this window of the first share one tail bundle
+const COALESCE_MS = 3000;        // messages arriving within this window of the first share one tail bundle
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
 const MAX_DELETES_PER_SWEEP = 40;
 const SWEEP_INTERVAL_MS = 3600000;   // cleanup runs once an hour: at about 100 KB per clip even 500 clips an hour stay far below the 100 MB cap, and deletes are the main Zulip API cost
@@ -358,10 +358,18 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     }
   }
 
+  /** Task priorities from `amh task priorities --json` (tag = Zulip topic -> number or null), cached 30 s; {} if amh fails. */
+  let prioCache = {at: 0, value: {}};
+  async function priorities() {
+    if (now() - prioCache.at < 30000) return prioCache.value;
+    const value = await new Promise(res => execFile(process.env.AMH_BIN || '/home/sichangheagent/.config/bin/amh', ['task', 'priorities', '--json'], {timeout: 3000}, (e, out) => { try { res(e ? {} : JSON.parse(out)); } catch { res({}); } }));
+    prioCache = {at: now(), value}; return value;
+  }
+
   async function ping(request) {
     const health = {};
     for (const [kind, base] of Object.entries(workers)) health[kind] = await fetchImpl(base + '/health', {signal: AbortSignal.timeout(2000)}).then(r => r.ok ? 'ok' : 'http ' + r.status, () => 'down');
-    const result = {voice: 1, id: request.id, op: 'result', of: 'ping', t: request.t, relayMs: now(), uptimeS: Math.round((now() - startedMs) / 1000), workers: health, queue: {stt: pools.stt.stats(), tts: pools.tts.stats()}, active: Object.values(records).filter(r => r.status !== 'done').length};
+    const result = {voice: 1, id: request.id, op: 'result', of: 'ping', t: request.t, relayMs: now(), uptimeS: Math.round((now() - startedMs) / 1000), workers: health, queue: {stt: pools.stt.stats(), tts: pools.tts.stats()}, active: Object.values(records).filter(r => r.status !== 'done').length, priorities: await priorities()};
     const sent = await api.call('POST', 'messages', {type: 'stream', to: streamId, topic: 'ping', content: JSON.stringify(result)});
     records[request.id] = {created: now(), status: 'sent', responseId: sent.id};
     await save();
@@ -427,7 +435,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       const pieces = speechPieces(message.content);
       if (!pieces.length) return;
       const ver = message.last_edit_timestamp ? 'e' + message.last_edit_timestamp : '';   // an edited message gets fresh ids, so clients accept the new audio
-      const topic = message.stream_id + ':' + message.subject;
+      const topic = 'all';   // one burst across all threads: messages of different topics that arrive together share one tail bundle (spans index them)
       let burst = bursts.get(topic);
       if (!burst && pieces.length <= SHORT_MESSAGE_CHUNKS) {   // short: one bundle, no separate head (saves 3 Zulip calls; rendering it whole is already quick)
         await this.handle({type: 'stream', stream_id: streamId, subject: 'tts', sender_id: humanId, content: JSON.stringify({voice: 1, id: `proactive_${message.id}${ver}_0`, op: 'tts', texts: pieces, proactive: true, messageId: message.id, firstIdx: 0})});

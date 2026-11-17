@@ -60,4 +60,40 @@ assert.equal(parseRequest(req({ids: [1]}, 'ack'), 1, 5), null);
 const wav = await speechWav('Duration check for the synthesized speech.');
 const ms = wavDurationMs(wav);
 assert.ok(ms > 1000 && ms < 8000, 'wav duration ' + ms);
+
+// voice-command grammar
+{
+  const G = await import('../grammar.mjs');
+  assert.deepEqual(G.navCommand('next three'), {dir: 1, whole: false, count: 3});
+  assert.deepEqual(G.navCommand('skip backward two'), {dir: -1, whole: false, count: 2});
+  assert.deepEqual(G.navCommand('back back message'), {dir: -1, whole: true, count: 2});
+  assert.deepEqual(G.navCommand('again'), {dir: 0, whole: false, count: 1});
+  assert.equal(G.navCommand('next back'), null);
+  assert.equal(G.navCommand('hello'), null);
+  const topics = [{name: 'human_mgr', maxId: 2}, {name: 'terminal_viz', maxId: 3}, {name: 'alpha', maxId: 1}];
+  assert.equal(G.rankTopics(topics, 'human manager')[0].t.name, 'human_mgr');
+  assert.equal(G.rankTopics(topics, 'terminal viz')[0].t.name, 'terminal_viz');
+  assert.ok(G.clearWinner(G.rankTopics(topics, 'alpha')));
+  assert.equal(G.choiceAnswer('second', {names: ['a', 'b'], confirm: false}, q => G.rankTopics(topics, q)), 'b');
+  assert.equal(G.choiceAnswer('yes', {names: ['a'], confirm: true}, () => []), 'a');
+  assert.equal(G.afterStartWord('Attention, send the build', 'attention'), 'send the build');
+  assert.equal(G.afterStartWord('send the build', 'attention'), null);
+  assert.equal(G.stripResumePhrase('ship it over and out', 'over'), 'ship it');
+  assert.equal(G.stripResumePhrase('ship it', 'over'), null);
+  assert.ok(G.isCancel('never mind', 'bamboo') && G.isCancel('bamboo', 'bamboo') && !G.isCancel('send it', 'bamboo'));
+  assert.ok(G.endsWithCancel('Some reply. Cancel.', 'bamboo'));
+  assert.equal(G.spokenName('human_mgr'), 'human manager');
+  assert.ok(G.commandPhrases(['alpha', 'alpha_beta']).every(p => p.text !== 'switch to alpha'));
+  assert.ok(G.similarText('The build finished with two warnings today', 'The build finished with two warnings today!'));
+}
 console.log('unit ok');
+{
+  const {parseBlocks, messageChunks} = await import('../text.mjs');
+  const b = parseBlocks('Intro\n\n| a | b |\n|---|:-:|\n| 1 | **x** |\n| 2 |\n\n| not | table |\nafter');
+  const t = b.find(x => x.kind === 'table');
+  if (!t || t.head.join() !== 'a,b' || t.rows.length !== 2 || t.rows[0][1] !== '**x**') throw new Error('table parse: ' + JSON.stringify(b));
+  if (b.filter(x => x.kind === 'table').length !== 1) throw new Error('pipe lines without a separator row must stay text');
+  if (!b.some(x => x.kind === 'p' && x.text.includes('| not | table | after'))) throw new Error('fallback text lost: ' + JSON.stringify(b));
+  const spoken = messageChunks('| a | b |\n|---|---|\n| 1 | 2 |').chunks.filter(c => c.speech).map(c => c.speech);
+  assert.deepEqual(spoken, ['Table start.', 'a.', 'b.', 'Row 1.', '1.', '2.']);
+}

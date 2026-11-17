@@ -21,8 +21,9 @@ export function itemsOf(message, fromIdx = 0) {
 }
 
 export function createModel({botId, humanId}) {
+  const authoritativeSkip = false;
   const byTopic = new Map();
-  const topics = new Map();
+  const topics = new Map(); let priorities = {};
   const loaded = new Set();
   const isAgent = m => m.sender_id === botId;
   const topicInfo = name => { let t = topics.get(name); if (!t) { t = {name, maxId: 0, unread: 0}; topics.set(name, t); } return t; };
@@ -34,7 +35,7 @@ export function createModel({botId, humanId}) {
     add(message) {
       let map = byTopic.get(message.subject);
       if (!map) { map = new Map(); byTopic.set(message.subject, map); }
-      if (map.has(message.id)) return false;
+      if (map.has(message.id)) { const old = map.get(message.id); if (message.flags && !authoritativeSkip) old.flags = [...message.flags]; return false; }   // the server's flags win over a cached copy
       map.set(message.id, message);
       const t = topicInfo(message.subject);
       t.maxId = Math.max(t.maxId, message.id);
@@ -47,6 +48,10 @@ export function createModel({botId, humanId}) {
     messages: topic => [...(byTopic.get(topic)?.values() ?? [])].sort((a, b) => a.id - b.id),
     agentMessages(topic) { return this.messages(topic).filter(m => isAgent(m) && !m.local); },
     unreadAgentMessages(topic) { return this.agentMessages(topic).filter(m => !m.flags?.includes('read')); },
+    /** The server says `ids` are unread (read elsewhere then unread again, or a stale cache): they lose the read flag. */
+    markUnread(ids) { for (const map of byTopic.values()) for (const id of ids) { const m = map.get(id); if (m?.flags?.includes('read')) m.flags = m.flags.filter(f => f !== 'read'); } },
+    /** Marks every cached message of ours that the server no longer lists as unread as read. Returns the ids changed. */
+    reconcileUnread(unreadIds, mine) { const out = []; for (const map of byTopic.values()) for (const m of map.values()) if (mine(m) && !m.flags?.includes('read') && !unreadIds.has(m.id) && !m.local) { m.flags = [...(m.flags ?? []), 'read']; out.push(m.id); } return out; },
     markRead(ids) {
       for (const map of byTopic.values()) for (const id of ids) {
         const m = map.get(id);
@@ -60,9 +65,12 @@ export function createModel({botId, humanId}) {
       for (const {name, max_id} of list) { const t = topicInfo(name); t.maxId = Math.max(t.maxId, max_id); }
       for (const t of topics.values()) t.unread = unreadByTopic.get(t.name) ?? 0;
     },
+    /** Human-manager priorities (topic -> number or null; lower = first, unset last). */
+    setPriorities(map) { priorities = map ?? {}; },
     topics() {
       for (const t of topics.values()) if (loaded.has(t.name)) t.unread = this.unreadAgentMessages(t.name).length;
-      return [...topics.values()].sort((a, b) => b.maxId - a.maxId);
+      const rank = n => priorities[n] ?? Infinity;   // Infinity - Infinity is NaN: compare explicitly
+      return [...topics.values()].sort((a, b) => (rank(a.name) === rank(b.name) ? 0 : rank(a.name) < rank(b.name) ? -1 : 1) || b.maxId - a.maxId);
     },
     hasTopic: name => topics.has(name),
     lastMessage(topic) { return this.messages(topic).at(-1); },
