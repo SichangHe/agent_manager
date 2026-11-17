@@ -120,7 +120,9 @@ fn writer(path: &Path) -> Result<Connection, String> {
     connection
         // WAL with synchronous=NORMAL, as the rest of the store: a commit survives a crash of amhd (WAL is in the OS cache); only a power loss can drop the last commits. FULL would fsync every commit.
         // 🧑 "Locking should be in us not ms"
-        .execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+        .execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA wal_autocheckpoint=0;",
+        )
         .map_err(error)?;
     Ok(connection)
 }

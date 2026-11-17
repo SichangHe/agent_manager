@@ -269,8 +269,27 @@ pub fn rollback() -> Result<String, String> {
     if daemon_live && !has_daemon(&releases_dir().join(&previous).join("amh"))? {
         said += &leave_daemon(&state_dir, &mark)?;
     }
+    // An older build reads whole task rows: put the older bodies kept in `task_old_body` back first, with the live service stopped so it cannot split them again; `switch` starts it.
+    said += &flush_task_bodies()?;
     write_history(&names)?;
     Ok(said + &switch(&previous)?)
+}
+
+/// Stop the live service and put every task's older body back into its row.
+fn flush_task_bodies() -> Result<String, String> {
+    let path = crate::settings::state_dir().join("amh.sqlite3");
+    if !path.exists() {
+        return Ok(String::new());
+    }
+    for unit in ["amhd.service", "amh-watch.service"] {
+        let _ = Command::new("systemctl")
+            .args(["--user", "stop", unit])
+            .status();
+    }
+    let moved = crate::database::Database::open(&path)?.flush_old_bodies()?;
+    Ok(format!(
+        "amh: {moved} long task bodies joined back for the older build\n"
+    ))
 }
 
 /// Whether the build at `binary` has the daemon: `amh daemon` without `AMH_DAEMON=1` says it is off; older builds reject the command. Anything else is an error, never a guess.

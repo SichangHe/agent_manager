@@ -57,7 +57,8 @@ pub fn import(
             // Writers outside the daemon do not bump `version` yet, so the opening also checks the text it diffed against.
             Precondition {
                 sql: "SELECT EXISTS(SELECT 1 FROM tasks WHERE name = ?1 AND version = ?2 AND text = ?3)".into(),
-                params: vec![name.to_owned().into(), version.into(), text.into()],
+                // The row as stored (the older body of a long task lives in `task_old_body`).
+                params: vec![name.to_owned().into(), version.into(), database.task_stored(name)?.unwrap_or_default().into()],
             },
         ],
         statements: vec![Statement {

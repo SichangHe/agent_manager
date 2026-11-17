@@ -214,15 +214,20 @@ mod tests {
             ],
         );
         store.save(&task)?;
-        assert_eq!(archive_requests(&store, now)?, 1);
+        // Resolved requests leave the task text when it is saved (to `resolved_items`); nothing is left to archive from it.
+        assert_eq!(archive_requests(&store, now)?, 0);
         let stored = store.load("a.md")?;
         assert_eq!(
             requests::read(&stored)?
                 .iter()
                 .map(|r| r.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["a:2", "a:3", "a:4"]
+            vec!["a:4"]
         );
+        let database = store.database()?.ok_or("no database")?;
+        for id in ["a:1", "a:2", "a:3"] {
+            assert!(database.resolved_item(id)?);
+        }
         assert_eq!(stored.body, "history\n");
         assert_eq!(stored.field("request_next"), Some("5"));
         assert_eq!(archive_requests(&store, now)?, 0);

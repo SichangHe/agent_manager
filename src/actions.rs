@@ -1322,10 +1322,18 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if !dropped.is_empty() {
                 requests::unwait(&mut task, need("id"), &dropped)?;
             }
+            // A blocker already resolved (its record moved to `resolved_items`) waits for nothing, as before.
+            let database = store.database()?;
             let blockers = many("blocker")
                 .into_iter()
                 .map(str::to_owned)
+                .filter(|id| {
+                    !database
+                        .as_ref()
+                        .is_some_and(|database| database.resolved_item(id).unwrap_or(false))
+                })
                 .collect::<Vec<_>>();
+            drop(database);
             if !blockers.is_empty() {
                 // Only the tasks a blocker chain reaches, not every task: loading all of them held the lock for 100+ ms.
                 requests::wait(
@@ -1490,7 +1498,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("task", "show") => {
             let shown: Result<Vec<String>, String> = many("task")
                 .into_iter()
-                .map(|name| Ok(tasks::show(&store.load(name)?)))
+                .map(|name| Ok(tasks::show(&store.load_whole(name)?)))
                 .collect();
             shown?.concat()
         }
@@ -1556,9 +1564,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let on = until.as_deref().or(text("on"));
             let known = match on.and_then(tasks::block_of) {
                 Some(tasks::Block::Task(other)) => store.contains(other)?,
-                Some(tasks::Block::Item(id)) => item_owner(&store, id)?.is_some_and(|owner| {
-                    requests::read(&owner).is_ok_and(|records| records.iter().any(|r| r.id == id))
-                }),
+                Some(tasks::Block::Item(id)) => {
+                    item_owner(&store, id)?.is_some_and(|owner| {
+                        requests::read(&owner)
+                            .is_ok_and(|records| records.iter().any(|r| r.id == id))
+                    }) || store
+                        .database()?
+                        .is_some_and(|database| database.resolved_item(id).unwrap_or(false))
+                }
                 Some(tasks::Block::Date(_)) => true,
                 None => on.is_none(),
             };

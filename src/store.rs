@@ -188,7 +188,14 @@ impl Store {
         lock.write_all(format!("pid {} {}", std::process::id(), me.join(" ")).as_bytes())
             .map_err(failed)?;
         let mut database = Database::open(&self.state_dir.join("amh.sqlite3"))?;
-        if !database.initialized()? {
+        // Both one-time steps below, once done, stay done: checked once per process, not inside every lock (a first read after other writers costs milliseconds).
+        static SET_UP: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+            std::sync::Mutex::new(Vec::new());
+        let db_path = self.state_dir.join("amh.sqlite3");
+        let set_up = SET_UP
+            .lock()
+            .is_ok_and(|done| done.contains(&(db_path.clone(), inode(&db_path))));
+        if !set_up && !database.initialized()? {
             self.recover_transfer()?;
             let mut tasks = self.markdown_tasks()?;
             for task in &mut tasks {
@@ -250,7 +257,7 @@ impl Store {
             }
         }
         // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": the lock only orders writers; the watcher imports typed edits and exports task files (`sync_files`).
-        if database.record("pending-block-queue-v1")?.is_none() {
+        if !set_up && database.record("pending-block-queue-v1")?.is_none() {
             let mut snapshots = Vec::new();
             let mut events = Vec::new();
             for (name, text) in database.tasks()? {
@@ -266,6 +273,9 @@ impl Store {
             }
             database.commit(&snapshots, &events)?;
             database.set_record("pending-block-queue-v1", "done")?;
+        }
+        if !set_up && let Ok(mut done) = SET_UP.lock() {
+            done.push((db_path.clone(), inode(&db_path)));
         }
         let import_ms = importing.elapsed().as_secs_f64() * 1000.0;
         let exporting = std::time::Instant::now();
@@ -346,7 +356,21 @@ impl Store {
             return Ok(None);
         }
         let database = Database::open(&path)?;
-        Ok(database.initialized()?.then_some(database))
+        // Once initialized, a database stays so: asked once per process, not on every open (several per command).
+        // Keyed by inode too: a database deleted and made anew is asked again.
+        static INITIALIZED: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
+            std::sync::Mutex::new(Vec::new());
+        let key = (path.clone(), inode(&path));
+        if INITIALIZED.lock().is_ok_and(|known| known.contains(&key)) {
+            return Ok(Some(database));
+        }
+        if !database.initialized()? {
+            return Ok(None);
+        }
+        if let Ok(mut known) = INITIALIZED.lock() {
+            known.push(key);
+        }
+        Ok(Some(database))
     }
 
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
@@ -812,14 +836,25 @@ impl Store {
             return Err(format!("amh: no task file {name} in the work-log root"));
         }
         if let Some(database) = self.database()? {
+            // As stored: a long task's older body stays in `task_old_body` (its marker field says how long); saving it back keeps that body. `load_whole` reads it all.
             let text = database
-                .task(name)?
+                .task_stored(name)?
                 .ok_or_else(|| format!("amh: no task file {name} in the work-log root"))?;
             return Task::parse(name, &text).map_err(|message| format!("amh: {message}"));
         }
         let text = fs::read_to_string(self.locate(name))
             .map_err(|error| format!("amh: cannot read {name}: {error}"))?;
         Task::parse(name, &text).map_err(|message| format!("amh: {message}"))
+    }
+
+    /// The whole task, its older body included, for showing it.
+    pub fn load_whole(&self, name: &str) -> Result<Task, String> {
+        if let Some(database) = self.database()?
+            && let Some(text) = database.task(name)?
+        {
+            return Task::parse(name, &text).map_err(|message| format!("amh: {message}"));
+        }
+        self.load(name)
     }
 
     pub fn save(&self, task: &Task) -> Result<(), String> {
@@ -952,7 +987,7 @@ impl Store {
         requests::validate(&task)?;
         let old = match self.database()? {
             Some(database) => database
-                .task(&task.name)?
+                .task_stored(&task.name)?
                 .map(|text| Task::parse(&task.name, &text))
                 .transpose()?,
             None => self.load(&task.name).ok(),
@@ -1049,6 +1084,28 @@ impl Store {
                 &task.name,
                 serde_json::json!({"status": task.status(), "address": task.address()}),
             ));
+        }
+        // A resolved request leaves the task text for `resolved_items` (still found by its ID, and in `amh log`); the text keeps only open ones.
+        let records = requests::read(&task)?;
+        if records.iter().any(|r| r.stage == requests::Stage::Resolved) {
+            let (resolved, open): (Vec<_>, Vec<_>) = records
+                .into_iter()
+                .partition(|r| r.stage == requests::Stage::Resolved);
+            for request in &resolved {
+                let mut one = task.clone();
+                requests::write(&mut one, std::slice::from_ref(request));
+                let record = one
+                    .field(requests::KEY)
+                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                    .and_then(|list| list.get(0).cloned())
+                    .unwrap_or_default();
+                events.push(log::event_value(
+                    "request archived",
+                    &request.id,
+                    serde_json::json!({"owner": task.name, "record": record}),
+                ));
+            }
+            requests::write(&mut task, &open);
         }
         Ok((task, events))
     }
@@ -1736,4 +1793,9 @@ mod tests {
         fs::remove_dir_all(root)?;
         Ok(())
     }
+}
+
+/// The inode of `path`, 0 when it does not exist.
+fn inode(path: &std::path::Path) -> u64 {
+    fs::metadata(path).map_or(0, |meta| std::os::unix::fs::MetadataExt::ino(&meta))
 }

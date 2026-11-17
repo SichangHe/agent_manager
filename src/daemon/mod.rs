@@ -167,6 +167,19 @@ fn serve() -> Result<(), String> {
         })
         .map_err(|e| format!("amh: cannot start the watcher: {e}"))?;
     outbox::start(settings.clone(), store.state_dir.clone())?;
+    // Checkpoints off the commit path: every 2 s, PASSIVE, on its own connection.
+    let checkpointed = path.clone();
+    std::thread::Builder::new()
+        .name("amhd-checkpoint".into())
+        .spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_secs(2));
+                if let Ok(database) = crate::database::Database::open(&checkpointed) {
+                    let _ = database.checkpoint();
+                }
+            }
+        })
+        .map_err(|e| format!("amh: cannot start the checkpointer: {e}"))?;
     listen(&store.state_dir)?;
     notify_systemd("READY=1");
     for beat in 1u64.. {

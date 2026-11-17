@@ -4,7 +4,7 @@ use crate::taskfile::HUMAN_MARK;
 use crate::tasks::Task;
 use serde_json::{Value, json};
 
-const KEY: &str = "request_records";
+pub const KEY: &str = "request_records";
 
 // 🧑 "there should only be three stages ... Let's use resolution requested and resolved."
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

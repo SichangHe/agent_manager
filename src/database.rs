@@ -111,7 +111,9 @@ impl Database {
         };
         if ready && has_schema() {
             connection
-                .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824;")
+                .execute_batch(
+                    "PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA wal_autocheckpoint=0;",
+                )
                 .map_err(error)?;
             return Ok(Self(
                 std::mem::ManuallyDrop::new(connection),
@@ -122,7 +124,8 @@ impl Database {
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL; -- WAL: no corruption on a crash; the last commits may be lost on power loss, not on a process crash
-             PRAGMA mmap_size=1073741824;
+             PRAGMA wal_autocheckpoint=0; -- checkpoints run in the background (`checkpoint`), not inside a commit that holds the store lock
+             PRAGMA mmap_size=0;
              CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (name TEXT PRIMARY KEY, text TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS events (
@@ -136,7 +139,9 @@ impl Database {
                  attempts INTEGER NOT NULL DEFAULT 0, last_error TEXT NOT NULL DEFAULT ''
              );
              CREATE TABLE IF NOT EXISTS records (name TEXT PRIMARY KEY, text TEXT NOT NULL);
-             CREATE INDEX IF NOT EXISTS events_by_subject ON events(subject, id);"
+             CREATE INDEX IF NOT EXISTS events_by_subject ON events(subject, id);
+             CREATE TABLE IF NOT EXISTS task_old_body (name TEXT NOT NULL, seq INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (name, seq));
+             CREATE TABLE IF NOT EXISTS resolved_items (id TEXT PRIMARY KEY, owner TEXT NOT NULL, resolved_at TEXT, record TEXT NOT NULL CHECK(json_valid(record)));"
         ).map_err(error)?;
         // When a failed message may be tried again (Unix seconds); added after the table existed.
         let has_retry: bool = connection
@@ -236,12 +241,195 @@ impl Database {
     }
 
     pub fn task(&self, name: &str) -> Result<Option<String>, String> {
+        let stored = self.task_stored(name)?;
+        stored.map(|text| self.compose(name, text)).transpose()
+    }
+
+    /// Copy the WAL back into the database without blocking anyone (PASSIVE); the daemon and the watcher call it every few seconds, as no commit does it anymore.
+    // 🧑 "Locking should be in us not ms": an automatic checkpoint inside a commit cost milliseconds under the store lock.
+    pub fn checkpoint(&self) -> Result<(), String> {
         self.0
-            .query_row("SELECT text FROM tasks WHERE name = ?1", [name], |row| {
-                row.get(0)
-            })
-            .optional()
+            .query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
             .map_err(error)
+    }
+
+    /// Checkpoint when the WAL has grown past `WAL_MAX` bytes, in case no background checkpointer runs.
+    fn checkpoint_if_large(&self) {
+        if let Some(path) = self.0.path()
+            && std::fs::metadata(format!("{path}-wal")).is_ok_and(|meta| meta.len() > WAL_MAX)
+        {
+            let _ = self.checkpoint();
+        }
+    }
+
+    /// Whether request `id` was resolved and moved to `resolved_items`.
+    pub fn resolved_item(&self, id: &str) -> Result<bool, String> {
+        self.0
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'resolved_items') AND EXISTS(SELECT 1 FROM resolved_items WHERE id = ?1)",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// The task text as stored: frontmatter and the recent body, without the older body kept in `task_old_body`.
+    pub fn task_stored(&self, name: &str) -> Result<Option<String>, String> {
+        self.0
+            .prepare_cached("SELECT text FROM tasks WHERE name = ?1")
+            .and_then(|mut query| query.query_row([name], |row| row.get(0)).optional())
+            .map_err(error)
+    }
+
+    /// The older body of `name` kept apart, and its last chunk number (0 when none).
+    fn old_body(&self, name: &str) -> Result<(String, i64), String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT seq, text FROM task_old_body WHERE name = ?1 ORDER BY seq")
+            .map_err(error)?;
+        let mut text = String::new();
+        let mut last = 0;
+        let rows = query
+            .query_map([name], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(error)?;
+        for row in rows {
+            let (seq, chunk) = row.map_err(error)?;
+            text.push_str(&chunk);
+            last = seq;
+        }
+        Ok((text, last))
+    }
+
+    /// The size in bytes of `name`'s older body and its last chunk number.
+    fn old_body_size(&self, name: &str) -> Result<(usize, i64), String> {
+        self.0
+            .prepare_cached("SELECT COALESCE(SUM(length(CAST(text AS BLOB))), 0), COALESCE(MAX(seq), 0) FROM task_old_body WHERE name = ?1")
+            .and_then(|mut query| {
+                query.query_row([name], |row| Ok((row.get::<_, i64>(0)? as usize, row.get(1)?)))
+            })
+            .map_err(error)
+    }
+
+    /// Every task with an older body kept apart, and that body.
+    fn old_bodies(&self) -> Result<std::collections::BTreeMap<String, String>, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT name, text FROM task_old_body ORDER BY name, seq")
+            .map_err(error)?;
+        let mut found: std::collections::BTreeMap<String, String> = Default::default();
+        let rows = query
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(error)?;
+        for row in rows {
+            let (name, chunk) = row.map_err(error)?;
+            found.entry(name).or_default().push_str(&chunk);
+        }
+        Ok(found)
+    }
+
+    /// The whole task text from its stored form.
+    fn compose(&self, name: &str, stored: String) -> Result<String, String> {
+        let (old, _) = self.old_body(name)?;
+        Ok(join_body(stored, &old))
+    }
+
+    /// The stored form of each snapshot, and the `task_old_body` writes it needs: a body over `OLD_BODY_AT` keeps its last `KEEP_RECENT` bytes in the task row and moves the rest to a new chunk, so a save writes a small row, not the whole history.
+    // 🧑 "Locking should be in us not ms"
+    fn split(
+        &self,
+        snapshots: &[(String, String)],
+    ) -> Result<(Vec<(String, String)>, Vec<Statement>), String> {
+        let mut stored = Vec::new();
+        let mut extra = Vec::new();
+        for (name, text) in snapshots {
+            let Some(at) = body_start(text) else {
+                stored.push((name.clone(), text.clone()));
+                continue;
+            };
+            let body = &text[at..];
+            // A text loaded as stored carries the marker: its body is the recent part, and only the older body's size is needed. A whole text (e.g. from `task()`) holds the older body in front.
+            let marked = older_marker(&text[..at]).is_some();
+            let front = without_older_marker(&text[..at]);
+            let (old, old_size, last) = if marked {
+                let (size, last) = self.old_body_size(name)?;
+                (String::new(), size, last)
+            } else {
+                let (old, last) = self.old_body(name)?;
+                let size = old.len();
+                (old, size, last)
+            };
+            let (mut recent, mut next, mut old_len) = if marked || old.is_empty() {
+                (body, last + 1, old_size)
+            } else if let Some(rest) = body.strip_prefix(old.as_str()) {
+                (rest, last + 1, old.len())
+            } else {
+                // The older body itself changed (an edit): keep it all in the row again.
+                extra.push(Statement {
+                    sql: "DELETE FROM task_old_body WHERE name = ?1".into(),
+                    params: vec![name.clone().into()],
+                });
+                (body, 1, 0)
+            };
+            // Text with a block still waiting to be queued stays in the row, where amh looks for it.
+            if recent.len() > OLD_BODY_AT && crate::taskfile::pending_blocks(recent).is_empty() {
+                let from = recent.len() - KEEP_RECENT;
+                if let Some(cut) = recent[from..].find('\n').map(|i| from + i + 1)
+                    && cut < recent.len()
+                {
+                    extra.push(Statement {
+                        sql: "INSERT INTO task_old_body (name, seq, text) VALUES (?1, ?2, ?3)"
+                            .into(),
+                        params: vec![
+                            name.clone().into(),
+                            next.into(),
+                            recent[..cut].to_owned().into(),
+                        ],
+                    });
+                    next += 1;
+                    old_len += cut;
+                    recent = &recent[cut..];
+                }
+            }
+            let _ = next;
+            let front = if old_len > 0 {
+                with_older_marker(&front, old_len)
+            } else {
+                front
+            };
+            stored.push((name.clone(), format!("{front}{recent}")));
+        }
+        Ok((stored, extra))
+    }
+
+    /// Put every older body back into its task row and drop the chunks, so a build without `task_old_body` reads whole tasks (before a rollback).
+    pub fn flush_old_bodies(&mut self) -> Result<usize, String> {
+        let bodies = self.old_bodies()?;
+        let transaction = self.0.transaction().map_err(error)?;
+        for (name, old) in &bodies {
+            let stored: Option<String> = transaction
+                .query_row("SELECT text FROM tasks WHERE name = ?1", [name], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .map_err(error)?;
+            if let Some(stored) = stored {
+                transaction
+                    .execute(
+                        "UPDATE tasks SET text = ?2 WHERE name = ?1",
+                        params![name, join_body(stored, old)],
+                    )
+                    .map_err(error)?;
+            }
+            transaction
+                .execute("DELETE FROM task_old_body WHERE name = ?1", [name])
+                .map_err(error)?;
+        }
+        transaction.commit().map_err(error)?;
+        Ok(bodies.len())
     }
 
     /// Time of the task's latest status change to `done`, if the event is still in the database.
@@ -277,7 +465,17 @@ impl Database {
                 found.insert(name, text);
             }
         }
-        Ok(found.into_iter().collect())
+        let old = self.old_bodies()?;
+        Ok(found
+            .into_iter()
+            .map(|(name, text)| {
+                let text = match old.get(&name) {
+                    Some(old) => join_body(text, old),
+                    None => text,
+                };
+                (name, text)
+            })
+            .collect())
     }
 
     /// The tasks whose status is running, long_running or blocked, through the status index.
@@ -291,7 +489,8 @@ impl Database {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(error)?;
-        rows.collect::<Result<_, _>>().map_err(error)
+        let rows: Vec<(String, String)> = rows.collect::<Result<_, _>>().map_err(error)?;
+        self.with_old_bodies(rows)
     }
 
     /// Tasks with an open daemon `edit_import` row; none before the daemon's migration made the table.
@@ -323,11 +522,32 @@ impl Database {
             .0
             .prepare("SELECT name, text FROM tasks ORDER BY name")
             .map_err(error)?;
-        query
+        let rows = query
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(error)
+            .map_err(error)?;
+        self.with_old_bodies(rows)
+    }
+
+    fn with_old_bodies(
+        &self,
+        rows: Vec<(String, String)>,
+    ) -> Result<Vec<(String, String)>, String> {
+        let old = self.old_bodies()?;
+        if old.is_empty() {
+            return Ok(rows);
+        }
+        Ok(rows
+            .into_iter()
+            .map(|(name, text)| {
+                let text = match old.get(&name) {
+                    Some(old) => join_body(text, old),
+                    None => text,
+                };
+                (name, text)
+            })
+            .collect())
     }
 
     /// Every task's name, filed month (empty at the root), and, when `compare`, whether its text equals what the last export recorded.
@@ -370,19 +590,27 @@ impl Database {
         snapshots: &[(String, String)],
         events: &[Value],
     ) -> Result<(), String> {
-        if let Ok(statements) = record_statements(snapshots, events)
-            && let Some(done) = crate::daemon::commit::route(|| crate::daemon::commit::Write {
-                preconditions: vec![],
-                statements,
-            })
-        {
+        let (snapshots, extra) = self.split(snapshots)?;
+        let snapshots = &snapshots[..];
+        if let Ok(statements) = record_statements(snapshots, events).map(|mut s| {
+            s.extend(extra.iter().map(|e| Statement {
+                sql: e.sql.clone(),
+                params: e.params.clone(),
+            }));
+            s
+        }) && let Some(done) = crate::daemon::commit::route(|| crate::daemon::commit::Write {
+            preconditions: vec![],
+            statements,
+        }) {
             done?;
             self.wake(events);
             return Ok(());
         }
         let transaction = self.0.transaction().map_err(error)?;
         commit_records(&transaction, snapshots, events)?;
+        run_statements(&transaction, &extra)?;
         transaction.commit().map_err(error)?;
+        self.checkpoint_if_large();
         self.wake(events);
         Ok(())
     }
@@ -398,22 +626,28 @@ impl Database {
             .first()
             .map_or("received", |(name, _)| name.as_str());
         let key_name = format!("mail:{key}");
-        if let Ok(records) = record_statements(snapshots, events)
-            && let Some(done) = crate::daemon::commit::route(|| {
-                let mut statements = vec![crate::daemon::commit::statement(
-                    "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
-                    vec![key_name.clone().into(), owner.to_owned().into()],
-                )];
-                statements.extend(records);
-                crate::daemon::commit::Write {
-                    preconditions: vec![crate::daemon::commit::Precondition {
-                        sql: "SELECT NOT EXISTS (SELECT 1 FROM metadata WHERE key = ?1)".into(),
-                        params: vec![key_name.clone().into()],
-                    }],
-                    statements,
-                }
-            })
-        {
+        let (snapshots, extra) = self.split(snapshots)?;
+        let snapshots = &snapshots[..];
+        if let Ok(records) = record_statements(snapshots, events).map(|mut s| {
+            s.extend(extra.iter().map(|e| Statement {
+                sql: e.sql.clone(),
+                params: e.params.clone(),
+            }));
+            s
+        }) && let Some(done) = crate::daemon::commit::route(|| {
+            let mut statements = vec![crate::daemon::commit::statement(
+                "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                vec![key_name.clone().into(), owner.to_owned().into()],
+            )];
+            statements.extend(records);
+            crate::daemon::commit::Write {
+                preconditions: vec![crate::daemon::commit::Precondition {
+                    sql: "SELECT NOT EXISTS (SELECT 1 FROM metadata WHERE key = ?1)".into(),
+                    params: vec![key_name.clone().into()],
+                }],
+                statements,
+            }
+        }) {
             return match done? {
                 crate::daemon::commit::Outcome::Committed => {
                     self.wake(events);
@@ -433,6 +667,7 @@ impl Database {
             return Ok(false);
         }
         commit_records(&transaction, snapshots, events)?;
+        run_statements(&transaction, &extra)?;
         transaction.commit().map_err(error)?;
         self.wake(events);
         Ok(true)
@@ -445,19 +680,25 @@ impl Database {
         snapshots: &[(String, String)],
         events: &[Value],
     ) -> Result<(), String> {
-        if let Ok(records) = record_statements(snapshots, events)
-            && let Some(done) = crate::daemon::commit::route(|| {
-                let mut statements = vec![crate::daemon::commit::statement(
-                    "UPDATE messages SET state = 'sent', attempts = attempts + 1, last_error = '' WHERE id = ?1",
-                    vec![id.into()],
-                )];
-                statements.extend(records);
-                crate::daemon::commit::Write {
-                    preconditions: vec![pending_message(id)],
-                    statements,
-                }
-            })
-        {
+        let (snapshots, extra) = self.split(snapshots)?;
+        let snapshots = &snapshots[..];
+        if let Ok(records) = record_statements(snapshots, events).map(|mut s| {
+            s.extend(extra.iter().map(|e| Statement {
+                sql: e.sql.clone(),
+                params: e.params.clone(),
+            }));
+            s
+        }) && let Some(done) = crate::daemon::commit::route(|| {
+            let mut statements = vec![crate::daemon::commit::statement(
+                "UPDATE messages SET state = 'sent', attempts = attempts + 1, last_error = '' WHERE id = ?1",
+                vec![id.into()],
+            )];
+            statements.extend(records);
+            crate::daemon::commit::Write {
+                preconditions: vec![pending_message(id)],
+                statements,
+            }
+        }) {
             return match done? {
                 crate::daemon::commit::Outcome::Committed => {
                     self.wake(events);
@@ -476,6 +717,7 @@ impl Database {
             return Err(format!("amh: no pending message {id}"));
         }
         commit_records(&transaction, snapshots, events)?;
+        run_statements(&transaction, &extra)?;
         transaction.commit().map_err(error)?;
         self.wake(events);
         Ok(())
@@ -901,7 +1143,29 @@ fn insert_event(
     if queue && field("kind")? == "message queued" {
         enqueue(transaction, field("subject")?, &event["data"])?;
     }
+    if field("kind")? == "request archived" {
+        let statement = archived_statement(field("subject")?, &event["data"]);
+        transaction
+            .execute(
+                &statement.sql,
+                rusqlite::params_from_iter(&statement.params),
+            )
+            .map_err(error)?;
+    }
     Ok(())
+}
+
+/// A resolved request leaves its task's text for `resolved_items`, still found by its ID.
+fn archived_statement(id: &str, data: &Value) -> Statement {
+    Statement {
+        sql: "INSERT INTO resolved_items (id, owner, resolved_at, record) VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, resolved_at = excluded.resolved_at, record = excluded.record".into(),
+        params: vec![
+            id.to_owned().into(),
+            data["owner"].as_str().unwrap_or_default().to_owned().into(),
+            data["record"]["resolved_at"].as_str().map(str::to_owned).map_or(rusqlite::types::Value::Null, Into::into),
+            data["record"].to_string().into(),
+        ],
+    }
 }
 
 fn enqueue(
@@ -978,6 +1242,9 @@ fn event_statements(event: &Value, queue: bool) -> Result<Vec<Statement>, String
     if queue && field("kind")? == "message queued" {
         statements.push(enqueue_statement(field("subject")?, &event["data"])?);
     }
+    if field("kind")? == "request archived" {
+        statements.push(archived_statement(field("subject")?, &event["data"]));
+    }
     Ok(statements)
 }
 
@@ -1012,6 +1279,56 @@ fn error(error: rusqlite::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_body_is_stored_in_chunks_and_read_whole() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("amh-body-chunks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let mut db = Database::open(&dir.join("a.sqlite3"))?;
+        let line = "a line of the task's history, long enough to count\n";
+        let mut text = format!("---\nstatus: running\n---\n{}", line.repeat(2000));
+        db.commit(&[("t.md".into(), text.clone())], &[])?;
+        assert_eq!(db.task("t.md")?.as_deref(), Some(text.as_str()));
+        let stored = db.task_stored("t.md")?.ok_or("no row")?;
+        assert!(
+            stored.len() < 10 * 1024
+                && stored.starts_with("---\nstatus: running\nolder_body_bytes: ")
+        );
+        // Appends write only the recent part; the whole text reads back.
+        for i in 0..800 {
+            text.push_str(&format!("appended {i}: {line}"));
+            db.commit(&[("t.md".into(), text.clone())], &[])?;
+        }
+        assert_eq!(db.task("t.md")?.as_deref(), Some(text.as_str()));
+        assert!(db.task_stored("t.md")?.ok_or("no row")?.len() < 45 * 1024);
+        assert_eq!(db.tasks()?, vec![("t.md".to_owned(), text.clone())]);
+        // A task loaded as stored (marker, recent body) and saved back with an append keeps its older body.
+        let stored = db.task_stored("t.md")?.ok_or("no row")?;
+        db.commit(&[("t.md".into(), format!("{stored}one more line\n"))], &[])?;
+        text.push_str("one more line\n");
+        assert_eq!(db.task("t.md")?.as_deref(), Some(text.as_str()));
+        // A front-matter change keeps the chunks.
+        let status = text.replacen("status: running", "status: blocked", 1);
+        db.commit(&[("t.md".into(), status.clone())], &[])?;
+        assert_eq!(db.task("t.md")?.as_deref(), Some(status.as_str()));
+        // A row written whole (as an older build or a raw statement does) is not doubled.
+        db.sql()
+            .execute("UPDATE tasks SET text = ?1 WHERE name = 't.md'", [&status])?;
+        assert_eq!(db.task("t.md")?.as_deref(), Some(status.as_str()));
+        // Editing the old part keeps the whole text right.
+        let edited = status.replacen("a line of the task's history", "an edited first line", 1);
+        db.commit(&[("t.md".into(), edited.clone())], &[])?;
+        assert_eq!(db.task("t.md")?.as_deref(), Some(edited.as_str()));
+        // Before a rollback, every row holds its whole text again.
+        db.flush_old_bodies()?;
+        assert_eq!(db.task_stored("t.md")?.as_deref(), Some(edited.as_str()));
+        let chunks: i64 = db
+            .sql()
+            .query_row("SELECT COUNT(*) FROM task_old_body", [], |row| row.get(0))?;
+        assert_eq!(chunks, 0);
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
 
     #[test]
     fn mail_receipt_rollback_retry_and_reopen() -> Result<(), Box<dyn std::error::Error>> {
@@ -1202,3 +1519,76 @@ fn pending_message(id: i64) -> crate::daemon::commit::Precondition {
         params: vec![id.into()],
     }
 }
+
+/// A task body longer than this in the task row moves its older part to `task_old_body`.
+const OLD_BODY_AT: usize = 32 * 1024;
+/// How much recent body the task row keeps after such a move.
+const KEEP_RECENT: usize = 8 * 1024;
+
+/// Where the body starts in a task text (`---` frontmatter `---`), if it has frontmatter.
+fn body_start(text: &str) -> Option<usize> {
+    if !text.starts_with("---\n") {
+        return None;
+    }
+    text[3..].find("\n---\n").map(|at| 3 + at + 5)
+}
+
+/// The whole text from a stored row and its older body; a row that already holds the older body (written whole, e.g. by an older build) is kept as it is.
+fn join_body(stored: String, old: &str) -> String {
+    let Some(at) = body_start(&stored) else {
+        return stored;
+    };
+    let marked = older_marker(&stored[..at]).is_some();
+    let front = without_older_marker(&stored[..at]);
+    if old.is_empty() || (!marked && stored[at..].starts_with(old)) {
+        return format!("{front}{}", &stored[at..]);
+    }
+    format!("{front}{old}{}", &stored[at..])
+}
+
+/// The front-matter field a stored row with an older body carries: how many bytes of body lie in `task_old_body`. Loading the row as stored (`task_stored`) gives a task whose body is the recent part; saving it back keeps the older body.
+const OLDER_BODY: &str = "older_body_bytes: ";
+
+fn older_marker(front: &str) -> Option<usize> {
+    front
+        .lines()
+        .find_map(|line| line.strip_prefix(OLDER_BODY))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+fn without_older_marker(front: &str) -> String {
+    if older_marker(front).is_none() {
+        return front.to_owned();
+    }
+    front
+        .split_inclusive('\n')
+        .filter(|line| !line.starts_with(OLDER_BODY))
+        .collect()
+}
+
+/// `front` (ending in the closing `---`) with the marker for `bytes` of older body.
+fn with_older_marker(front: &str, bytes: usize) -> String {
+    let front = without_older_marker(front);
+    match front.strip_suffix("---\n") {
+        Some(head) => format!("{head}{OLDER_BODY}{bytes}\n---\n"),
+        None => front,
+    }
+}
+
+fn run_statements(
+    transaction: &rusqlite::Transaction<'_>,
+    statements: &[Statement],
+) -> Result<(), String> {
+    for statement in statements {
+        transaction
+            .execute(
+                &statement.sql,
+                rusqlite::params_from_iter(&statement.params),
+            )
+            .map_err(error)?;
+    }
+    Ok(())
+}
+
+/// A WAL larger than this is checkpointed by the committing process itself.
+const WAL_MAX: u64 = 64 << 20;

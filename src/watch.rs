@@ -1692,6 +1692,10 @@ pub fn run() -> u8 {
             log(&line);
         }
         log_elapsed("turn replies", phase);
+        // Commits no longer checkpoint the WAL themselves (that cost milliseconds under the store lock); the watcher does it each pass.
+        if let Ok(Some(database)) = store.database() {
+            let _ = database.checkpoint();
+        }
         // Urgent messages the human has read stop lifting their task to the top.
         if let Err(error) = crate::urgent::expire(&settings, &store) {
             log(&format!("urgent marks: {error}"));

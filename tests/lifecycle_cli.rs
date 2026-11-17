@@ -541,8 +541,15 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
     ])?;
     let h = fs::read_to_string(root.join("h.md"))?;
     assert!(h.contains("pending_task_items: []"));
-    assert!(h.contains("stage\":\"resolved"));
+    // A resolved request leaves the rendered file; it stays found by its ID in `resolved_items`.
+    assert!(!h.contains("stage\":\"resolved"));
     let database = rusqlite::Connection::open(workspace.0.join("state/amh.sqlite3"))?;
+    let resolved: i64 = database.query_row(
+        "SELECT COUNT(*) FROM resolved_items WHERE owner = 'h.md' AND json_extract(record, '$.stage') = 'resolved'",
+        [],
+        |row| row.get(0),
+    )?;
+    assert_eq!(resolved, 1);
     let mut query = database.prepare("SELECT kind || ' ' || actor FROM events ORDER BY id")?;
     let events = query
         .query_map([], |row| row.get::<_, String>(0))?
@@ -551,6 +558,7 @@ fn commands_preserve_items_ids_creator_and_cycle_checks() -> Result<(), Box<dyn 
     assert!(events.contains("request blocked"));
     assert!(events.contains("request moved"));
     assert!(events.contains("request resolved"));
+    assert!(events.contains("request archived"));
     assert!(events.contains("omnigent://h"));
     Ok(())
 }
