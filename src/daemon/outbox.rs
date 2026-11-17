@@ -135,9 +135,7 @@ pub fn start(settings: Settings, state_dir: std::path::PathBuf) -> Result<(), St
         .name("amhd-outbox".into())
         .spawn(move || {
             let settings = std::sync::Arc::new(settings);
-            let flying = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeSet::<
-                String,
-            >::new()));
+            let flying = FLYING.get_or_init(Default::default).clone();
             loop {
                 if let Err(error) = dispatch(&settings, &state_dir, &flying, &wake) {
                     eprintln!("amhd: outbox: {error}");
@@ -151,6 +149,16 @@ pub fn start(settings: Settings, state_dir: std::path::PathBuf) -> Result<(), St
 
 type Flying = std::sync::Arc<std::sync::Mutex<std::collections::BTreeSet<String>>>;
 
+static FLYING: std::sync::OnceLock<Flying> = std::sync::OnceLock::new();
+
+/// Sends in flight now.
+pub fn in_flight() -> usize {
+    FLYING
+        .get()
+        .and_then(|f| f.lock().ok().map(|f| f.len()))
+        .unwrap_or(0)
+}
+
 /// Start a send for the oldest due row of every recipient without one in flight.
 fn dispatch(
     settings: &std::sync::Arc<Settings>,
@@ -158,6 +166,10 @@ fn dispatch(
     flying: &Flying,
     wake: &std::sync::mpsc::Sender<()>,
 ) -> Result<(), String> {
+    // A stopping daemon starts no new send.
+    if super::stopping() {
+        return Ok(());
+    }
     let connection = open(state_dir)?;
     let rows: Vec<(String, String, String, i64, i64, String)> = {
         let mut query = connection

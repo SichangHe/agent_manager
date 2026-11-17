@@ -16,6 +16,21 @@ use std::time::{Duration, Instant};
 
 use crate::store::Store;
 
+/// Set by SIGTERM (`systemctl stop`, `amh release`): stop taking requests and sends, finish what is in flight (5 s at most), exit.
+pub static STOPPING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Requests being answered now.
+static ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// The longest a stopping daemon waits for in-flight requests and sends.
+const DRAIN: Duration = Duration::from_secs(5);
+
+extern "C" fn on_term(_: libc::c_int) {
+    STOPPING.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+pub fn stopping() -> bool {
+    STOPPING.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// The state-dir file whose presence sends every client command through the daemon (stage 2 cut-over); removing it is the first step of a rollback.
 pub const CLIENT_MARK: &str = "amhd.client";
 
@@ -114,12 +129,34 @@ fn serve() -> Result<(), String> {
         })
         .map_err(|e| format!("amh: cannot start the watcher: {e}"))?;
     outbox::start(settings.clone(), store.state_dir.clone())?;
+    // SAFETY: the handler only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
+    }
     listen(&store.state_dir)?;
     notify_systemd("READY=1");
     for beat in 1u64.. {
-        std::thread::sleep(Duration::from_secs(3));
-        notify_systemd("WATCHDOG=1");
-        if beat % 100 == 0 {
+        std::thread::sleep(Duration::from_millis(10));
+        if stopping() {
+            // A clean stop: requests and sends in flight finish and are recorded, so an upgrade resends nothing.
+            let began = Instant::now();
+            while (ACTIVE.load(std::sync::atomic::Ordering::SeqCst) > 0 || outbox::in_flight() > 0)
+                && began.elapsed() < DRAIN
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            eprintln!(
+                "amhd: stopping after {} ms; {} requests and {} sends still in flight",
+                began.elapsed().as_millis(),
+                ACTIVE.load(std::sync::atomic::Ordering::SeqCst),
+                outbox::in_flight()
+            );
+            std::process::exit(0);
+        }
+        if beat % 300 == 0 {
+            notify_systemd("WATCHDOG=1");
+        }
+        if beat % 30_000 == 0 {
             eprintln!("amhd: commit-queue wait p99 {} us", queue.wait_p99_us());
         }
     }
@@ -287,6 +324,11 @@ fn listen(state_dir: &Path) -> Result<(), String> {
         .name("amhd-listen".into())
         .spawn(move || {
             for stream in listener.incoming().flatten() {
+                // While stopping, a new connection is closed unanswered: its client retries the same request against the next daemon.
+                if stopping() {
+                    continue;
+                }
+                ACTIVE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let _ = std::thread::Builder::new()
                     .name("amhd-request".into())
                     .spawn(move || answer(stream));
@@ -299,6 +341,13 @@ fn listen(state_dir: &Path) -> Result<(), String> {
 /// Read one request from `stream`, run it, write the answer.
 fn answer(stream: std::os::unix::net::UnixStream) {
     use std::io::{BufRead, BufReader, Read};
+    struct Done;
+    impl Drop for Done {
+        fn drop(&mut self) {
+            ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    let _done = Done;
     // A client that never finishes its line does not keep a thread forever.
     let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
     let mut line = String::new();

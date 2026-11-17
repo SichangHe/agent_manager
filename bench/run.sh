@@ -41,8 +41,11 @@ one_run() {
     script=load.py
     # BENCH_CRASH=1: the crash test, which runs and kills its own daemon.
     if [ "${BENCH_CRASH:-}" = 1 ]; then script=crash.py; client=1; fi
+    # BENCH_DRILL=1 (with BENCH_DRILL_OLD=BINARY): stage-3 upgrade and rollback drills between two daemon builds.
+    if [ "${BENCH_DRILL:-}" = 1 ]; then script=drills.py; client=1; fi
     env -i HOME="$tmp/home" PATH="$here/bin:/usr/bin:/bin" TMPDIR="$tmp/tmp" \
         AMH_STATE_DIR="$tmp/state" AMH_CFG_DIR="$tmp/cfg" AMH_CLIENT="$client" \
+        BENCH_DRILL_OLD="${BENCH_DRILL_OLD:-}" DRILL_RATE="${DRILL_RATE:-54}" DRILL_EVERY_S="${DRILL_EVERY_S:-6}" \
         python3 "$here/$script" "$amh" "$url" "$tmp/work" "$@"
     [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
     cleanup
@@ -50,7 +53,7 @@ one_run() {
     trap - EXIT
 }
 # BENCH_RATE=R BENCH_SECONDS=S: one paced run (open-loop, realistic command mix) instead of the saturation workload.
-if [ "${BENCH_CRASH:-}" = 1 ]; then
+if [ "${BENCH_CRASH:-}" = 1 ] || [ "${BENCH_DRILL:-}" = 1 ]; then
     one_run
     exit
 fi
