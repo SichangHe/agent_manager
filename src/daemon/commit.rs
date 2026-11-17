@@ -72,6 +72,7 @@ impl Queue {
 
     /// Block until the write is durable (fsynced) or refused; only then does the caller answer its client.
     pub fn submit(&self, write: Write) -> Result<Outcome, String> {
+        WROTE.set(true);
         let (reply, answer) = mpsc::channel();
         self.jobs
             .send(Job {
@@ -224,6 +225,15 @@ fn error(error: rusqlite::Error) -> String {
 }
 
 static GLOBAL: std::sync::OnceLock<Queue> = std::sync::OnceLock::new();
+
+thread_local! {
+    static WROTE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether this thread submitted a write since the last call.
+pub fn take_wrote() -> bool {
+    WROTE.replace(false)
+}
 
 thread_local! {
     static ON_WRITER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

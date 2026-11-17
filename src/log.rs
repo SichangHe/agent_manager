@@ -9,7 +9,7 @@ use crate::settings;
 
 /// Who is calling: the agent's Omnigent session, else its tmux pane, else the login name.
 pub fn caller() -> String {
-    let set = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let set = |name: &str| crate::request::var(name).filter(|value| !value.is_empty());
     if let Some(session) = set("OMNIGENT_RUNNER_PRIMARY_SESSION_ID") {
         format!("omnigent://{session}")
     } else if let Some(task) = task_caller() {

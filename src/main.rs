@@ -71,6 +71,13 @@ fn through_daemon(values: &Value) -> Option<ExitCode> {
         ) | (Some("manager"), Some("watch" | "watchers"))
             | (Some("agent"), Some("view"))
             | (Some("quota"), Some("serve"))
+    ) || (
+        // Commands that may ask the human y/N at a terminal run here, where the terminal is.
+        std::io::IsTerminal::is_terminal(&std::io::stdin())
+            && matches!(
+                (values["group"].as_str(), values["action"].as_str()),
+                (Some("task"), Some("close" | "start" | "reopen"))
+            )
     );
     // A message read from standard input stays local, so the daemon never waits on a terminal.
     let stdin_body =

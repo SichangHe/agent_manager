@@ -234,7 +234,12 @@ fn dispatch(
                 let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     match crate::omnigent::held(&sent_to) {
                         Some(why) => Err(why),
-                        None => Ok(crate::omnigent::send(&settings, &sent_to, &body)),
+                        // env.toml and config.toml as they are now, as the watcher reloads them each pass.
+                        None => Ok(crate::omnigent::send(
+                            &crate::settings::load().unwrap_or_else(|_| (*settings).clone()),
+                            &sent_to,
+                            &body,
+                        )),
                     }
                 }));
                 super::crash_point("after-send");
@@ -305,7 +310,7 @@ pub(super) fn finish(
             "UPDATE outbox SET state = 'delivered', last_error = '', first_sent_at = strftime('%Y-%m-%dT%H:%M:%fZ') WHERE id = ?1",
             vec![id.to_owned().into()],
         ),
-        Err(error) if attempts >= ATTEMPTS_MAX => one(
+        Err(error) if attempts >= ATTEMPTS_MAX && !transient(error) => one(
             "UPDATE outbox SET state = 'dead', last_error = ?2 WHERE id = ?1",
             vec![id.to_owned().into(), error.clone().into()],
         ),
@@ -354,6 +359,16 @@ fn store_result(state_dir: &Path, id: &str, update: Write) {
             }
         }
     }
+}
+
+/// A failure that says nothing about the message: the agent is paused or held for quota, no start slot, its runner is offline, or Omnigent is unreachable. Such rows keep retrying (backoff at most 10 min) and never become dead letters, as in the watcher's queue.
+fn transient(error: &str) -> bool {
+    error.contains("keep requests pending")
+        || error == crate::omnigent::NO_SLOT
+        || error.contains("runner")
+        || error.contains("onnect")
+        || error.contains("timed out")
+        || error.contains("Omnigent answered 5")
 }
 
 /// This daemon run; a request claimed by an earlier run that never stored its outcome is run again.

@@ -104,7 +104,14 @@ fn serve() -> Result<(), String> {
         .map_err(|e| format!("amh: cannot start the edit importer: {e}"))?;
     std::thread::Builder::new()
         .name("amhd-watch".into())
-        .spawn(crate::watch::run)
+        .spawn(|| {
+            // The watcher must keep running: restart it when it returns or panics.
+            loop {
+                let code = std::panic::catch_unwind(crate::watch::run);
+                eprintln!("amhd: the watcher ended ({code:?}); restarting it in 10 s");
+                std::thread::sleep(Duration::from_secs(10));
+            }
+        })
         .map_err(|e| format!("amh: cannot start the watcher: {e}"))?;
     outbox::start(settings.clone(), store.state_dir.clone())?;
     listen(&store.state_dir)?;
@@ -349,6 +356,7 @@ pub fn run_request(request: &serde_json::Value) -> serde_json::Value {
     }
     let began = Instant::now();
     crate::store::thread_lock_us();
+    commit::take_wrote();
     let serving = outbox::serving_request(id.as_deref());
     // A panic is an error for this request; its outcome is still recorded, so a retry does not wait for it.
     let (result, out, mut err) = crate::request::serve(&env, &argv, &cwd, || {
@@ -366,6 +374,13 @@ pub fn run_request(request: &serde_json::Value) -> serde_json::Value {
     };
     drop(serving);
     let (lock_wait_us, lock_hold_us) = crate::store::thread_lock_us();
+    // As the CLI does: a request that wrote refreshes the task files before it answers, so the caller reads its own write.
+    if (commit::take_wrote() || lock_hold_us > 0)
+        && let Err(error) =
+            crate::settings::load().and_then(|settings| Store::new(&settings).refresh_exports())
+    {
+        eprintln!("amhd: task files not refreshed yet (the exporter will): {error}");
+    }
     crate::request::serve(&env, &argv, &cwd, || {
         crate::log::record(
             &values.to_string(),

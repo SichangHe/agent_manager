@@ -1848,9 +1848,18 @@ pub fn run(values: &Value) -> Result<u8, String> {
             format!("marked {name} read\n")
         }
         ("manager", "watchers") => {
-            let restarted = systemctl(&["restart", UNIT])?;
+            // After the stage-2 cut-over the daemon runs the watcher; restarting amh-watch would stop it (Conflicts=).
+            let unit = if settings::state_dir()
+                .join(crate::daemon::CLIENT_MARK)
+                .exists()
+            {
+                "amhd.service"
+            } else {
+                UNIT
+            };
+            let restarted = systemctl(&["restart", unit])?;
             return match restarted {
-                0 => systemctl(&["--no-pager", "--lines=3", "status", UNIT]),
+                0 => systemctl(&["--no-pager", "--lines=3", "status", unit]),
                 failed => Ok(failed),
             };
         }

@@ -6,6 +6,7 @@ use std::path::Path;
 use rusqlite::{Connection, params};
 
 /// Today's state files the daemon takes over; each is renamed `<name>.migrated` once imported.
+#[allow(dead_code)] // kept for when the state files move into SQLite
 pub const STATE_FILES: [&str; 4] = [
     "amh-starts.queue.json",
     "amh-notices.json",
@@ -119,6 +120,7 @@ INSERT OR IGNORE INTO outbox (id, channel, recipient, body, source)
 ///
 /// Import and rename are separate steps; a crash between them re-imports the same text on the next start, which is harmless: `state_files` is keyed by name and queued starts by a content-derived id.
 /// A file changed after it was read is left in place for the next start.
+#[allow(dead_code)]
 pub fn import_state_files(
     connection: &mut Connection,
     state_dir: &Path,
@@ -157,6 +159,7 @@ pub fn import_state_files(
 }
 
 /// Queue each start of the legacy queue file (a JSON array of start requests) as a `spawn_jobs` row.
+#[allow(dead_code)]
 fn queue_starts(transaction: &rusqlite::Transaction<'_>, text: &str) -> Result<(), String> {
     let requests: Vec<serde_json::Value> = serde_json::from_str(text)
         .map_err(|e| format!("amh: invalid amh-starts.queue.json: {e}"))?;
@@ -177,6 +180,7 @@ fn queue_starts(transaction: &rusqlite::Transaction<'_>, text: &str) -> Result<(
 }
 
 /// A stable 64-bit FNV-1a hash, so a re-import makes the same id.
+#[allow(dead_code)]
 fn fnv1a(bytes: &[u8]) -> u64 {
     bytes.iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3)
