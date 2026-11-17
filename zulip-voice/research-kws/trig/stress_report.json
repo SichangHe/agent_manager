@@ -1,0 +1,416 @@
+{
+ "attention": {
+  "kws_pct": 100,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  }
+ },
+ "katana": {
+  "kws_pct": 86,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 71,
+   "quiet": 100,
+   "noisy": 71,
+   "pitchup": 86,
+   "pitchdown": 71
+  }
+ },
+ "tomato": {
+  "kws_pct": 88,
+  "stt_pct": 98,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 86,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 71,
+   "quiet": 100,
+   "noisy": 71,
+   "pitchup": 86,
+   "pitchdown": 86
+  }
+ },
+ "macaroni": {
+  "kws_pct": 96,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 71,
+   "pitchup": 100,
+   "pitchdown": 100
+  }
+ },
+ "next": {
+  "kws_pct": 0,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "back": {
+  "kws_pct": 0,
+  "stt_pct": 90,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 86,
+   "quiet": 100,
+   "noisy": 57,
+   "pitchup": 100,
+   "pitchdown": 86
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "again": {
+  "kws_pct": 0,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "next message": {
+  "kws_pct": 0,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "previous message": {
+  "kws_pct": 0,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "skip forward three": {
+  "kws_pct": 0,
+  "stt_pct": 100,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "stop": {
+  "kws_pct": 0,
+  "stt_pct": 86,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 86,
+   "fast": 86,
+   "slow": 86,
+   "quiet": 86,
+   "noisy": 86,
+   "pitchup": 86,
+   "pitchdown": 86
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "play": {
+  "kws_pct": 0,
+  "stt_pct": 96,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 71,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "switch to human manager": {
+  "kws_pct": 0,
+  "stt_pct": 98,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 86,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "next agent": {
+  "kws_pct": 0,
+  "stt_pct": 98,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 86,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 100,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "switch back": {
+  "kws_pct": 0,
+  "stt_pct": 98,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 86,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "send log": {
+  "kws_pct": 0,
+  "stt_pct": 98,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 86,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "cancel": {
+  "kws_pct": 0,
+  "stt_pct": 98,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 100,
+   "quiet": 100,
+   "noisy": 86,
+   "pitchup": 100,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 0,
+   "fast": 0,
+   "slow": 0,
+   "quiet": 0,
+   "noisy": 0,
+   "pitchup": 0,
+   "pitchdown": 0
+  }
+ },
+ "attention please check the build and tell me what failed tomato": {
+  "kws_pct": 96,
+  "stt_pct": 84,
+  "n": 49,
+  "by_cond_stt": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 86,
+   "quiet": 100,
+   "noisy": 14,
+   "pitchup": 86,
+   "pitchdown": 100
+  },
+  "by_cond_kws": {
+   "normal": 100,
+   "fast": 100,
+   "slow": 86,
+   "quiet": 100,
+   "noisy": 86,
+   "pitchup": 100,
+   "pitchdown": 100
+  }
+ }
+}
