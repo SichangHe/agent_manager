@@ -12,6 +12,9 @@ use crate::quota_core::{Bucket, Kind, Status, WinState};
 /// The conservative target leaves this much of each account's quota (in %) for the last hours before its reset, where burning faster is always possible.
 // 🧑 "We can always burn quota faster near the end if needed, so being a bit conservative is nice"
 pub const MARGIN_PCT: f64 = 5.0;
+/// A reading older than this, with no auth error, means the account had no traffic since: idle.
+const IDLE_AFTER_S: i64 = 900;
+const WEEK_S: i64 = 7 * 24 * 3600;
 /// Hours of samples the burn rate is fitted over, by default.
 pub const WINDOW_H: f64 = 6.0;
 /// The shortest stretch of samples a rate is fitted from.
@@ -221,9 +224,18 @@ pub fn report(
             (Kind::H5, "5h", "h5", "h5_reset"),
         ] {
             let (used, reset) = window(b, kind);
-            let Some(used) = used.or(if exhausted { Some(100.0) } else { None }) else {
+            let Some(mut used) = used.or(if exhausted { Some(100.0) } else { None }) else {
                 continue;
             };
+            let mut reset = reset;
+            // A stale reading whose window has reset since: a 7d window starts again at 0 % with its next reset a week on; a 5h window's next start is unknown.
+            if let Some(at) = reset.filter(|at| *at <= now) {
+                if kind == Kind::H5 {
+                    continue;
+                }
+                used = 0.0;
+                reset = Some(at + ((now - at) / WEEK_S + 1) * WEEK_S);
+            }
             let mut query = db
                 .prepare(&format!("SELECT t, {used_col}, {reset_col} FROM samples WHERE principal = ?1 AND t >= ?2 AND {used_col} IS NOT NULL ORDER BY t"))
                 .map_err(|e| format!("amh: {e}"))?;
@@ -238,10 +250,34 @@ pub fn report(
                 .map_err(|e| format!("amh: {e}"))?
                 .collect::<Result<_, _>>()
                 .map_err(|e| format!("amh: {e}"))?;
-            per_window.insert(
-                name.to_owned(),
-                account_pace(&samples, used, reset, exhausted && used >= 99.5, now),
-            );
+            // No reading for a while, and no auth error: the account is idle, not unknown (readings come only with traffic). Its last reading carries forward to now, so the fit sees the flat stretch (burn near 0 since then).
+            let last_read = db
+                .query_row(
+                    &format!("SELECT t, {used_col}, {reset_col} FROM samples WHERE principal = ?1 AND {used_col} IS NOT NULL ORDER BY t DESC LIMIT 1"),
+                    params![b.principal],
+                    |r| Ok(Sample { t: r.get(0)?, used: r.get(1)?, reset: r.get(2)? }),
+                )
+                .ok();
+            let idle_h = match &last_read {
+                Some(last)
+                    if now - last.t > IDLE_AFTER_S && b.auth_error.is_none() && !exhausted =>
+                {
+                    Some((now - last.t) as f64 / 3600.0)
+                }
+                _ => None,
+            };
+            let mut pace = account_pace(&samples, used, reset, exhausted && used >= 99.5, now);
+            if let Some(idle) = idle_h {
+                // Burning nothing now. The ± is one integer step of the next reading over the idle stretch: small after a long idle, large right after the last reading.
+                pace["rate_pct_per_h"] = json!(0.0);
+                pace["rate_uncertainty"] = json!(1.0 / idle.max(0.25));
+                pace["fit_span_h"] = json!(idle);
+                pace["factor"] = json!(0.0);
+                pace["dry_in_h"] = Value::Null;
+                pace["runs_dry_before_reset"] = json!(false);
+            }
+            pace["assumed_idle_for_h"] = json!(idle_h);
+            per_window.insert(name.to_owned(), pace);
         }
         if per_window.is_empty() {
             continue;
@@ -513,5 +549,61 @@ mod band_tests {
         // An account about to reset with much left raises the floor.
         let (floor, _) = super::band(&[(50.0, 10.0), (90.0, 100.0)]);
         assert!((floor - 5.0).abs() < 1e-9);
+    }
+}
+
+#[cfg(test)]
+mod idle_tests {
+    use crate::quota_core::{Bucket, Kind, Status, WinState, Window};
+
+    fn bucket(used: f64, read_at: i64, reset: i64, status: Status) -> Bucket {
+        Bucket {
+            principal: "claude:x".into(),
+            pool: "claude".into(),
+            creds: vec!["claude-x.json".into()],
+            windows: vec![Window {
+                kind: Kind::D7,
+                state: WinState::Active,
+                used_pct: used,
+                resets_at: Some(reset),
+            }],
+            observed_at: Some(read_at),
+            status,
+            since: read_at,
+            streak: 0,
+            next_reset: Some(reset),
+            auth_error: None,
+        }
+    }
+
+    #[test]
+    fn an_account_without_new_readings_is_idle_and_under_pace_not_unknown() -> Result<(), String> {
+        let dir = std::env::temp_dir().join(format!("amh-pace-idle-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let now = 2_000_000_000;
+        let reset = now + 100 * 3600;
+        // Burned 20 % over the 4 h before its last reading, 3 h ago; nothing read since.
+        let readings: Vec<_> = (0..=16)
+            .map(|i| {
+                bucket(
+                    20.0 + 20.0 * i as f64 / 16.0,
+                    now - 7 * 3600 + i * 900,
+                    reset,
+                    Status::Available,
+                )
+            })
+            .collect();
+        super::record(&dir, &readings)?;
+        let stale = bucket(40.0, now - 3 * 3600, reset, Status::Unknown);
+        let report = super::report(&dir, &[stale], now, super::WINDOW_H)?;
+        let p = &report["providers"]["claude"];
+        let w = &p["accounts"][0]["windows"]["7d"];
+        assert_eq!(w["rate_pct_per_h"], 0.0);
+        assert!((w["assumed_idle_for_h"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        assert_eq!(p["verdict"], "under");
+        assert!(
+            p["scale_concurrency_by"].is_null() && p["scale_reason"] == "no burn now: increase"
+        );
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())
     }
 }
