@@ -533,10 +533,14 @@ impl Database {
             let Ok(mut task) = crate::tasks::Task::parse(&owner, &text) else {
                 continue;
             };
-            let mut list: Vec<Value> = task
-                .field(crate::requests::KEY)
-                .and_then(|field| serde_json::from_str(field).ok())
-                .unwrap_or_default();
+            // A field that does not parse is left alone rather than replaced.
+            let mut list: Vec<Value> = match task.field(crate::requests::KEY) {
+                None => Vec::new(),
+                Some(field) => match serde_json::from_str(field) {
+                    Ok(list) => list,
+                    Err(_) => continue,
+                },
+            };
             for record in records {
                 if !list.iter().any(|known| known["id"] == record["id"]) {
                     list.push(record);
@@ -555,6 +559,10 @@ impl Database {
                 )
                 .map_err(error)?;
         }
+        // The older build re-places tasks by its own records: clear ours so nothing is skipped.
+        transaction
+            .execute("DELETE FROM records WHERE name LIKE 'placed:%'", [])
+            .map_err(error)?;
         transaction.commit().map_err(error)?;
         Ok(restored)
     }
@@ -617,7 +625,8 @@ impl Database {
             .collect::<Result<_, _>>()
             .map_err(error)?;
         for (seq, name, address, section) in moves {
-            if let Some(next) = crate::taskfile::placed(&text, &name, &address, &section)? {
+            // A move that cannot apply (e.g. a section missing from a hand-edited list) is dropped, not retried forever.
+            if let Ok(Some(next)) = crate::taskfile::placed(&text, &name, &address, &section) {
                 text = next;
             }
             last = seq;
@@ -640,7 +649,7 @@ impl Database {
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
         let Some((text, last)) = Self::folded_todo(&transaction)? else {
-            return Ok(());
+            return Err("amh: no TODO.md in database".to_owned());
         };
         let changed = change(text)?;
         transaction

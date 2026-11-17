@@ -385,7 +385,11 @@ impl Store {
             .lock()
             .map_err(|error| format!("amh: cannot take the export lock: {error}"))?;
         // Task-list moves queued by `place` go into TODO.md here, outside the store lock.
-        Database::open(&self.state_dir.join("amh.sqlite3"))?.fold_todo()?;
+        if let Err(error) = Database::open(&self.state_dir.join("amh.sqlite3"))
+            .and_then(|mut database| database.fold_todo())
+        {
+            eprintln!("amh: folding task-list moves failed: {error}");
+        }
         let mut git = None;
         let mut untaken_names = Vec::new();
         let through = database.latest_event_id()?;
@@ -1328,7 +1332,7 @@ impl Store {
             return Ok(0);
         };
         let mut done = 0;
-        for name in database.large_rows(14 * 1024, limit * 4)? {
+        for name in database.large_rows(14 * 1024, usize::MAX)? {
             if done == limit {
                 break;
             }
@@ -1337,9 +1341,13 @@ impl Store {
             if database.record(&key)?.as_deref() == Some(size.to_string().as_str()) {
                 continue;
             }
-            let _lock = self.lock()?;
-            let task = self.load(&name)?;
-            self.save(&task)?;
+            // A row that fails to load or save is marked too, and not tried again until it changes.
+            {
+                let _lock = self.lock()?;
+                if let Err(error) = self.load(&name).and_then(|task| self.save(&task)) {
+                    eprintln!("amh: compacting {name} failed: {error}");
+                }
+            }
             let after = database.task_stored(&name)?.map_or(0, |text| text.len());
             database.set_record(&key, &after.to_string())?;
             done += 1;
