@@ -425,6 +425,10 @@ fn take_in(
     write_private(stored, &decide::stored_mail(&mail.subject, &mail.body))
         .map_err(|error| format!("cannot write {}: {error}", stored.display()))?;
     let mut task = store.load(task)?;
+    if decide::reopens(&task) {
+        crate::tasks::set_status(&mut task, "running", None)?;
+        log(&format!("reopened {}: the human wrote in its thread", task.name));
+    }
     task.body = decide::queued(&task.body, name);
     store.queue_mail(Some(name), &task, name)?;
     Ok(task.name)

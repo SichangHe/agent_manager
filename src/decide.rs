@@ -148,6 +148,11 @@ fn staffed(task: &Task) -> bool {
     task.is_active() && task.address() != "retired"
 }
 
+/// A closed task whose agent session can be resumed, so the human's message in its thread reopens it.
+pub fn reopens(task: &Task) -> bool {
+    task.status() == "done" && task.address().starts_with(crate::omnigent::PREFIX)
+}
+
 /// Pick the task a human email belongs to, among every task file: its `[tag]`, else that task's manager, else the main manager.
 // 🧑 "it did not get routed to the correct Omnigent agent or even its task file"
 pub fn route<'a>(
@@ -175,6 +180,9 @@ pub fn route<'a>(
         }
         Some(tagged) if staffed(tagged) && for_manager(body) => manager_of(tagged).or(Some(tagged)),
         Some(tagged) if staffed(tagged) => Some(tagged),
+        // 🧑 "Why do those messages go to you? I send them directly to that agent."
+        // A closed task's agent session still exists: the message reopens the task and resumes that agent.
+        Some(tagged) if reopens(tagged) => Some(tagged),
         Some(tagged) => manager_of(tagged),
         None => None,
     };
@@ -1522,7 +1530,7 @@ mod tests {
             ("[t_sub] hello", "not for manager really\nok", "t_sub.md"),
             ("[t_sub] hello", "please\nterminate this agent", "t_sub.md"),
             ("[t_main] hello", "for manager", "t_main.md"),
-            ("[t_done] hello", "more work", "t_work.md"),
+            ("[t_done] hello", "more work", "t_done.md"),
             ("[t_old] hello", "more work", "t_sub.md"),
             ("[absent_tag] hello", "x", "t_main.md"),
             ("no tag", "x", "t_main.md"),
