@@ -401,6 +401,8 @@ impl Store {
             {
                 continue;
             }
+            // The row as stored, read before the whole text, so `exportrow:` never vouches for a newer row than was exported.
+            let row_before = database.task_stored(&name)?;
             let Some(text) = database.task(&name)? else {
                 continue;
             };
@@ -436,6 +438,16 @@ impl Store {
             }
             if recorded.as_deref() != Some(&text) {
                 database.set_record(&key, &text)?;
+            }
+            // A long task's row holds only its recent body: remember the row too, so the next pass sees it unchanged without joining its body.
+            if let Some(row) = row_before
+                && row != text
+                && database.task_stored(&name)?.as_ref() == Some(&row)
+            {
+                let row_key = format!("exportrow:{name}");
+                if database.record(&row_key)?.as_deref() != Some(&row) {
+                    database.set_record(&row_key, &row)?;
+                }
             }
         }
         database.set_record("export:through", &through.to_string())?;

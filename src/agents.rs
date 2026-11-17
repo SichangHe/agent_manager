@@ -438,7 +438,11 @@ pub fn replace(
     }
     let open = crate::requests::listed(&mut task)?;
     let root = store.root.display().to_string();
-    let request = work::replacement(&task, &old, &root, message, &open);
+    // The starter request sits at the start of the body, which for a long task is kept apart: read it whole.
+    let whole = store
+        .load_whole(&task.name)
+        .unwrap_or_else(|_| task.clone());
+    let request = work::replacement(&whole, &old, &root, message, &open);
     let is_manager = task.field("is_manager") == Some("true");
     let mut guides = work::guides(is_manager);
     if old == settings::get(settings, "main_manager") {

@@ -43,8 +43,52 @@ pub fn archive_events(
     Ok(ids.len())
 }
 
+/// Move requests resolved over 30 days ago from `resolved_items` (where they go when resolved) to the dated archive files.
+fn archive_resolved_items(store: &Store, now: DateTime<Utc>) -> Result<usize, String> {
+    let Some(database) = store.database()? else {
+        return Ok(0);
+    };
+    let cutoff = (now - Duration::days(30)).to_rfc3339();
+    let rows: Vec<(String, String, String, String)> = {
+        let mut query = database
+            .sql()
+            .prepare("SELECT id, owner, resolved_at, record FROM resolved_items WHERE resolved_at IS NOT NULL AND resolved_at < ?1")
+            .map_err(|e| format!("amh: SQLite: {e}"))?;
+        query
+            .query_map([&cutoff], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })
+            .and_then(|rows| rows.collect())
+            .map_err(|e| format!("amh: SQLite: {e}"))?
+    };
+    let mut days: BTreeMap<String, Vec<Value>> = BTreeMap::new();
+    for (_, owner, resolved_at, record) in &rows {
+        let Ok(time) = DateTime::parse_from_rfc3339(resolved_at) else {
+            continue;
+        };
+        let mut record: Value = serde_json::from_str(record).unwrap_or_default();
+        record["owner"] = Value::from(owner.clone());
+        days.entry(time.with_timezone(&Utc).format("%Y-%m-%d").to_string())
+            .or_default()
+            .push(record);
+    }
+    let mut count = 0;
+    for (day, records) in days {
+        persist_batch(&store.root.join("archive"), &day, "requests", &records)?;
+        count += records.len();
+    }
+    for (id, ..) in &rows {
+        database
+            .sql()
+            .execute("DELETE FROM resolved_items WHERE id = ?1", [id])
+            .map_err(|e| format!("amh: SQLite: {e}"))?;
+    }
+    Ok(count)
+}
+
 /// Archive old resolved requests only after their dated records are durably stored.
 pub fn archive_requests(store: &Store, now: DateTime<Utc>) -> Result<usize, String> {
+    let mut count = archive_resolved_items(store, now)?;
     let mut tasks = store.all()?;
     let mut referenced = BTreeSet::new();
     for task in &tasks {
@@ -53,7 +97,6 @@ pub fn archive_requests(store: &Store, now: DateTime<Utc>) -> Result<usize, Stri
         }
     }
     let cutoff = now - Duration::days(30);
-    let mut count = 0;
     for task in &mut tasks {
         let records = requests::read(task)?;
         let mut keep = Vec::new();
@@ -214,8 +257,8 @@ mod tests {
             ],
         );
         store.save(&task)?;
-        // Resolved requests leave the task text when it is saved (to `resolved_items`); nothing is left to archive from it.
-        assert_eq!(archive_requests(&store, now)?, 0);
+        // Resolved requests leave the task text when it is saved (to `resolved_items`); those resolved over 30 days ago go on to the archive.
+        assert_eq!(archive_requests(&store, now)?, 2);
         let stored = store.load("a.md")?;
         assert_eq!(
             requests::read(&stored)?
@@ -225,9 +268,8 @@ mod tests {
             vec!["a:4"]
         );
         let database = store.database()?.ok_or("no database")?;
-        for id in ["a:1", "a:2", "a:3"] {
-            assert!(database.resolved_item(id)?);
-        }
+        assert!(!database.resolved_item("a:1")? && !database.resolved_item("a:2")?);
+        assert!(database.resolved_item("a:3")?);
         assert_eq!(stored.body, "history\n");
         assert_eq!(stored.field("request_next"), Some("5"));
         assert_eq!(archive_requests(&store, now)?, 0);

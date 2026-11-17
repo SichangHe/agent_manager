@@ -112,7 +112,7 @@ impl Database {
         if ready && has_schema() {
             connection
                 .execute_batch(
-                    "PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA wal_autocheckpoint=0;",
+                    "PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA wal_autocheckpoint=0; PRAGMA journal_size_limit=33554432;",
                 )
                 .map_err(error)?;
             return Ok(Self(
@@ -125,6 +125,7 @@ impl Database {
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL; -- WAL: no corruption on a crash; the last commits may be lost on power loss, not on a process crash
              PRAGMA wal_autocheckpoint=0; -- checkpoints run in the background (`checkpoint`), not inside a commit that holds the store lock
+             PRAGMA journal_size_limit=33554432; -- a checkpointed WAL shrinks back to 32 MB
              PRAGMA mmap_size=0;
              CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (name TEXT PRIMARY KEY, text TEXT NOT NULL);
@@ -334,6 +335,19 @@ impl Database {
     /// The whole task text from its stored form.
     fn compose(&self, name: &str, stored: String) -> Result<String, String> {
         let (old, _) = self.old_body(name)?;
+        // The row and its chunks are read in two statements; a commit that moved a chunk in between shows as a marker that does not match: read both again.
+        let marker = body_start(&stored).and_then(|at| older_marker(&stored[..at]));
+        if marker.is_some_and(|bytes| bytes != old.len()) {
+            let transaction = self.0.unchecked_transaction().map_err(error)?;
+            let stored: String = transaction
+                .query_row("SELECT text FROM tasks WHERE name = ?1", [name], |row| {
+                    row.get(0)
+                })
+                .map_err(error)?;
+            let (old, _) = self.old_body(name)?;
+            drop(transaction);
+            return Ok(join_body(stored, &old));
+        }
         Ok(join_body(stored, &old))
     }
 
@@ -376,9 +390,19 @@ impl Database {
             };
             // Text with a block still waiting to be queued stays in the row, where amh looks for it.
             if recent.len() > OLD_BODY_AT && crate::taskfile::pending_blocks(recent).is_empty() {
-                let from = recent.len() - KEEP_RECENT;
+                let mut from = recent.len() - KEEP_RECENT;
+                while !recent.is_char_boundary(from) {
+                    from += 1;
+                }
+                // Cut only after a newline outside any ``` fence, so the recent part keeps the fence pairing pending blocks rely on.
                 if let Some(cut) = recent[from..].find('\n').map(|i| from + i + 1)
                     && cut < recent.len()
+                    && recent[..cut]
+                        .lines()
+                        .filter(|line| line.trim_start().starts_with("```"))
+                        .count()
+                        % 2
+                        == 0
                 {
                     extra.push(Statement {
                         sql: "INSERT INTO task_old_body (name, seq, text) VALUES (?1, ?2, ?3)"
@@ -407,8 +431,26 @@ impl Database {
 
     /// Put every older body back into its task row and drop the chunks, so a build without `task_old_body` reads whole tasks (before a rollback).
     pub fn flush_old_bodies(&mut self) -> Result<usize, String> {
-        let bodies = self.old_bodies()?;
-        let transaction = self.0.transaction().map_err(error)?;
+        // One write transaction from the first read: no save can move a chunk in between.
+        let transaction = self
+            .0
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        let mut bodies: std::collections::BTreeMap<String, String> = Default::default();
+        {
+            let mut query = transaction
+                .prepare("SELECT name, text FROM task_old_body ORDER BY name, seq")
+                .map_err(error)?;
+            let rows = query
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(error)?;
+            for row in rows {
+                let (name, chunk) = row.map_err(error)?;
+                bodies.entry(name).or_default().push_str(&chunk);
+            }
+        }
         for (name, old) in &bodies {
             let stored: Option<String> = transaction
                 .query_row("SELECT text FROM tasks WHERE name = ?1", [name], |row| {
@@ -568,8 +610,9 @@ impl Database {
                      SELECT name FROM tasks WHERE status IN ('running', 'long_running', 'blocked')
                      UNION SELECT 'TODO.md'
                      UNION SELECT subject FROM events WHERE id > ?2)
-                 SELECT t.name, COALESCE(m.text, ''), ?1 AND e.text IS t.text FROM tasks t
+                 SELECT t.name, COALESCE(m.text, ''), ?1 AND (e.text IS t.text OR r.text IS t.text) FROM tasks t
                  LEFT JOIN records e ON e.name = 'export:' || t.name
+                 LEFT JOIN records r ON r.name = 'exportrow:' || t.name
                  LEFT JOIN records m ON m.name = 'month:' || t.name
                  WHERE ?2 IS NULL OR t.name IN (SELECT name FROM hot)
                  ORDER BY t.name",
@@ -1279,6 +1322,24 @@ fn error(error: rusqlite::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_long_body_of_wide_characters_and_fences_splits_safely()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("amh-body-wide-{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let mut db = Database::open(&dir.join("a.sqlite3"))?;
+        // Three-byte characters with no newline near the cut, then an open fence: nothing may panic, and the text reads back whole.
+        let text = format!(
+            "---\nstatus: running\n---\n{}\n```\n{}\n",
+            "日本語".repeat(20_000),
+            "inside a fence\n".repeat(1000)
+        );
+        db.commit(&[("w.md".into(), text.clone())], &[])?;
+        assert_eq!(db.task("w.md")?.as_deref(), Some(text.as_str()));
+        std::fs::remove_dir_all(&dir)?;
+        Ok(())
+    }
 
     #[test]
     fn a_long_body_is_stored_in_chunks_and_read_whole() -> Result<(), Box<dyn std::error::Error>> {
