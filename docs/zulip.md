@@ -1,0 +1,52 @@
+# Zulip human messages
+(authored by agents unless marked 🧑)
+
+- 🧑 "Set it up s.t. we do Zulip instead of emails, and start messaging me with Zulip"
+- `human.transport = "zulip"` switches all human updates from SMTP to Zulip
+- 🧑 "I want a setup where I only talk to Claude agents and only Claude writes and make top level decisions."
+    - `human.writers = "claude"`: `amh tell human` refuses a task on any other tool and tells it to report to its manager; unset allows every tool
+    - `human.writer_sessions.SESSION_ID = "TASK_TAG:TOOL:MODEL"` permits one exact task/session/tool/model combination after checking the live session model
+      - an API failure, model change, replacement session, or different task does not match
+    - `manager.tools = "claude"`: `amh task start --manager` refuses any other tool
+  - `zulip.human_id` identifies the human by numeric Zulip user ID
+  - `zulip.env_file` points to a private credential file
+    - `ZULIP_SITE`, `ZULIP_BOT_EMAIL`, `ZULIP_BOT_API_KEY`
+    - keep credentials outside the repository with permission `0600`
+- 🧑 "Implement threading"
+  - `zulip.stream_id` selects a private channel shared only with the bot and human
+  - one topic per task tag preserves independent task threads
+  - replies route by topic without requiring a task header
+  - omitting the channel selects direct messages
+- each update starts with `[task_tag]`
+  - reply with that header or quote the message to address its task
+  - untagged replies go to the main manager
+  - incoming messages use the existing persisted task delivery queue
+  - SQLite record `amh-zulip-cursor.txt` remembers the last captured message across restarts
+  - SQLite record `amh-zulip-read.txt` remembers messages already read; legacy files import on first use
+- `amh tell human --replaces zulip:ID` deletes the indicated bot message after the replacement is sent
+  - a later human reply in the same topic prevents replacement deletion, including queued retries
+  - a failed reply check preserves the message for a later retry
+  - age-based cleanup remains separate
+  - failed deletion remains queued for the watcher to retry
+  - a deletion failure does not hide the replacement's sent Message-ID
+- after sending, the caller receives a consolidation reminder for earlier retained bot updates in the same task
+  - enabled by default; `zulip.consolidation_reminder = false` disables this check
+  - checks up to 100 recent messages; direct messages additionally require the exact task header
+  - shows their IDs; agents read their contents in the task topic before replacing them
+  - retained messages do not establish whether the human read them
+  - consolidate still-pending details and all open requests in the next useful update, then explicitly replace superseded IDs
+  - never automatically summarizes or deletes messages; human messages are excluded
+- external Gmail intake continues
+  - SMTP outbox flushing pauses while Zulip is selected
+  - existing queued email remains available for deliberate migration
+- attachments upload to Zulip and appear as links in the private message
+  - retain the existing combined size limit of 20 MB
+- `amh-zulip-aliases.json` maps migrated email Message-IDs to `zulip:ID` for subsequent replacement
+- failed sends retain private payloads in `amh-zulip-pending`
+  - verify delivery before retrying because a lost network response may conceal a successful send
+  - these payloads are not automatically retried
+
+manager reports
+- `report_sink.TAG = "FILE"`: `amh tell manager` from a worker of the task with tag TAG, and that worker's closing notice, are appended to FILE and do not wake the manager; for workers started by a script
+    - the watcher's failure reports still wake the manager
+    - so do `amh tell manager --blocked` and `--done`, and a worker's own close

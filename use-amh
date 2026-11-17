@@ -1,0 +1,4 @@
+#!/bin/sh
+# 🧑 "Leave temporary dummy commands that simply say use amh instead"
+echo "$(basename "$0") is gone; use amh instead. Start at: amh --help" >&2
+exit 1
