@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -80,10 +80,10 @@ fn human_wrote_to(store: &Store, tag: &str, words: &str) -> bool {
 /// Whether the human runs this command: an interactive terminal outside any agent session (scripts and agents' shells have no terminal), or a detached start the human ran.
 pub fn human_terminal() -> bool {
     use std::io::IsTerminal;
-    match std::env::var("AMH_HUMAN_STARTED").as_deref() {
-        Ok("1") => true,
-        Ok(_) => false,
-        Err(_) => omnigent::own_address().is_err() && io::stdin().is_terminal(),
+    match crate::request::var("AMH_HUMAN_STARTED").as_deref() {
+        Some("1") => true,
+        Some(_) => false,
+        None => omnigent::own_address().is_err() && io::stdin().is_terminal(),
     }
 }
 
@@ -347,7 +347,7 @@ type Settings = BTreeMap<String, String>;
 
 /// Print to standard output; a reader that went away, as in `amh agent list | head`, does not fail the action.
 fn say(text: &str) {
-    let _ = io::stdout().write_all(text.as_bytes());
+    crate::request::say(text);
 }
 
 /// Read a text file as Python's text mode did, so the texts sent on stay the same.
@@ -764,7 +764,7 @@ fn short(values: &Value) -> Result<u8, String> {
                 Some(goal) => goal.to_owned(),
                 None => typed(name)?,
             };
-            let here = std::env::current_dir()
+            let here = Ok::<_, std::io::Error>(crate::request::cwd())
                 .map_err(|error| format!("amh: cannot tell the current directory: {error}"))?;
             let new = NewTask {
                 account: None,
@@ -940,6 +940,9 @@ pub fn run(values: &Value) -> Result<u8, String> {
         given.filter_map(Value::as_str).collect()
     };
     let action = (need("group"), need("action"));
+    if action == ("short", "daemon") {
+        return Ok(crate::daemon::run());
+    }
     if action.0 == "short" {
         return short(values);
     }
@@ -1085,13 +1088,31 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 }
             };
             let message = work::envelope(&from, &message);
-            omnigent::send(&settings, &to, &message).map_err(failed)?;
+            // Inside amhd the message becomes an outbox row and the caller does not wait for Omnigent; a held agent is still refused.
+            if crate::request::serving() && std::env::var("AMHD_OUTBOX").as_deref() != Ok("0") {
+                if let Some(why) = omnigent::held(&to) {
+                    return Err(format!("amh: {to} is held ({why}); keep requests pending"));
+                }
+                crate::daemon::outbox::enqueue(&settings::state_dir(), &to, &message, &from)?;
+            } else {
+                omnigent::send(&settings, &to, &message).map_err(failed)?;
+            }
             say(NO_REPEAT);
-            let _lock = store.lock()?;
-            clear_stopped(&store, &to)?;
+            // The writer lock is taken only when there is something to write: a stopped mark to clear, or routed mail to hand over.
+            let stopped = store
+                .active_mentioning(std::slice::from_ref(&to))?
+                .iter()
+                .any(|task| task.address() == to && task.field("agent_stopped") == Some("true"));
             // mdbook_pr3086.md: "routing ownership should match the task that handles them"
-            if need("who").ends_with(".md") {
-                hand_over_mail(&store, text("task_file"), need("who"), &message)?;
+            let routed = need("who").ends_with(".md") && !decide::routed_names(&message).is_empty();
+            if stopped || routed {
+                let _lock = store.lock()?;
+                if stopped {
+                    clear_stopped(&store, &to)?;
+                }
+                if routed {
+                    hand_over_mail(&store, text("task_file"), need("who"), &message)?;
+                }
             }
             String::new()
         }
@@ -1619,8 +1640,24 @@ pub fn run(values: &Value) -> Result<u8, String> {
         }
         ("agent", "status") => {
             let at = agents::address_of(&store, need("who"))?;
+            // From the watcher's scan when it is under 2 min old, else asked live.
+            struct EndScan;
+            impl Drop for EndScan {
+                fn drop(&mut self) {
+                    omnigent::end_scan();
+                }
+            }
+            let _end = EndScan;
+            let note = match omnigent::use_saved_scan(&store.state_dir) {
+                Some(age_s) if age_s <= 120 => format!(" (watcher scan {age_s} s ago)"),
+                _ => {
+                    omnigent::end_scan();
+                    String::new()
+                }
+            };
             let (state, evidence) = omnigent::status(&settings, &at);
-            format!("{state}: {evidence}\n")
+            omnigent::end_scan();
+            format!("{state}: {evidence}{note}\n")
         }
         ("agent", "stop") => {
             let at = agents::address_of(&store, need("who"))?;

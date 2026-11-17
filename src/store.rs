@@ -78,6 +78,16 @@ fn untouched_since(path: &std::path::Path, since: Option<i128>) -> bool {
 /// Microseconds this process waited for the writer lock and held it, over all its acquisitions.
 // The rework design's stage 0: "log `duration_ms`, `lock_wait_ms`, `lock_hold_ms`, build id in each `amh-actions.log` exit line; clear the lock file's holder on release"
 pub static LOCK_WAIT_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+thread_local! {
+    /// This thread's lock wait and hold, in microseconds, for the daemon's per-request log.
+    static THREAD_LOCK_US: std::cell::Cell<(u64, u64)> = const { std::cell::Cell::new((0, 0)) };
+}
+
+/// This thread's lock wait and hold so far, in microseconds; reading resets them.
+pub fn thread_lock_us() -> (u64, u64) {
+    THREAD_LOCK_US.replace((0, 0))
+}
 pub static LOCK_HOLD_US: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The held writer lock; dropping it clears the holder line and counts the hold time.
@@ -94,6 +104,10 @@ impl Drop for Held {
         let _ = self.file.set_len(0);
         let held_us = self.since.elapsed().as_micros() as u64;
         LOCK_HOLD_US.fetch_add(held_us, std::sync::atomic::Ordering::Relaxed);
+        THREAD_LOCK_US.with(|cell| {
+            let (wait, hold) = cell.get();
+            cell.set((wait, hold + held_us));
+        });
     }
 }
 
@@ -163,9 +177,13 @@ impl Store {
             began.elapsed().as_micros() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
+        THREAD_LOCK_US.with(|cell| {
+            let (wait, hold) = cell.get();
+            cell.set((wait + began.elapsed().as_micros() as u64, hold));
+        });
         let held_from = std::time::Instant::now();
         let importing = std::time::Instant::now();
-        let me: Vec<String> = std::env::args().take(4).collect();
+        let me: Vec<String> = crate::request::args().into_iter().take(4).collect();
         lock.set_len(0).map_err(failed)?;
         lock.write_all(format!("pid {} {}", std::process::id(), me.join(" ")).as_bytes())
             .map_err(failed)?;
@@ -265,6 +283,23 @@ impl Store {
         ))
     }
 
+    /// The daemon's form of `with_typed_lines`: `name` as committed (`text`) plus lines typed into its file since `since`.
+    pub fn typed_edit(
+        &self,
+        database: &Database,
+        name: &str,
+        text: &str,
+        since: Option<i128>,
+    ) -> Result<Option<Task>, String> {
+        let month = database
+            .record(&format!("month:{name}"))?
+            .unwrap_or_default();
+        if name == "TODO.md" || untouched_since(&self.root.join(month).join(name), since) {
+            return Ok(None);
+        }
+        self.with_typed_lines(database, &Task::parse(name, text)?, false)
+    }
+
     /// `task` with the body lines someone typed into its exported file appended, or `None` when nothing was typed.
     ///
     /// A typed line is one in the file's body that is not in the text amh last exported there.
@@ -305,7 +340,7 @@ impl Store {
         Ok(Some(task))
     }
 
-    fn database(&self) -> Result<Option<Database>, String> {
+    pub fn database(&self) -> Result<Option<Database>, String> {
         let path = self.state_dir.join("amh.sqlite3");
         if !path.exists() {
             return Ok(None);
@@ -328,7 +363,12 @@ impl Store {
         let mut git = None;
         let mut untaken_names = Vec::new();
         let through = database.latest_event_id()?;
+        // A task the daemon is still importing typed lines into keeps its file until the import finishes.
+        let importing = database.open_imports()?;
         for (name, month, exported) in database.export_states(true, hot_after(database, full)?)? {
+            if importing.contains(&name) {
+                continue;
+            }
             // A task unchanged since the last export, whose file (and any stray root copy of a filed one) is untouched since, needs nothing; full passes (no `since`) still check all.
             let stray = self.root.join(&name);
             if exported
@@ -906,7 +946,7 @@ impl Store {
         Ok(())
     }
 
-    fn prepare(&self, task: &Task) -> Result<(Task, Vec<serde_json::Value>), String> {
+    pub fn prepare(&self, task: &Task) -> Result<(Task, Vec<serde_json::Value>), String> {
         let mut task = task.clone();
         let current = requests::sync(&mut task)?;
         requests::validate(&task)?;
@@ -1113,9 +1153,8 @@ impl Store {
     /// The caller's task: the named file, else the one active task whose agent runs at the caller's address.
     // 🧑 "We need to pass in the task file name at launch and let the agent pass in that when they use any helper command."
     pub fn own(&self, named: Option<&str>) -> Result<Task, String> {
-        let from_launch = std::env::var("OMO_AGENT_TASK_FILE")
-            .ok()
-            .filter(|name| !name.is_empty());
+        let from_launch =
+            crate::request::var("OMO_AGENT_TASK_FILE").filter(|name| !name.is_empty());
         if let Some(name) = named
             .filter(|name| !name.is_empty())
             .or(from_launch.as_deref())

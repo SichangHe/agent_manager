@@ -333,7 +333,7 @@ pub fn close_task(
     }
     // 🧑 "Agents should be able to close themselves. Have a command in amh for that"
     if own {
-        let _ = writeln!(io::stdout(), "closed {name}; stopping your own session now");
+        crate::request::say(&format!("closed {name}; stopping your own session now\n"));
         let manager = task.field("managerat").unwrap_or_default();
         let _ = report(settings, store, manager, &work::self_closed(&task), true);
     }

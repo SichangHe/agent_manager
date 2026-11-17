@@ -27,6 +27,7 @@ dependencies = [
  "clap",
  "imap",
  "lettre",
+ "libc",
  "mail-parser",
  "mime_guess",
  "native-tls",

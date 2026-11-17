@@ -45,6 +45,7 @@ pub fn command() -> Command {
         .arg(Arg::new("task").required(true).value_name("NAME"))
         .arg(Arg::new("text").required(false).value_name("TEXT"))
     )
+    .subcommand(Command::new("daemon").hide(true).about("Run amhd, the state-owning daemon; only with `AMH_DAEMON=1`. Stage 1: tested on copies of the production state, never live."))
     .subcommand(Command::new("release").about("Install the amh build checked out here and restart the watcher; or roll back.").long_about("Install the amh build checked out here and restart the watcher; or roll back.\n\nRun it in a clean checkout of the amh repository. It refuses a commit that is not on origin/main (unless --hotfix) and one that does not contain the live build, so a newer build is never overwritten. It runs the tests, builds the release binary, copies it read-only to ~/.local/lib/amh/VERSION-COMMIT/, points ~/.cargo/bin/amh at it, and restarts the watcher; the last 5 releases are kept. Builds are heavy: run it as `cpu-run LOW -c 8 -o TASK -e END -- amh release`.\n\n  amh release\n  amh release --rollback")
         .arg(Arg::new("rollback").long("rollback").action(ArgAction::SetTrue).help("switch back to the release before the live one"))
         .arg(Arg::new("hotfix").long("hotfix").action(ArgAction::SetTrue).conflicts_with("rollback").help("allow a commit that is not on origin/main yet"))

@@ -1,0 +1,20 @@
+[Unit]
+Description=amhd: the amh daemon (store writer, outbox, watcher); replaces amh-watch.service after the stage-2 cut-over
+After=network.target
+Conflicts=amh-watch.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+UMask=0077
+Environment=PATH=%h/.nix-profile/bin:%h/.config/bin:/usr/bin:/bin
+Environment=AMH_DAEMON=1
+Environment=AMH_DAEMON_LIVE=1
+ExecStart=%h/.cargo/bin/amh daemon
+StandardOutput=append:%h/.local/state/amh/amhd.log
+StandardError=append:%h/.local/state/amh/amhd.log
+Restart=always
+RestartSec=1s
+
+[Install]
+WantedBy=default.target

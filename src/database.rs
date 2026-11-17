@@ -32,6 +32,11 @@ impl Database {
             .map_err(error)?;
         Ok(value.filter(|value| value != "received"))
     }
+    /// The connection, for the daemon's own reads of its tables.
+    pub fn sql(&self) -> &Connection {
+        &self.0
+    }
+
     pub fn open(path: &Path) -> Result<Self, String> {
         let connection = Connection::open(path).map_err(error)?;
         // A reader that closes last would otherwise copy the whole WAL back on exit (880 writes in one `agent list`); writers' automatic checkpoints keep the WAL bounded.
@@ -243,6 +248,30 @@ impl Database {
         rows.collect::<Result<_, _>>().map_err(error)
     }
 
+    /// Tasks with an open daemon `edit_import` row; none before the daemon's migration made the table.
+    pub fn open_imports(&self) -> Result<std::collections::BTreeSet<String>, String> {
+        let migrated: bool = self
+            .0
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'edit_import')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !migrated {
+            return Ok(Default::default());
+        }
+        let mut query = self
+            .0
+            .prepare("SELECT DISTINCT task FROM edit_import WHERE state = 'open'")
+            .map_err(error)?;
+        query
+            .query_map([], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)
+    }
+
     pub fn tasks(&self) -> Result<Vec<(String, String)>, String> {
         let mut query = self
             .0
@@ -295,6 +324,16 @@ impl Database {
         snapshots: &[(String, String)],
         events: &[Value],
     ) -> Result<(), String> {
+        if let Ok(statements) = record_statements(snapshots, events)
+            && let Some(done) = crate::daemon::commit::route(|| crate::daemon::commit::Write {
+                preconditions: vec![],
+                statements,
+            })
+        {
+            done?;
+            self.wake(events);
+            return Ok(());
+        }
         let transaction = self.0.transaction().map_err(error)?;
         commit_records(&transaction, snapshots, events)?;
         transaction.commit().map_err(error)?;
@@ -312,6 +351,31 @@ impl Database {
         let owner = snapshots
             .first()
             .map_or("received", |(name, _)| name.as_str());
+        let key_name = format!("mail:{key}");
+        if let Ok(records) = record_statements(snapshots, events)
+            && let Some(done) = crate::daemon::commit::route(|| {
+                let mut statements = vec![crate::daemon::commit::statement(
+                    "INSERT INTO metadata (key, value) VALUES (?1, ?2)",
+                    vec![key_name.clone().into(), owner.to_owned().into()],
+                )];
+                statements.extend(records);
+                crate::daemon::commit::Write {
+                    preconditions: vec![crate::daemon::commit::Precondition {
+                        sql: "SELECT NOT EXISTS (SELECT 1 FROM metadata WHERE key = ?1)".into(),
+                        params: vec![key_name.clone().into()],
+                    }],
+                    statements,
+                }
+            })
+        {
+            return match done? {
+                crate::daemon::commit::Outcome::Committed => {
+                    self.wake(events);
+                    Ok(true)
+                }
+                crate::daemon::commit::Outcome::Conflict => Ok(false),
+            };
+        }
         let transaction = self.0.transaction().map_err(error)?;
         let inserted = transaction
             .execute(
@@ -335,6 +399,29 @@ impl Database {
         snapshots: &[(String, String)],
         events: &[Value],
     ) -> Result<(), String> {
+        if let Ok(records) = record_statements(snapshots, events)
+            && let Some(done) = crate::daemon::commit::route(|| {
+                let mut statements = vec![crate::daemon::commit::statement(
+                    "UPDATE messages SET state = 'sent', attempts = attempts + 1, last_error = '' WHERE id = ?1",
+                    vec![id.into()],
+                )];
+                statements.extend(records);
+                crate::daemon::commit::Write {
+                    preconditions: vec![pending_message(id)],
+                    statements,
+                }
+            })
+        {
+            return match done? {
+                crate::daemon::commit::Outcome::Committed => {
+                    self.wake(events);
+                    Ok(())
+                }
+                crate::daemon::commit::Outcome::Conflict => {
+                    Err(format!("amh: no pending message {id}"))
+                }
+            };
+        }
         let transaction = self.0.transaction().map_err(error)?;
         let changed = transaction.execute(
             "UPDATE messages SET state = 'sent', attempts = attempts + 1, last_error = '' WHERE id = ?1 AND state = 'pending'", [id]
@@ -368,12 +455,24 @@ impl Database {
     }
 
     pub fn set_record(&self, name: &str, text: &str) -> Result<(), String> {
+        if let Some(done) = one(
+            "INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = excluded.text",
+            vec![name.to_owned().into(), text.to_owned().into()],
+        ) {
+            return done;
+        }
         self.0.execute("INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = excluded.text", params![name, text]).map_err(error)?;
         Ok(())
     }
 
     /// Import a legacy record without replacing a concurrent import or update.
     pub fn import_record(&self, name: &str, text: &str) -> Result<(), String> {
+        if let Some(done) = one(
+            "INSERT OR IGNORE INTO records (name, text) VALUES (?1, ?2)",
+            vec![name.to_owned().into(), text.to_owned().into()],
+        ) {
+            return done;
+        }
         self.0
             .execute(
                 "INSERT OR IGNORE INTO records (name, text) VALUES (?1, ?2)",
@@ -385,6 +484,12 @@ impl Database {
 
     /// Append to a record atomically so concurrent senders retain every line.
     pub fn append_record(&self, name: &str, text: &str) -> Result<(), String> {
+        if let Some(done) = one(
+            "INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = records.text || excluded.text",
+            vec![name.to_owned().into(), text.to_owned().into()],
+        ) {
+            return done;
+        }
         self.0.execute("INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = records.text || excluded.text", params![name, text]).map_err(error)?;
         Ok(())
     }
@@ -396,6 +501,45 @@ impl Database {
         ids: &[u64],
         limit: usize,
     ) -> Result<Vec<u64>, String> {
+        if crate::daemon::commit::global().is_some() {
+            // Compare-and-set through the writer queue: retry when another writer changed the record in between.
+            loop {
+                let old = self.record(name)?;
+                let mut known: std::collections::BTreeSet<u64> = old
+                    .as_deref()
+                    .unwrap_or_default()
+                    .lines()
+                    .filter_map(|id| id.parse().ok())
+                    .collect();
+                known.extend(ids);
+                let merged: Vec<u64> = known.into_iter().rev().take(limit).collect();
+                let text = merged
+                    .iter()
+                    .map(u64::to_string)
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let unchanged = crate::daemon::commit::Precondition {
+                    sql: "SELECT (SELECT text FROM records WHERE name = ?1) IS ?2".into(),
+                    params: vec![
+                        name.to_owned().into(),
+                        old.map_or(rusqlite::types::Value::Null, Into::into),
+                    ],
+                };
+                let done = crate::daemon::commit::route(|| crate::daemon::commit::Write {
+                    preconditions: vec![unchanged],
+                    statements: vec![crate::daemon::commit::statement(
+                        "INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = excluded.text",
+                        vec![name.to_owned().into(), text.to_owned().into()],
+                    )],
+                });
+                match done {
+                    Some(Ok(crate::daemon::commit::Outcome::Committed)) => return Ok(merged),
+                    Some(Ok(crate::daemon::commit::Outcome::Conflict)) => continue,
+                    Some(Err(error)) => return Err(error),
+                    None => break,
+                }
+            }
+        }
         let tx = self
             .0
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -472,16 +616,45 @@ impl Database {
 
     /// Make `owner` the task that handles a received mail, as when its owner forwards it.
     pub fn set_mail_owner(&self, key: &str, owner: &str) -> Result<(), String> {
+        if let Some(done) = one(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            vec![format!("mail:{key}").into(), owner.to_owned().into()],
+        ) {
+            return done;
+        }
         self.0.execute("INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![format!("mail:{key}"), owner]).map_err(error)?;
         Ok(())
     }
 
     pub fn set_cursor(&self, key: &str, id: i64) -> Result<(), String> {
+        if let Some(done) = one(
+            "INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            vec![key.to_owned().into(), id.to_string().into()],
+        ) {
+            return done;
+        }
         self.0.execute("INSERT INTO metadata (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value", params![key, id.to_string()]).map_err(error)?;
         Ok(())
     }
 
     pub fn prune_events(&mut self, ids: &[i64]) -> Result<(), String> {
+        if let Some(queue) = crate::daemon::commit::global() {
+            for chunk in ids.chunks(crate::daemon::commit::WRITE_MAX) {
+                queue.submit(crate::daemon::commit::Write {
+                    preconditions: vec![],
+                    statements: chunk
+                        .iter()
+                        .map(|id| {
+                            crate::daemon::commit::statement(
+                                "DELETE FROM events WHERE id = ?1",
+                                vec![(*id).into()],
+                            )
+                        })
+                        .collect(),
+                })?;
+            }
+            return Ok(());
+        }
         let transaction = self.0.transaction().map_err(error)?;
         for id in ids {
             transaction
@@ -516,6 +689,14 @@ impl Database {
     /// Record a failed delivery and when to try again: after 1 min, doubling each attempt, at most 6 h.
     // The main manager: notices to retired tasks were "retried about every 1.2 s with no end, each storing a 'message failed' event: 1.93 M events today"
     pub fn defer_message(&self, id: i64, failure: &str, now_s: i64) -> Result<(), String> {
+        if let Some(done) = one(
+            "UPDATE messages SET attempts = attempts + 1, last_error = ?1,
+                 retry_at = ?2 + MIN(60 * (1 << MIN(attempts, 9)), 21600)
+                 WHERE id = ?3 AND state = 'pending'",
+            vec![failure.to_owned().into(), now_s.into(), id.into()],
+        ) {
+            return done;
+        }
         self.0
             .execute(
                 "UPDATE messages SET attempts = attempts + 1, last_error = ?1,
@@ -529,6 +710,24 @@ impl Database {
 
     /// Record a delivery result. An interrupted external send may retry the same stable ID.
     pub fn finish_message(&self, id: i64, success: bool, failure: &str) -> Result<(), String> {
+        if let Some(done) = crate::daemon::commit::route(|| crate::daemon::commit::Write {
+            preconditions: vec![pending_message(id)],
+            statements: vec![crate::daemon::commit::statement(
+                "UPDATE messages SET state = ?1, attempts = attempts + 1, last_error = ?2 WHERE id = ?3",
+                vec![
+                    (if success { "sent" } else { "pending" }).to_owned().into(),
+                    (if success { "" } else { failure }).to_owned().into(),
+                    id.into(),
+                ],
+            )],
+        }) {
+            return match done? {
+                crate::daemon::commit::Outcome::Committed => Ok(()),
+                crate::daemon::commit::Outcome::Conflict => {
+                    Err(format!("amh: no pending message {id}"))
+                }
+            };
+        }
         let changed = self.0.execute(
             "UPDATE messages SET state = ?1, attempts = attempts + 1, last_error = ?2 WHERE id = ?3 AND state = 'pending'",
             params![if success { "sent" } else { "pending" }, if success { "" } else { failure }, id]
@@ -683,6 +882,81 @@ fn enqueue(
         )
         .map_err(error)?;
     Ok(())
+}
+
+/// One SQL statement with its parameters, so the daemon's commit thread can apply writes built elsewhere.
+pub struct Statement {
+    pub sql: String,
+    pub params: Vec<rusqlite::types::Value>,
+}
+
+/// The writes that commit task snapshots and their events, queuing a message for each `message queued` event.
+pub fn record_statements(
+    snapshots: &[(String, String)],
+    events: &[Value],
+) -> Result<Vec<Statement>, String> {
+    let mut statements: Vec<Statement> = snapshots
+        .iter()
+        .map(|(name, text)| Statement {
+            sql: "INSERT INTO tasks (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = excluded.text".into(),
+            params: vec![name.clone().into(), text.clone().into()],
+        })
+        .collect();
+    for event in events {
+        statements.extend(event_statements(event, true)?);
+    }
+    Ok(statements)
+}
+
+fn event_statements(event: &Value, queue: bool) -> Result<Vec<Statement>, String> {
+    let field = |name: &str| {
+        event
+            .get(name)
+            .and_then(Value::as_str)
+            .ok_or_else(|| format!("amh: event has no string {name}"))
+    };
+    let data = event
+        .get("data")
+        .map_or_else(|| "null".to_owned(), Value::to_string);
+    let mut statements = vec![Statement {
+        sql: "INSERT INTO events (time, actor, kind, subject, data) VALUES (?1, ?2, ?3, ?4, ?5)"
+            .into(),
+        params: vec![
+            field("time")?.to_owned().into(),
+            field("actor")?.to_owned().into(),
+            field("kind")?.to_owned().into(),
+            field("subject")?.to_owned().into(),
+            data.into(),
+        ],
+    }];
+    if queue && field("kind")? == "message queued" {
+        statements.push(enqueue_statement(field("subject")?, &event["data"])?);
+    }
+    Ok(statements)
+}
+
+fn enqueue_statement(source: &str, data: &Value) -> Result<Statement, String> {
+    let target = data
+        .get("to")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "amh: queued message has no string to".to_owned())?;
+    let text = data
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "amh: queued message has no string text".to_owned())?;
+    let channel = data
+        .get("channel")
+        .and_then(Value::as_str)
+        .unwrap_or("agent");
+    Ok(Statement {
+        sql: "INSERT INTO messages (channel, target, text, source) VALUES (?1, ?2, ?3, ?4)".into(),
+        params: vec![
+            channel.to_owned().into(),
+            target.to_owned().into(),
+            text.to_owned().into(),
+            source.to_owned().into(),
+        ],
+    })
 }
 
 fn error(error: rusqlite::Error) -> String {
@@ -864,5 +1138,21 @@ mod tests {
         drop(db);
         std::fs::remove_dir_all(folder)?;
         Ok(())
+    }
+}
+
+/// One statement through the daemon's writer queue; `None` when there is no queue here.
+fn one(sql: &str, params: Vec<rusqlite::types::Value>) -> Option<Result<(), String>> {
+    crate::daemon::commit::route(|| crate::daemon::commit::Write {
+        preconditions: vec![],
+        statements: vec![crate::daemon::commit::statement(sql, params)],
+    })
+    .map(|done| done.map(|_| ()))
+}
+
+fn pending_message(id: i64) -> crate::daemon::commit::Precondition {
+    crate::daemon::commit::Precondition {
+        sql: "SELECT EXISTS (SELECT 1 FROM messages WHERE id = ?1 AND state = 'pending')".into(),
+        params: vec![id.into()],
     }
 }

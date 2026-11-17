@@ -112,11 +112,30 @@ fn switch(name: &str) -> Result<String, String> {
                 target.display()
             )
         })?;
-    run(
-        &home(),
-        "systemctl",
-        &["--user", "restart", "amh-watch.service"],
-    )?;
+    // After the stage-2 cut-over the daemon runs the watcher; before it, amh-watch does.
+    let unit = if crate::settings::state_dir()
+        .join(crate::daemon::CLIENT_MARK)
+        .exists()
+    {
+        "amhd.service"
+    } else {
+        "amh-watch.service"
+    };
+    run(&home(), "systemctl", &["--user", "restart", unit])?;
+    if unit == "amhd.service" {
+        // A daemon that does not open its socket within 30 s leaves clients waiting: say so, with the way back.
+        let socket = crate::daemon::socket_path(&crate::settings::state_dir());
+        let up = (0..300).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            std::os::unix::net::UnixStream::connect(&socket).is_ok()
+        });
+        if !up {
+            return Err(format!(
+                "amh: amhd did not come up on {} after the switch; run `amh release --rollback` (clients wait for it meanwhile)",
+                target.display()
+            ));
+        }
+    }
     // The quota observer runs the same binary; restart it only if it runs.
     run(
         &home(),

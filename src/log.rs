@@ -26,7 +26,7 @@ pub fn caller() -> String {
 
 /// A caller that explicitly supplies its launch identity when the runner environment is absent.
 fn task_caller() -> Option<String> {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<String> = crate::request::args();
     let named = args
         .windows(2)
         .find(|pair| pair[0] == "--task-file")
@@ -35,7 +35,7 @@ fn task_caller() -> Option<String> {
             args.iter()
                 .find_map(|arg| arg.strip_prefix("--task-file=").map(str::to_owned))
         })
-        .or_else(|| std::env::var("OMO_AGENT_TASK_FILE").ok())?;
+        .or_else(|| crate::request::var("OMO_AGENT_TASK_FILE"))?;
     let values = settings::load().ok()?;
     let name = crate::work::task_name(&named);
     let text = fs::read_to_string(settings::work_logs(&values).join(&name)).ok()?;

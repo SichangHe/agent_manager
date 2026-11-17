@@ -1,0 +1,3 @@
+#!/bin/sh
+# Stand-in for the instruction fetcher during benchmarks: fixed text, no network.
+echo "benchmark instructions $*"

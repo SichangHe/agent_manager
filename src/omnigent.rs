@@ -60,21 +60,36 @@ fn start_slot() -> Result<(), String> {
     let path = crate::settings::state_dir().join("amh-starts.json");
     // 🤖 vl_catchup.md: a burst of wakes left `amh task start` waiting 5+ min; waiters are served in arrival order.
     let queue_path = path.with_extension("queue.json");
-    let me = std::process::id();
-    let wait = !NO_WAIT.load(std::sync::atomic::Ordering::Relaxed);
+    // One waiter per thread: the daemon serves many starts in one process.
+    // SAFETY: gettid has no preconditions.
+    let me = format!("{}:{}", std::process::id(), unsafe { libc::gettid() });
+    let alive = |waiter: &String| {
+        let (pid, tid) = waiter.split_once(':').unwrap_or((waiter, waiter));
+        std::path::Path::new(&format!("/proc/{pid}/task/{tid}")).exists()
+    };
+    // The watcher does not wait for slots; a request it serves does.
+    let wait = crate::request::serving() || !NO_WAIT.load(std::sync::atomic::Ordering::Relaxed);
     let given_up = Instant::now() + Duration::from_secs(1800);
     loop {
         let lock = std::fs::File::create(path.with_extension("lock"))
             .map_err(|e| format!("cannot open the start lock: {e}"))?;
         lock.lock()
             .map_err(|e| format!("cannot lock the start record: {e}"))?;
-        let mut queue: Vec<u32> = std::fs::read_to_string(&queue_path)
+        // Older amh binaries write bare pids (numbers); read both, so neither kind drops the other's waiters.
+        let mut queue: Vec<String> = std::fs::read_to_string(&queue_path)
             .ok()
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        queue.retain(|pid| *pid == me || std::path::Path::new(&format!("/proc/{pid}")).exists());
+            .and_then(|text| serde_json::from_str::<Vec<Value>>(&text).ok())
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|waiter| match waiter {
+                Value::Number(pid) => Some(format!("{pid}:{pid}")),
+                Value::String(waiter) => Some(waiter),
+                _ => None,
+            })
+            .collect();
+        queue.retain(|waiter| *waiter == me || alive(waiter));
         if wait && !queue.contains(&me) {
-            queue.push(me);
+            queue.push(me.clone());
         }
         let now_s = chrono::Utc::now().timestamp();
         let mut starts: Vec<i64> = std::fs::read_to_string(&path)
@@ -85,14 +100,14 @@ fn start_slot() -> Result<(), String> {
         let my_turn = queue.first().is_none_or(|head| *head == me);
         let outcome = if starts.len() < starts_per_min() && my_turn {
             starts.push(now_s);
-            queue.retain(|pid| *pid != me);
+            queue.retain(|waiter| *waiter != me);
             crate::taskfile::write(&path, &json!(starts).to_string())
                 .map_err(|e| format!("cannot write the start record: {e}"))
                 .map(|()| true)
         } else if !wait {
             Err(NO_SLOT.to_owned())
         } else if Instant::now() >= given_up {
-            queue.retain(|pid| *pid != me);
+            queue.retain(|waiter| *waiter != me);
             Err("waited 30 min for a start slot (launch.starts_per_minute, default 2)".to_owned())
         } else {
             Ok(false)
@@ -640,7 +655,38 @@ pub fn save_scan(state_dir: &std::path::Path) -> Result<(), String> {
 
 /// Answer `status` from the watcher's last scan instead of asking Omnigent per session; returns its age in seconds, or `None` without one.
 pub fn use_saved_scan(state_dir: &std::path::Path) -> Option<i64> {
-    let saved: Value = serde_json::from_slice(&std::fs::read(scan_file(state_dir)).ok()?).ok()?;
+    // The parsed scan is kept per process (the daemon serves many requests from one parse) and re-read when the file changes.
+    type Parsed = (
+        std::path::PathBuf,
+        (std::time::SystemTime, u64),
+        i64,
+        BTreeMap<String, (&'static str, String)>,
+    );
+    static PARSED: std::sync::Mutex<Option<Parsed>> = std::sync::Mutex::new(None);
+    let path = scan_file(state_dir);
+    let modified = std::fs::metadata(&path)
+        .and_then(|m| Ok((m.modified()?, m.len())))
+        .ok()?;
+    let mut parsed = PARSED.lock().ok()?;
+    let hit = parsed
+        .as_ref()
+        .filter(|(p, m, ..)| *p == path && *m == modified)
+        .map(|(_, _, at, known)| (*at, known.clone()));
+    let (at, known) = match hit {
+        Some(hit) => hit,
+        None => {
+            let (at, known) = parse_scan(&path)?;
+            *parsed = Some((path, modified, at, known.clone()));
+            (at, known)
+        }
+    };
+    drop(parsed);
+    SCAN.set(Some(known));
+    Some(chrono::Utc::now().timestamp() - at)
+}
+
+fn parse_scan(path: &std::path::Path) -> Option<(i64, BTreeMap<String, (&'static str, String)>)> {
+    let saved: Value = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
     let known: BTreeMap<String, (&'static str, String)> = saved["statuses"]
         .as_object()?
         .iter()
@@ -656,8 +702,7 @@ pub fn use_saved_scan(state_dir: &std::path::Path) -> Option<i64> {
             Some((address.clone(), (state, pair[1].as_str()?.to_owned())))
         })
         .collect();
-    SCAN.set(Some(known));
-    Some(chrono::Utc::now().timestamp() - saved["at"].as_i64()?)
+    Some((saved["at"].as_i64()?, known))
 }
 
 /// Stop answering `status` from the scan's statuses.
@@ -1012,8 +1057,8 @@ pub fn saw_message(settings: &Settings, address: &str, text: &str) -> Result<boo
 
 /// Where the calling agent runs: its Omnigent session.
 pub fn own_address() -> Result<String, String> {
-    match std::env::var("OMNIGENT_RUNNER_PRIMARY_SESSION_ID") {
-        Ok(id) if !id.is_empty() => Ok(format!("{PREFIX}{id}")),
+    match crate::request::var("OMNIGENT_RUNNER_PRIMARY_SESSION_ID") {
+        Some(id) if !id.is_empty() => Ok(format!("{PREFIX}{id}")),
         _ => Err("amh: cannot tell which agent is calling; pass --task-file NAME.md".to_owned()),
     }
 }

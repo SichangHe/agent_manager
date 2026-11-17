@@ -1,10 +1,18 @@
 //! `amh`, the agent manager helper: parse the command line, log the action, run it, exit.
 // 🧑 "we shall gradually replace parts into Rust rewrites and see if the whole thing still works ... eventually replace the whole thing with Rust"
 
+// Inside amhd, standard error belongs to the request being served; `eprintln!` everywhere goes through it.
+macro_rules! eprintln {
+    ($($arg:tt)*) => {
+        $crate::request::err(&format!($($arg)*))
+    };
+}
+
 mod actions;
 mod agents;
 mod archive;
 mod cli;
+mod daemon;
 mod database;
 mod decide;
 mod fallback;
@@ -22,6 +30,7 @@ mod quota_observer;
 mod quota_pace;
 mod release;
 mod replies;
+mod request;
 mod requests;
 mod revive;
 mod settings;
@@ -44,7 +53,121 @@ use serde_json::{Map, Value};
 const TASK_KEYS: [&str; 5] = ["task", "who", "source", "to", "task_file"];
 
 /// Turn the chosen action and its values into one JSON object: `group`, `action`, and each value under its name.
-fn parsed(command: &Command, matches: &ArgMatches) -> Value {
+/// Send this command to amhd and print its answer; `None` when it should run here (no daemon, opted out, or a command that needs this terminal).
+fn through_daemon(values: &Value) -> Option<ExitCode> {
+    use std::io::{BufRead, BufReader, Write};
+    // Clients use the daemon with `AMH_CLIENT=1`, or after the cut-over, which leaves `amhd.client` in the state dir; `AMH_CLIENT=0` runs here regardless.
+    match std::env::var("AMH_CLIENT").as_deref() {
+        Ok("1") => {}
+        Ok("0") => return None,
+        _ if !settings::state_dir().join(daemon::CLIENT_MARK).exists() => return None,
+        _ => {}
+    }
+    let local = matches!(
+        (values["group"].as_str(), values["action"].as_str()),
+        (
+            Some("short"),
+            Some("daemon" | "edit" | "view" | "stop" | "release")
+        ) | (Some("manager"), Some("watch" | "watchers"))
+            | (Some("agent"), Some("view"))
+            | (Some("quota"), Some("serve"))
+    );
+    // A message read from standard input stays local, so the daemon never waits on a terminal.
+    let stdin_body =
+        values["group"] == "tell" && values["text"].is_null() && values["file"].is_null();
+    if local || stdin_body {
+        return None;
+    }
+    let socket = daemon::socket_path(&settings::state_dir());
+    // Without the daemon running, `AMH_CLIENT` unset and no marker ran here above; with them, wait out a restart (about 30 s) instead of writing beside the daemon.
+    let mut stream = None;
+    for wait_ms in [0, 100, 200, 500, 1000, 2000, 4000, 8000, 15000] {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        if let Ok(connected) = std::os::unix::net::UnixStream::connect(&socket) {
+            stream = Some(connected);
+            break;
+        }
+    }
+    let Some(mut stream) = stream else {
+        eprintln!(
+            "amh: amhd is not answering at {}; nothing ran. To run without it: AMH_CLIENT=0 amh ..., or remove {} (rollback)",
+            socket.display(),
+            daemon::CLIENT_MARK
+        );
+        return Some(ExitCode::from(75));
+    };
+    let cwd = std::env::current_dir().unwrap_or_default();
+    // Paths are the caller's: make them absolute, since the daemon has its own working directory.
+    const PATH_FLAGS: [&str; 6] = [
+        "--file", "--attach", "--prompt", "--dir", "--image", "--repo",
+    ];
+    let absolute = |path: &str| match path {
+        "-" => path.to_owned(),
+        _ if path.starts_with('/') => path.to_owned(),
+        _ => cwd.join(path).display().to_string(),
+    };
+    let mut argv: Vec<String> = Vec::new();
+    let mut path_next = false;
+    for arg in std::env::args() {
+        let given = match arg.split_once('=') {
+            Some((flag, path)) if PATH_FLAGS.contains(&flag) => {
+                format!("{flag}={}", absolute(path))
+            }
+            _ if path_next => absolute(&arg),
+            _ => arg.clone(),
+        };
+        path_next = PATH_FLAGS.contains(&arg.as_str());
+        argv.push(given);
+    }
+    let mut env = serde_json::Map::new();
+    for name in request::ALLOWED {
+        if let Ok(value) = std::env::var(name) {
+            env.insert(name.to_owned(), value.into());
+        }
+    }
+    if !env.contains_key("AMH_HUMAN_STARTED") {
+        let human = if actions::human_terminal() { "1" } else { "0" };
+        env.insert("AMH_HUMAN_STARTED".to_owned(), human.into());
+    }
+    let id = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    );
+    let request = serde_json::json!({"argv": argv, "env": env, "cwd": cwd, "id": id});
+    // Once connected, never fall back to running here: the daemon may have applied the request. A retry with the same id gets the stored outcome.
+    let mut reply = None;
+    // About 30 s in all, longer than a daemon restart.
+    for wait_ms in [0, 200, 500, 1000, 2000, 4000, 8000, 15000] {
+        std::thread::sleep(std::time::Duration::from_millis(wait_ms));
+        if wait_ms > 0 {
+            match std::os::unix::net::UnixStream::connect(&socket) {
+                Ok(again) => stream = again,
+                Err(_) => continue,
+            }
+        }
+        let mut line = String::new();
+        let sent = stream
+            .write_all((request.to_string() + "\n").as_bytes())
+            .and_then(|()| BufReader::new(&stream).read_line(&mut line).map(|_| ()));
+        if let Ok(Ok(answer)) = sent.map(|()| serde_json::from_str::<Value>(&line)) {
+            reply = Some(answer);
+            break;
+        }
+    }
+    let Some(reply) = reply else {
+        eprintln!("amh: amhd did not answer; the request may or may not have run");
+        return Some(ExitCode::from(75));
+    };
+    print!("{}", reply["out"].as_str().unwrap_or_default());
+    eprint!("{}", reply["err"].as_str().unwrap_or_default());
+    Some(ExitCode::from(reply["code"].as_u64().unwrap_or(1) as u8))
+}
+
+pub(crate) fn parsed(command: &Command, matches: &ArgMatches) -> Value {
     let (group, group_matches) = matches.subcommand().expect("clap requires a group");
     let top = command
         .find_subcommand(group)
@@ -101,6 +224,10 @@ fn main() -> ExitCode {
     unsafe { std::env::remove_var("AMH_DETACHED") };
     let command = cli::command();
     let values = parsed(&command, &command.clone().get_matches());
+    // Stage 1 of the rework: with `AMH_CLIENT=1`, commands go to a running amhd instead of opening the store here.
+    if let Some(code) = through_daemon(&values) {
+        return code;
+    }
     let line = values.to_string();
     // These two do not end by themselves, so their start is logged too.
     if matches!(
