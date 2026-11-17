@@ -1379,6 +1379,7 @@ fn scan_agents() {
         if let Err(error) = scanned {
             log(&format!("agent scan failed: {error}"));
         }
+        drop(_busy);
         thread::sleep(NUDGE_EVERY.saturating_sub(began.elapsed()));
     }
 }
