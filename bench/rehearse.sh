@@ -107,6 +107,12 @@ sysd --user is-active amh-watch.service >/dev/null && fail "amh-watch still runn
 pgrep -f "$H/.cargo/bin/amh manager watch" >/dev/null && fail "a watcher process runs next to amhd"
 smoke daemon
 grep -q 'via=amhd' "$S/amh-actions.log" || fail "no command went through amhd"
+for f in amh-holds.json; do [ -f "$S/$f" ] || fail "$f moved away by the daemon (holds would be ignored)"; done
+amh agent hold rh-daemon.md --reason rehearsal >/dev/null || fail "agent hold"
+amh tell agent rh-daemon.md "held-must-not-arrive" --from rehearsal >/dev/null 2>&1 && fail "a tell to a held agent was accepted"
+sleep 3; received "held-must-not-arrive" && fail "a held agent got a message"
+amh agent release rh-daemon.md >/dev/null || fail "agent release"
+echo "hold respected through amhd"
 
 step "4. daemon restart under load loses nothing"
 pids=()

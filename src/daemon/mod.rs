@@ -80,9 +80,7 @@ fn serve() -> Result<(), String> {
     let mut connection =
         rusqlite::Connection::open(&path).map_err(|e| format!("amh: SQLite: {e}"))?;
     migrate::migrate(&mut connection)?;
-    for name in migrate::import_state_files(&mut connection, &store.state_dir)? {
-        eprintln!("amhd: imported {name}");
-    }
+    // The state files (holds, notices, quota pauses, start queue) stay files: the code still reads them there, and the first live cut-over showed that moving them aside drops every hold. Importing them waits until their readers use `state_files`.
     drop(connection);
     let (committed, commits) = mpsc::channel();
     let (queue, _commit_thread) = commit::Queue::start(&path, committed)?;
