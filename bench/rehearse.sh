@@ -128,20 +128,26 @@ for pid in "${pids[@]}"; do wait "$pid" || fail "a tell failed across the restar
 for i in $(seq 20); do wait_for received "restart-$i" || fail "restart-$i lost"; done
 echo "20 tells across a daemon restart: all delivered"
 
-step "5. roll back to the CLI-only build $old"
+step "5. roll back to $old"
+old_has_daemon=$("$H/.local/lib/amh/$old/amh" daemon 2>&1 | grep -c "the daemon is off" || true)
 # One command: amh release --rollback leaves the daemon (marker, drain, units) when the older release has none.
 out=$(amh release --rollback 2>&1) || fail "amh release --rollback: $out"
 echo "$out" | grep "resend by hand" | grep -E "rehearse-|restart-" && fail "a rehearsal message never left the outbox"
-[ -e "$S/amhd.client" ] && fail "the cut-over marker is still there"
-sysd --user is-active amhd.service >/dev/null && fail "amhd still runs after the rollback"
 [ "$(basename "$(dirname "$(readlink "$AMH")")")" = "$old" ] || fail "rollback did not switch to $old"
 sleep 3
-sysd --user is-active amh-watch.service >/dev/null || fail "old watcher not running"
-[ "$(pgrep -fc "$H/.cargo/bin/amh manager watch")" = 1 ] || fail "not exactly one watcher after rollback"
+if [ "$old_has_daemon" = 0 ]; then
+    [ -e "$S/amhd.client" ] && fail "the cut-over marker is still there"
+    sysd --user is-active amhd.service >/dev/null && fail "amhd still runs after the rollback"
+    sysd --user is-active amh-watch.service >/dev/null || fail "old watcher not running"
+    [ "$(pgrep -fc "$H/.cargo/bin/amh manager watch")" = 1 ] || fail "not exactly one watcher after rollback"
+else
+    sysd --user is-active amhd.service >/dev/null || fail "the older amhd is not running after the rollback"
+    wait_for test -S "$S/amhd.sock" || fail "the older amhd did not open its socket"
+fi
 amh task show rh-daemon.md | grep -q "chunk-check-1 " || fail "a long task lost its older body in the rollback"
-grep -q "chunk-check-1 " "$R/root/rh-daemon.md" || fail "the exported long task lost its older body"
+wait_for grep -q "chunk-check-1 " "$R/root/rh-daemon.md" || fail "the exported long task lost its older body"
 echo "long task whole after the rollback"
 smoke rolledback
-grep -qi panick "$S/amh-watch.log" && fail "watcher log has a panic"
+grep -qi panick "$S/amh-watch.log" "$S/amhd.log" 2>/dev/null && fail "a watcher log has a panic"
 
 step "REHEARSAL PASSED: $old -> $new (CLI) -> amhd -> restart -> rollback to $old"
