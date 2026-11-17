@@ -1,0 +1,14 @@
+<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>voicecmd</title>
+<style>body{font:15px system-ui;margin:12px}pre{white-space:pre-wrap}button{font-size:18px;padding:10px 16px;margin:4px 4px 4px 0}#bar{height:14px;background:#4a4;width:0}</style>
+<h3>voicecmd: VAD, echo, keyword spotting</h3>
+<p>Phone test. Tap Start (mic), then optionally Play (TTS from an audio element) and say words.</p>
+<button id="start">Start mic + VAD + KWS</button><button id="play">Play TTS clip</button><button id="stop">Stop</button>
+<label><input type="checkbox" id="aec" checked> echoCancellation</label>
+<div id="bar"></div>
+<pre id="state"></pre><pre id="log"></pre>
+<audio id="tts" src="clips/speech.wav" playsinline></audio>
+<script src="node_modules/@tensorflow/tfjs/dist/tf.min.js"></script>
+<script src="node_modules/@tensorflow-models/speech-commands/dist/speech-commands.min.js"></script>
+<script src="page.js"></script>

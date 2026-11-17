@@ -1,0 +1,84 @@
+Downloading pydantic-core (2.2MiB)
+Downloading sympy (6.0MiB)
+Downloading hf-xet (4.1MiB)
+Downloading tokenizers (3.2MiB)
+Downloading networkx (2.0MiB)
+Downloading babel (9.7MiB)
+Downloading nvidia-cuda-nvrtc-cu12 (84.0MiB)
+Downloading nvidia-cufile-cu12 (1.1MiB)
+Downloading thinc (4.0MiB)
+Downloading nvidia-cusolver-cu12 (255.1MiB)
+Downloading nvidia-cuda-cupti-cu12 (9.8MiB)
+Downloading nvidia-cusparselt-cu12 (273.9MiB)
+Downloading srsly (1.2MiB)
+Downloading nvidia-cudnn-cu12 (674.0MiB)
+Downloading blis (13.6MiB)
+Downloading soundfile (1.3MiB)
+Downloading nvidia-nccl-cu12 (307.4MiB)
+Downloading nvidia-cusparse-cu12 (274.9MiB)
+Downloading nvidia-cublas-cu12 (566.8MiB)
+Downloading nvidia-nvshmem-cu12 (118.9MiB)
+Downloading nvidia-cufft-cu12 (184.2MiB)
+Downloading spacy (33.2MiB)
+Downloading espeakng-loader (9.6MiB)
+Downloading nvidia-curand-cu12 (60.7MiB)
+Downloading misaki (3.5MiB)
+Downloading transformers (12.4MiB)
+Downloading nvidia-nvjitlink-cu12 (37.4MiB)
+Downloading triton (162.6MiB)
+Downloading curated-tokenizers (6.0MiB)
+Downloading torch (859.1MiB)
+ Downloaded nvidia-cufile-cu12
+ Downloaded soundfile
+ Downloaded srsly
+ Downloaded pydantic-core
+ Downloaded networkx
+ Downloaded tokenizers
+ Downloaded misaki
+ Downloaded hf-xet
+ Downloaded thinc
+ Downloaded curated-tokenizers
+ Downloaded sympy
+ Downloaded nvidia-cuda-cupti-cu12
+ Downloaded babel
+ Downloaded espeakng-loader
+ Downloaded blis
+ Downloaded transformers
+ Downloaded spacy
+ Downloaded nvidia-nvjitlink-cu12
+ Downloaded nvidia-curand-cu12
+ Downloaded nvidia-cuda-nvrtc-cu12
+ Downloaded torch
+ Downloaded nvidia-nvshmem-cu12
+ Downloaded nvidia-cufft-cu12
+ Downloaded triton
+ Downloaded nvidia-cusolver-cu12
+ Downloaded nvidia-cusparse-cu12
+ Downloaded nvidia-cusparselt-cu12
+ Downloaded nvidia-nccl-cu12
+ Downloaded nvidia-cublas-cu12
+ Downloaded nvidia-cudnn-cu12
+Installed 110 packages in 448ms
+/home/sichangheagent/.cache/uv/environments-v2/gen-8735da1ff3e8db8d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/gen-8735da1ff3e8db8d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+Resolved 1 package in 401ms
+Downloading en-core-web-sm (12.2MiB)
+ Downloaded en-core-web-sm
+Prepared 1 package in 268ms
+Installed 1 package in 19ms
+ + en-core-web-sm==3.8.0 (from https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl)
+[38;5;2m✔ Download and installation successful[0m
+You can now load the package via spacy.load('en_core_web_sm')
+af_heart done
+/home/sichangheagent/.cache/uv/environments-v2/gen-8735da1ff3e8db8d/lib/python3.14/site-packages/torch/nn/modules/rnn.py:123: UserWarning: dropout option adds dropout after all but last recurrent layer, so non-zero dropout expects num_layers greater than 1, but got dropout=0.2 and num_layers=1
+  warnings.warn(
+/home/sichangheagent/.cache/uv/environments-v2/gen-8735da1ff3e8db8d/lib/python3.14/site-packages/torch/nn/utils/weight_norm.py:144: FutureWarning: `torch.nn.utils.weight_norm` is deprecated in favor of `torch.nn.utils.parametrizations.weight_norm`.
+  WeightNorm.apply(module, name, dim)
+am_adam done
+am_michael done
+af_bella done
+bf_emma done
+bm_george done
+af_sarah done

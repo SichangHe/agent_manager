@@ -1,0 +1,49 @@
+# Browser client
+(authored by agents unless marked 🧑)
+
+- approved deployment: https://sichangheagentvoicechat.github.io/
+  - public repository contains only the static files selected by `build-static.mjs`
+  - human pastes account configuration once; credentials stay in this origin's browser storage
+  - browser sends directly as the human; uncertain sends reconcile before retry
+  - outbound `zulip-voice-relay` user service handles audio through private `voice-relay` channel and GPU workers
+    - human subscription push, desktop, audible, email and wildcard mention notifications disabled
+    - operation topics keep speech requests out of agent conversations; worker rejects DMs
+  - signed attachment URLs play through media elements without cross-origin fetch
+- buttons first
+  - Dictate streams independent chunks at silence boundaries or eight seconds
+  - transcripts apply in recording order; another recording may start during transcription
+  - Play/Pause only controls playback at the saved sentence; dictation and sending are separate
+  - Finish & send awaits ordered transcripts, then sends once; transcription failure retains the draft
+  - message scrolling collapses controls; swipe down collapses and swipe up expands
+  - prefetch holds at most twelve clips and nine thousand text characters, with two requests in flight
+    - media preloads are browser-managed memory/cache, not a promise of offline persistence
+  - new agent messages trigger server generation before playback
+    - queue: three messages, twenty pieces each; forty-eight background artifacts, sixty-four audio artifacts total
+    - shared proactive uploads survive device acknowledgments until ten-minute expiry or capacity eviction, so one device cannot invalidate another device's preload
+    - explicit-request uploads are removed on acknowledgment; excess generated on demand
+  - one event queue carries task messages, read flags and prepared audio; history and unread lists update locally
+    - initial reads and reconnect recovery fetch history; periodic UI checks do not call the API
+  - authenticated API starts limited to one hundred per minute plus six initial tokens
+    - budget applies per page; other tabs and clients share the account's server limit
+    - HTTP errors show method, endpoint, status and server explanation; rate-limit reset pauses further API starts
+  - voice commands are deferred
+- measured evidence
+  - event-driven WebKit iPhone viewport: fourteen startup API requests, including seven deliveries during sample generation
+    - settled sixty-second idle: four event requests; four cached sentences: zero API requests during 15.839 seconds
+    - no HTTP/audio failures; playback succeeded after a sixty-second idle; exact reported phone error not reproduced
+  - private-channel Chromium consecutive playback gaps: 9, 5, 7 ms; first playback 2289 ms
+  - private-channel WebKit with preloaded elements: 1, 1, 1 ms; first playback 2340 ms
+    - permission rejection falls back to the gesture-unlocked player; if both reject, keep the clip and ask for Play
+  - bot self-DM STT and TTS completed in Chromium and WebKit; artifacts cleaned
+  - ten-second WebKit relay STT: 2074 ms; first TTS playback: 1497 ms
+  - sixty-second direct GPU recording: thirteen chunks, first transcript 3.38 s, Finish to final transcript 173 ms
+    - repeated ten-second human speech fixture; does not establish transcription accuracy on arbitrary speech
+  - sixty-second browser relay: thirteen ordered chunks, first transcript 6.318 s, Finish to final transcript 727 ms
+    - real MediaRecorder, GPU and bot self-DM; chunk upload to text 716–1423 ms; artifacts cleaned
+    - preceding trial encountered a network change and visibly failed its final clip with retry available
+  - actual iOS microphone permissions, app switching, screen lock and interrupted connectivity still require device validation
+- source scripts
+  - `build-static.mjs`: explicit static allowlist
+  - `static-test.mjs`: browser send flow with isolated API responses
+  - `streaming-stt-test.mjs`: real recording pipeline into resident GPU STT
+  - `relay-benchmark.mjs`: real bot self-DM relay timing and cleanup

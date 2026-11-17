@@ -1,0 +1,13 @@
+<frozen site>:101: RuntimeWarning: Unexpected value in sys.prefix, expected /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/.venv, got /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/trig/../.venv
+<frozen site>:101: RuntimeWarning: Unexpected value in sys.exec_prefix, expected /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/.venv, got /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/trig/../.venv
+over {'kws_hit': 0.6666666666666666, 'asr_hit': 1.0, 'kws_fa_35min': 6, 'text_occurrences': 59}
+pineapple {'kws_hit': 0.9166666666666666, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+avocado {'kws_hit': 0.9166666666666666, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+kangaroo {'kws_hit': 1.0, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+volcano {'kws_hit': 0.9166666666666666, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+watermelon {'kws_hit': 1.0, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+tornado {'kws_hit': 1.0, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+pistachio {'kws_hit': 0.08333333333333333, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+bazooka {'kws_hit': 0.75, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+banana {'kws_hit': 0.9166666666666666, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}
+buffalo {'kws_hit': 1.0, 'asr_hit': 1.0, 'kws_fa_35min': 0, 'text_occurrences': 0}

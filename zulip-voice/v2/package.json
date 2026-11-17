@@ -1,0 +1,6 @@
+{
+  "name": "zulip-voice-v2",
+  "private": true,
+  "description": "Build-time assets only: the sherpa-onnx WebAssembly keyword spotter is copied into the static bundle by build.mjs.",
+  "dependencies": {"sherpa-onnx": "2.0.1"}
+}

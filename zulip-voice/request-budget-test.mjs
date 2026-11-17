@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {budgetRequests} from './request-budget.mjs';
+import {createBrowserZulip} from './browser-zulip.mjs';
+const starts=[];const request=budgetRequests(async()=>{starts.push(Date.now());return Response.json({});},{perMinute:600,burst:2});
+await Promise.all(Array.from({length:5},()=>request('https://shagent.zulipchat.com/api/v1/messages')));
+assert(starts[4]-starts[0]>=280);
+let calls=0,now=100000;
+const adapter=createBrowserZulip({site:'https://shagent.zulipchat.com',humanId:1,streamId:2,email:'test',key:'synthetic'},{now:()=>now,storage:{},fetch:async()=>{calls++;return Response.json({result:'error',msg:'API rate limit exceeded'},{status:429,headers:{'x-ratelimit-reset':'160'}});}});
+const result=await adapter.request('GET','messages');assert.equal(result.status,429);assert.match(result.error,/GET \/api\/v1\/messages: HTTP 429/);
+await adapter.request('GET','messages');assert.equal(calls,1);assert.throws(()=>adapter.checkCooldown(),/429/);
+now=161000;await adapter.request('GET','messages');assert.equal(calls,2);

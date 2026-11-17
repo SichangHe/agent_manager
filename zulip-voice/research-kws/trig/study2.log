@@ -1,0 +1,12 @@
+<frozen site>:101: RuntimeWarning: Unexpected value in sys.prefix, expected /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/.venv, got /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/trig/../.venv
+<frozen site>:101: RuntimeWarning: Unexpected value in sys.exec_prefix, expected /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/.venv, got /ssd1/sichangheagent/agent_managers/zulip-voice/research-kws/trig/../.venv
+heyheyhey fa 0 0 60s
+five fa 24 0 68s
+pause fa 2 0 62s
+heymira fa 0 0 67s
+oknova fa 0 0 56s
+heyzulip fa 0 0 49s
+holdit fa 1 0 50s
+attention fa 0 0 52s
+stopreading fa 0 0 55s
+mayday fa 0 0 52s

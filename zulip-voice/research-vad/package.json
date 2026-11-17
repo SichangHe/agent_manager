@@ -1,0 +1,16 @@
+{
+  "name": "research-vad",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@ricky0123/vad-web": "^0.0.31",
+    "onnxruntime-web": "^1.22.0"
+  }
+}
