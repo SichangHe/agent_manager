@@ -328,6 +328,9 @@ impl Store {
         if !force && untouched_since(&self.root.join(&month).join(name), stamp(database)?) {
             return Ok(None);
         }
+        if name == "TODO.md" {
+            return Ok(None);
+        }
         let Ok(file) = fs::read_to_string(self.root.join(&month).join(name)) else {
             return Ok(None);
         };

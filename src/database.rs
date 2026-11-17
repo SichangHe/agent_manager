@@ -382,7 +382,13 @@ impl Database {
             } else if let Some(rest) = body.strip_prefix(old.as_str()) {
                 (rest, last + 1, old.len())
             } else {
-                // The older body itself changed (an edit): keep it all in the row again.
+                // The older body itself changed (an edit): keep it all in the row again. An export record kept in row form refers to the older body being replaced: store it whole first.
+                if let Some(whole) = self.export_text(name)? {
+                    extra.push(Statement {
+                        sql: "UPDATE records SET text = ?2 WHERE name = 'export:' || ?1".into(),
+                        params: vec![name.clone().into(), whole.into()],
+                    });
+                }
                 extra.push(Statement {
                     sql: "DELETE FROM task_old_body WHERE name = ?1".into(),
                     params: vec![name.clone().into()],
@@ -685,6 +691,9 @@ impl Database {
             })
             .map_err(error)?;
         let Some(oldest) = oldest else {
+            self.0
+                .execute("DELETE FROM records WHERE name LIKE 'todo:fold_due:%'", [])
+                .map_err(error)?;
             return Ok(());
         };
         let due_key = format!("todo:fold_due:{oldest}");
@@ -743,10 +752,19 @@ impl Database {
         };
         let mut expanded = 0;
         for name in names {
-            if let Some(text) = self.export_text(&name)? {
-                self.set_record(&format!("export:{name}"), &text)?;
-                expanded += 1;
+            // An export record that cannot be made whole is dropped: an older build then compares with nothing rather than with a row form.
+            match self.export_text(&name)? {
+                Some(text) => self.set_record(&format!("export:{name}"), &text)?,
+                None => {
+                    self.0
+                        .execute(
+                            "DELETE FROM records WHERE name = ?1",
+                            [format!("export:{name}")],
+                        )
+                        .map_err(error)?;
+                }
             }
+            expanded += 1;
         }
         Ok(expanded)
     }
@@ -892,9 +910,8 @@ impl Database {
                      SELECT name FROM tasks WHERE status IN ('running', 'long_running', 'blocked')
                      UNION SELECT 'TODO.md'
                      UNION SELECT subject FROM events WHERE id > ?2)
-                 SELECT t.name, COALESCE(m.text, ''), ?1 AND (e.text IS t.text OR r.text IS t.text) FROM tasks t
+                 SELECT t.name, COALESCE(m.text, ''), ?1 AND e.text IS t.text FROM tasks t
                  LEFT JOIN records e ON e.name = 'export:' || t.name
-                 LEFT JOIN records r ON r.name = 'exportrow:' || t.name
                  LEFT JOIN records m ON m.name = 'month:' || t.name
                  WHERE ?2 IS NULL OR t.name IN (SELECT name FROM hot)
                  ORDER BY t.name",
