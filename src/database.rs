@@ -710,17 +710,8 @@ impl Database {
                 found.insert(name, text);
             }
         }
-        let old = self.old_bodies()?;
-        Ok(found
-            .into_iter()
-            .map(|(name, text)| {
-                let text = match old.get(&name) {
-                    Some(old) => join_body(text, old),
-                    None => text,
-                };
-                (name, text)
-            })
-            .collect())
+        // As stored (a long task's recent body, with its marker): callers scan front matter and save rows back, which needs no older body.
+        Ok(found.into_iter().collect())
     }
 
     /// The tasks whose status is running, long_running or blocked, through the status index.
@@ -734,8 +725,8 @@ impl Database {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(error)?;
-        let rows: Vec<(String, String)> = rows.collect::<Result<_, _>>().map_err(error)?;
-        self.with_old_bodies(rows)
+        // As stored, like `active_tasks_mentioning`: reading every older body here cost ~20 ms under the store lock.
+        rows.collect::<Result<_, _>>().map_err(error)
     }
 
     /// Tasks with an open daemon `edit_import` row; none before the daemon's migration made the table.
