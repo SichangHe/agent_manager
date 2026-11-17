@@ -132,27 +132,68 @@ fn ask_human(store: &Store, asker: &str, what: &str) -> Result<String, String> {
 /// Release tasks blocked on a task that closed, remind about other blocks and outside waits with backoff, and date undated requests; the watcher calls this every few minutes under the store lock.
 // 🧑 "What are the waiting on? Previously I asked for the task blocked on to block on other tasks, was that ever implemented?"
 // 🧑 "Blocked tasks that are not blocked on other tasks should have long reminders with exponential backoff. Maybe 1hr, base 1.5?"
+/// The task that owns item `id` (`NAME.md#N`), loaded alone; `None` when there is no such task.
+fn item_owner(store: &Store, id: &str) -> Result<Option<Task>, String> {
+    let Some((name, _)) = id.split_once('#') else {
+        return Ok(None);
+    };
+    if !name.ends_with(".md") || name == "TODO.md" || !store.contains(name)? {
+        return Ok(None);
+    }
+    store.load(name).map(Some)
+}
+
+/// The tasks that own `ids` and, through their blockers, every item those wait on.
+fn reachable(store: &Store, ids: &[String]) -> Result<Vec<Task>, String> {
+    let mut found: Vec<Task> = Vec::new();
+    let mut frontier: Vec<String> = ids.to_vec();
+    while let Some(id) = frontier.pop() {
+        let Some((name, _)) = id.split_once('#') else {
+            continue;
+        };
+        if !name.ends_with(".md")
+            || name == "TODO.md"
+            || found.iter().any(|task| task.name == name)
+            || !store.contains(name)?
+        {
+            continue;
+        }
+        let mut owner = store.load(name)?;
+        for record in requests::sync(&mut owner)? {
+            frontier.extend(
+                record
+                    .blockers
+                    .iter()
+                    .filter(|b| {
+                        !b.starts_with(requests::EXTERNAL) && !b.starts_with(requests::DATE)
+                    })
+                    .cloned(),
+            );
+        }
+        found.push(owner);
+    }
+    Ok(found)
+}
+
 pub fn maintain(store: &Store) -> Result<Vec<String>, String> {
     let database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
     let now = chrono::Utc::now();
-    let all = store.all()?;
     let mut failed = Vec::new();
     // A task with no live Omnigent agent gets no reminders: they could never arrive.
     let live = |task: &Task| task.address().starts_with(omnigent::PREFIX);
     for task in store.active()?.into_iter().filter(live) {
         let name = task.name.clone();
-        if let Err(error) = maintain_task(store, &database, &all, task, now) {
+        if let Err(error) = maintain_task(store, &database, task, now) {
             failed.push(format!("{name}: {error}"));
         }
     }
     Ok(failed)
 }
 
-/// One task's part of `maintain`; `all` is every task as the pass began.
+/// One task's part of `maintain`.
 fn maintain_task(
     store: &Store,
     database: &crate::database::Database,
-    all: &[Task],
     mut task: Task,
     now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), String> {
@@ -177,7 +218,7 @@ fn maintain_task(
                 Some((store.load(other)?.status() == "done").then(|| format!("{other} is closed")))
             }
             Some(tasks::Block::Item(id)) => {
-                let open = all.iter().any(|owner| {
+                let open = item_owner(store, id)?.iter().any(|owner| {
                     requests::read(owner).is_ok_and(|records| {
                         records
                             .iter()
@@ -1276,7 +1317,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 .map(str::to_owned)
                 .collect::<Vec<_>>();
             if !blockers.is_empty() {
-                requests::wait(&mut task, need("id"), &blockers, &store.all()?)?;
+                // Only the tasks a blocker chain reaches, not every task: loading all of them held the lock for 100+ ms.
+                requests::wait(
+                    &mut task,
+                    need("id"),
+                    &blockers,
+                    &reachable(&store, &blockers)?,
+                )?;
             }
             if text("on").is_some() {
                 return Err(WAIT_HOW.to_owned());
@@ -1511,8 +1558,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let on = until.as_deref().or(text("on"));
             let known = match on.and_then(tasks::block_of) {
                 Some(tasks::Block::Task(other)) => store.contains(other)?,
-                Some(tasks::Block::Item(id)) => store.all()?.iter().any(|owner| {
-                    requests::read(owner).is_ok_and(|records| records.iter().any(|r| r.id == id))
+                Some(tasks::Block::Item(id)) => item_owner(&store, id)?.is_some_and(|owner| {
+                    requests::read(&owner).is_ok_and(|records| records.iter().any(|r| r.id == id))
                 }),
                 Some(tasks::Block::Date(_)) => true,
                 None => on.is_none(),

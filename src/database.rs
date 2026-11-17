@@ -7,7 +7,28 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::Value;
 
 // 🧑 "I would like state consistency and state stored in SQLite"
-pub struct Database(Connection);
+pub struct Database(std::mem::ManuallyDrop<Connection>, std::path::PathBuf, u64);
+
+/// Open connections kept for reuse: opening one (connect, map the file, probe the schema) costs ~1–2 ms, several times per command, much of it inside the store lock.
+// 🧑 "Locking should be in us not ms"
+static POOL: std::sync::Mutex<Vec<(std::path::PathBuf, u64, Connection)>> =
+    std::sync::Mutex::new(Vec::new());
+/// Most idle connections kept.
+const POOL_MAX: usize = 8;
+
+impl Drop for Database {
+    fn drop(&mut self) {
+        // SAFETY: the connection is taken exactly once, here, and `self` is not used after.
+        let connection = unsafe { std::mem::ManuallyDrop::take(&mut self.0) };
+        // A connection left inside a transaction is not reused.
+        if connection.is_autocommit()
+            && let Ok(mut pool) = POOL.lock()
+            && pool.len() < POOL_MAX
+        {
+            pool.push((std::mem::take(&mut self.1), self.2, connection));
+        }
+    }
+}
 
 impl Database {
     pub fn received_mail(&self, key: &str) -> Result<bool, String> {
@@ -38,6 +59,23 @@ impl Database {
     }
 
     pub fn open(path: &Path) -> Result<Self, String> {
+        let inode =
+            std::fs::metadata(path).map_or(0, |meta| std::os::unix::fs::MetadataExt::ino(&meta));
+        let pooled = POOL.lock().ok().and_then(|mut pool| {
+            // A connection to a file since deleted or replaced is dropped, not kept.
+            pool.retain(|(p, i, _)| p != path || *i == inode);
+            let at = pool
+                .iter()
+                .position(|(p, i, _)| p == path && *i == inode && inode != 0)?;
+            Some(pool.swap_remove(at).2)
+        });
+        if let Some(connection) = pooled {
+            return Ok(Self(
+                std::mem::ManuallyDrop::new(connection),
+                path.to_owned(),
+                inode,
+            ));
+        }
         let connection = Connection::open(path).map_err(error)?;
         // A reader that closes last would otherwise copy the whole WAL back on exit (880 writes in one `agent list`); writers' automatic checkpoints keep the WAL bounded.
         connection
@@ -53,10 +91,10 @@ impl Database {
         // Keyed by inode too: a database file deleted and made anew is checked again.
         static READY: std::sync::Mutex<Vec<(std::path::PathBuf, u64)>> =
             std::sync::Mutex::new(Vec::new());
-        let inode = |path: &Path| {
+        let inode_of = |path: &Path| {
             std::fs::metadata(path).map_or(0, |meta| std::os::unix::fs::MetadataExt::ino(&meta))
         };
-        let key = (path.to_owned(), inode(path));
+        let key = (path.to_owned(), inode_of(path));
         let ready = READY
             .lock()
             .map(|known| known.contains(&key))
@@ -75,7 +113,11 @@ impl Database {
             connection
                 .execute_batch("PRAGMA synchronous=NORMAL; PRAGMA mmap_size=1073741824;")
                 .map_err(error)?;
-            return Ok(Self(connection));
+            return Ok(Self(
+                std::mem::ManuallyDrop::new(connection),
+                path.to_owned(),
+                inode_of(path),
+            ));
         }
         connection.execute_batch(
             "PRAGMA journal_mode=WAL;
@@ -132,9 +174,13 @@ impl Database {
                 .map_err(error)?;
         }
         if let Ok(mut known) = READY.lock() {
-            known.push((path.to_owned(), inode(path)));
+            known.push((path.to_owned(), inode_of(path)));
         }
-        Ok(Self(connection))
+        Ok(Self(
+            std::mem::ManuallyDrop::new(connection),
+            path.to_owned(),
+            inode_of(path),
+        ))
     }
 
     pub fn initialized(&self) -> Result<bool, String> {
