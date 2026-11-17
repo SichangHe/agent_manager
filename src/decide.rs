@@ -148,6 +148,18 @@ fn staffed(task: &Task) -> bool {
     task.is_active() && task.address() != "retired"
 }
 
+/// Why a message typed in the `tag` thread went to another task than that thread's.
+pub fn redirect_reason(tag: &str, thread: Option<&Task>, stored: &str) -> String {
+    let body = stored.split_once("\n\n").map_or(stored, |(_, body)| body);
+    match thread {
+        _ if for_manager(body) => "the human addressed it to the manager".to_owned(),
+        None => format!("no task has the {tag} thread"),
+        Some(task) if task.status() == "done" => format!("{} is closed and its agent cannot be resumed", task.name),
+        Some(task) if task.address() == "retired" || task.address().is_empty() => format!("{} has no agent", task.name),
+        Some(task) => format!("{} could not take it", task.name),
+    }
+}
+
 /// A closed task whose agent session can be resumed, so the human's message in its thread reopens it.
 pub fn reopens(task: &Task) -> bool {
     task.status() == "done" && task.address().starts_with(crate::omnigent::PREFIX)
@@ -1508,6 +1520,15 @@ mod tests {
             question_answers(&parts[..1], "Subject: x\n\nNeither,\ngo back"),
             [pair("Which way?", "Neither,\ngo back")]
         );
+    }
+
+    #[test]
+    fn redirects_say_why() {
+        let tasks = tasks();
+        let done = tasks.iter().find(|t| t.name == "t_done.md");
+        assert!(redirect_reason("t_done", done, "Subject: x\n\nhi").contains("closed"));
+        assert!(redirect_reason("t_done", done, "Subject: x\n\nfor manager").contains("manager"));
+        assert!(redirect_reason("nope", None, "hi").contains("no task"));
     }
 
     #[test]

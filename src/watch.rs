@@ -760,7 +760,22 @@ fn delivery_text(
             let file = Path::new(name).file_name().unwrap_or_default();
             let stored = fs::read_to_string(store.root.join("manager_mail").join(file))
                 .map_err(|error| format!("{name}: {error}"))?;
-            decide::mail_text(name, &stored, task.tag(), remind)
+            let text = decide::mail_text(name, &stored, task.tag(), remind);
+            // 🧑 "make it clear when you redirect messages that they are redirected because the targets are past"
+            match text
+                .strip_prefix("In the ")
+                .and_then(|rest| rest.split_once(" thread:\n"))
+            {
+                Some((tag, rest)) => {
+                    let tasks = store.all().unwrap_or_default();
+                    let thread = tasks.iter().find(|t| t.tag() == crate::zulip::task_topic(tag));
+                    format!(
+                        "In the {tag} thread; redirected to you because {}:\n{rest}",
+                        decide::redirect_reason(tag, thread, &stored)
+                    )
+                }
+                None => text,
+            }
         }
         Source::Plain => decide::plain_text(block, remind),
     })
@@ -855,6 +870,20 @@ fn deliver_block(
         )
     {
         log(&error);
+    }
+    // 🧑 "Not only should you release those agents" — a human message releases a held agent instead of waiting behind the hold.
+    if matches!(decide::source_of(&block[0]), Source::Mail(_))
+        && let Some(why) = omnigent::held(&plan.target)
+    {
+        match omnigent::set_hold(&plan.target, None)
+            .and_then(|()| {
+                let _lock = store.lock()?;
+                crate::actions::clear_stopped(store, &plan.target)
+            })
+        {
+            Ok(()) => log(&format!("released {name} (held: {why}): the human wrote to it")),
+            Err(error) => log(&format!("could not release {name} for the human's message: {error}")),
+        }
     }
     if omnigent::status(settings, &plan.target).0 == "paused" {
         if let Some(id) = zulip_id
