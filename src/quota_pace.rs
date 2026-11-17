@@ -9,6 +9,9 @@ use serde_json::{Value, json};
 
 use crate::quota_core::{Bucket, Kind, Status, WinState};
 
+/// The conservative target leaves this much of each account's quota (in %) for the last hours before its reset, where burning faster is always possible.
+// 🧑 "We can always burn quota faster near the end if needed, so being a bit conservative is nice"
+pub const MARGIN_PCT: f64 = 5.0;
 /// Hours of samples the burn rate is fitted over, by default.
 pub const WINDOW_H: f64 = 6.0;
 /// The shortest stretch of samples a rate is fitted from.
@@ -159,7 +162,12 @@ fn account_pace(
         _ => None,
     };
     json!({
-        "used_pct": used, "resets_in_h": hours_left, "exhausted": exhausted,
+        "used_pct": used, "resets_in_h": hours_left, "resets_at": reset, "exhausted": exhausted,
+        "target_conservative_pct_per_h": match hours_left {
+            _ if exhausted => Some(0.0),
+            Some(h) if h > 0.0 => Some((100.0 - used - MARGIN_PCT).max(0.0) / h),
+            _ => None,
+        },
         "rate_pct_per_h": rate.map(|r| r.0), "rate_uncertainty": rate.map(|r| r.1), "fit_span_h": rate.map(|r| r.2),
         "n_samples": points.len(),
         "needed_pct_per_h": needed,
@@ -240,7 +248,7 @@ pub fn report(
             "5h"
         };
         providers.entry(b.pool.clone()).or_default().push(json!({
-            "account": account, "status": b.status.name(), "binding": binding, "windows": per_window,
+            "account": account, "provider": b.pool, "status": b.status.name(), "binding": binding, "windows": per_window,
         }));
     }
     let mut out = serde_json::Map::new();
@@ -300,6 +308,11 @@ pub fn report(
             json!({
                 "rate_pct_per_h": rate, "rate_uncertainty": unc, "needed_pct_per_h": needed,
                 "ceiling_pct_per_h": ceiling,
+                "target_conservative_pct_per_h": band(&periods.iter().map(|(left, t)| ((left - MARGIN_PCT).max(0.0), *t)).collect::<Vec<_>>()).0,
+                "headroom": {
+                    "left_now_pct": periods.iter().map(|p| p.0).sum::<f64>(),
+                    "refills": periods.iter().filter(|p| p.1 > 0.0).map(|p| json!({"in_h": p.1, "left_before_pct": p.0})).collect::<Vec<_>>(),
+                },
                 "factor": factor,
                 "factor_low": factor.map(|_| (rate - unc).max(0.0) / needed),
                 "factor_high": factor.map(|_| (rate + unc) / needed),
