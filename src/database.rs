@@ -479,7 +479,7 @@ impl Database {
     pub fn large_rows(&self, bytes: usize, limit: usize) -> Result<Vec<String>, String> {
         let mut query = self
             .0
-            .prepare_cached("SELECT name FROM tasks WHERE name != 'TODO.md' AND length(CAST(text AS BLOB)) > ?1 ORDER BY length(CAST(text AS BLOB)) DESC LIMIT ?2")
+            .prepare_cached("SELECT name FROM tasks WHERE name != 'TODO.md' AND status IN ('running', 'long_running', 'blocked') AND length(CAST(text AS BLOB)) > ?1 ORDER BY length(CAST(text AS BLOB)) DESC LIMIT ?2")
             .map_err(error)?;
         query
             .query_map(params![bytes as i64, limit as i64], |row| row.get(0))

@@ -58,6 +58,7 @@ step "copy the live state (read only) and the CLI-only release"
 python3 -c 'import sqlite3,sys; s=sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True); d=sqlite3.connect(sys.argv[2]); s.backup(d)' "$src_state/amh.sqlite3" "$S/amh.sqlite3"
 for f in amh-holds.json amh-agent-states.json; do [ -f "$src_state/$f" ] && cp "$src_state/$f" "$S/"; done
 cp "$src_logs"/*.md "$R/root/" 2>/dev/null || true
+for month in "$src_logs"/20[0-9][0-9][01][0-9]; do [ -d "$month" ] && cp -r "$month" "$R/root/"; done
 old=$(basename "$old_release")
 cp -r "$old_release" "$H/.local/lib/amh/$old"
 echo "$old" >"$H/.local/lib/amh/history"
