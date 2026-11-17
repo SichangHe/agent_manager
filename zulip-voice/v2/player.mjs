@@ -284,13 +284,18 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       earEl.src = url; earEl.play().catch(() => {}); earEl.onended = () => URL.revokeObjectURL(url);
     },
     /** Speaks `text` (a short prompt) on its own element, without touching the queue. Resolves with the spoken duration in ms (0 on failure). */
-    stopSay() { sayGen++; sayEl.pause(); },
+    stopSay() { sayGen++; sayEl.pause(); try { globalThis.speechSynthesis?.cancel(); } catch { /* ignore */ } },
     async say(text) {
       const myGen = ++sayGen;
-      const r = await voice.ttsBatch([text.replace(/[_-]/g, ' ')]);
-      if (!r.ok) return 0;
+      const spoken = text.replace(/[_-]/g, ' ');
+      const local = () => {   // no connection: the phone's own voice, so prompts and confirmations are never silent
+        try { if (!globalThis.speechSynthesis) return 0; speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(spoken); u.lang = 'en-US'; u.rate = 1.05; speechSynthesis.speak(u); log('audio', `spoken on the phone (no connection): ${spoken}`); return 800 + spoken.length * 70; } catch { return 0; }
+      };
+      if (navigator.onLine === false) return local();
+      const r = await voice.ttsBatch([spoken]);
+      if (!r.ok) return local();
       const u = await voice.clipUrl(r.clip, URL_FRESH_MS);
-      if (!u.ok) return 0;
+      if (!u.ok) return local();
       if (myGen !== sayGen) return 0;   // interrupted while it was being made
       sayEl.src = u.url;
       await sayEl.play().catch(() => {});

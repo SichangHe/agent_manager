@@ -177,7 +177,9 @@ export function createVoiceControl(ctx) {
     const r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening);
     if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
       log('vc', `stt failed: ${r.error}`);
-      if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute("Connection lost. Keep talking; I'll send when it's back."); }
+      if (vc?.mode === 'command') {   // 🧑 command mode with no connection gave zero feedback: say what still works (the on-device words), at most every 6 s
+        if (Date.now() - (vc.toldCommandOffline ?? 0) > 6000) { vc.toldCommandOffline = Date.now(); recorder.beep('empty'); toast('No connection: command not heard. Only on-device commands work.'); sayAndMute("No connection. I can't hear that command. Say cancel, stop, or switch to."); }
+      } else if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute("Connection lost. Keep talking; I'll send when it's back."); }
       if (vc) armSessionTimer();
       resumeBarge(); vcIdle(); return;
     }
