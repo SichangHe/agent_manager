@@ -260,7 +260,8 @@ pub fn pin(task: &mut Task, section: &str) -> Result<(), String> {
 pub const PRIORITY: &str = "priority";
 
 /// Task tags with their priorities, lower first, tasks without one last, ties by tag.
-pub fn by_priority(tasks: Vec<Task>) -> Vec<(String, Option<i64>)> {
+/// Tasks with an unread urgent message (`urgent`, oldest first) come first, all at one value below every set priority; then the rest by priority.
+pub fn by_priority(tasks: Vec<Task>, urgent: &[String]) -> Vec<(String, Option<i64>)> {
     // e.g. 1000 a, 2000 b, unset c
     let mut ranked: Vec<(String, Option<i64>)> = tasks
         .iter()
@@ -272,7 +273,16 @@ pub fn by_priority(tasks: Vec<Task>) -> Vec<(String, Option<i64>)> {
         })
         .collect();
     ranked.sort_by(|a, b| (a.1.is_none(), a.1, &a.0).cmp(&(b.1.is_none(), b.1, &b.0)));
-    ranked
+    let top = ranked.iter().filter_map(|r| r.1).min().unwrap_or(1).min(1) - 1;
+    let (mut first, rest): (Vec<_>, Vec<_>) = ranked
+        .into_iter()
+        .partition(|(tag, _)| urgent.contains(tag));
+    first.sort_by_key(|(tag, _)| urgent.iter().position(|u| u == tag));
+    first
+        .into_iter()
+        .map(|(tag, _)| (tag, Some(top)))
+        .chain(rest)
+        .collect()
 }
 
 /// The human's own task: items the human owns, which agents wait on with `--for human.md#N`; no agent runs it.

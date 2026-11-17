@@ -23,6 +23,7 @@ const OVERVIEW: &str = "What managers need to know:
 What every agent needs to know:
 - When the human messages you, or started you with this prompt, the text you end that turn with is sent to them. Use `amh tell human` only for what they need before you finish, and never repeat it in your final text. Answer other agents only with `amh tell`; your final text never goes to them.
 - Any task from the human that you do not finish in your reply is an open item: add it at once with `amh tell human --add 'ITEM'`.
+- `amh tell human --urgent` lifts your task to the top of the human's list until they read the message: only for a real emergency (something breaks or is lost unless the human acts now), never for ordinary news.
 - Work logs change only through amh; never edit them directly.";
 
 /// Build the whole command tree.
@@ -76,6 +77,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
                 .arg(Arg::new("subject").long("subject").hide(true).help("ignored: the thread is your task"))
                 .arg(Arg::new("report_label").long("report-label").value_parser(crate::mail::REPORT_LABELS).help("stock_news_watch only: display label/topic; replies retain the actual task owner"))
+                .arg(Arg::new("urgent").long("urgent").action(ArgAction::SetTrue).help("a real emergency only (something breaks or is lost unless the human acts now): your task is listed first in the human's clients until they read this message. PB urgent reports and sign-in/CAPTCHA notices count as urgent by themselves"))
                 .arg(Arg::new("email").long("email").action(ArgAction::SetTrue).help("send this one message by email even when human.transport=zulip; Markdown links `[label](url)` show as the label"))
                 .arg(Arg::new("text").value_name("TEXT").conflicts_with("file").help("message body; omit to read standard input"))
                 .arg(Arg::new("file").long("file").help("file holding the message body"))

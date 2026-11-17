@@ -1052,6 +1052,16 @@ pub fn run(values: &Value) -> Result<u8, String> {
             say(&receipt);
             say(&reminder);
             let _lock = store.lock()?;
+            if crate::urgent::is_urgent(flag("urgent"), given, text("report_label"))
+                && let Some(id) = receipt
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Message-ID: "))
+            {
+                crate::urgent::mark(&store, task.tag(), id.trim())?;
+                say(
+                    "Marked urgent: your task is listed first until the human reads this message.\n",
+                );
+            }
             request_effects(&store)?;
             match done.is_empty() {
                 true => String::new(),
@@ -1532,7 +1542,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             String::new()
         }
         ("task", "priorities") => {
-            let ranked = tasks::by_priority(store.active()?);
+            let ranked = tasks::by_priority(store.active()?, &crate::urgent::tags(&store));
             match flag("json") {
                 // Written by hand so the keys keep priority order.
                 true => {

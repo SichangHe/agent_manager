@@ -47,7 +47,7 @@ pub(crate) fn api(
 }
 
 /// Whether the human has not read bot message `id`, from its Zulip read receipts.
-fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
+pub(crate) fn unread_by_human(settings: &Settings, id: u64) -> Result<bool, String> {
     let human = settings::get(settings, "zulip.human_id").parse::<u64>();
     let human = human.map_err(|_| "invalid zulip.human_id")?;
     let path = format!("messages/{id}/read_receipts");

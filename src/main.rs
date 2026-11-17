@@ -37,6 +37,7 @@ mod settings;
 mod store;
 mod taskfile;
 mod tasks;
+mod urgent;
 mod view;
 mod wake;
 mod watch;

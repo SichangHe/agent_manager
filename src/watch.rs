@@ -1692,6 +1692,10 @@ pub fn run() -> u8 {
             log(&line);
         }
         log_elapsed("turn replies", phase);
+        // Urgent messages the human has read stop lifting their task to the top.
+        if let Err(error) = crate::urgent::expire(&settings, &store) {
+            log(&format!("urgent marks: {error}"));
+        }
         if crate::daemon::stopping() {
             return 0;
         }
