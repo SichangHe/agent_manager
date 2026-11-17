@@ -114,6 +114,11 @@ amh tell agent rh-daemon.md "held-must-not-arrive" --from rehearsal >/dev/null 2
 sleep 3; received "held-must-not-arrive" && fail "a held agent got a message"
 amh agent release rh-daemon.md >/dev/null || fail "agent release"
 echo "hold respected through amhd"
+# A long task body: its older part moves out of the task row; it must read whole, and survive the rollback below.
+pad=$(printf 'x%.0s' $(seq 600))
+for i in $(seq 90); do amh task note rh-daemon.md "chunk-check-$i $pad" >/dev/null || fail "task note $i"; done
+amh task show rh-daemon.md | grep -q "chunk-check-1 " || fail "the older body of a long task is missing"
+echo "long task body split and read whole"
 
 step "4. daemon restart under load loses nothing"
 pids=()
@@ -133,6 +138,9 @@ sysd --user is-active amhd.service >/dev/null && fail "amhd still runs after the
 sleep 3
 sysd --user is-active amh-watch.service >/dev/null || fail "old watcher not running"
 [ "$(pgrep -fc "$H/.cargo/bin/amh manager watch")" = 1 ] || fail "not exactly one watcher after rollback"
+amh task show rh-daemon.md | grep -q "chunk-check-1 " || fail "a long task lost its older body in the rollback"
+grep -q "chunk-check-1 " "$R/root/rh-daemon.md" || fail "the exported long task lost its older body"
+echo "long task whole after the rollback"
 smoke rolledback
 grep -qi panick "$S/amh-watch.log" && fail "watcher log has a panic"
 
