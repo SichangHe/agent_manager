@@ -143,6 +143,8 @@ impl Database {
              CREATE INDEX IF NOT EXISTS events_by_subject ON events(subject, id);
              CREATE TABLE IF NOT EXISTS task_old_body (name TEXT NOT NULL, seq INTEGER NOT NULL, text TEXT NOT NULL, PRIMARY KEY (name, seq));
              CREATE TABLE IF NOT EXISTS resolved_items (id TEXT PRIMARY KEY, owner TEXT NOT NULL, resolved_at TEXT, record TEXT NOT NULL CHECK(json_valid(record)));
+             CREATE TABLE IF NOT EXISTS sent_mail (id INTEGER PRIMARY KEY AUTOINCREMENT, at INTEGER NOT NULL, tag TEXT NOT NULL);
+             CREATE INDEX IF NOT EXISTS sent_mail_at ON sent_mail (at);
              CREATE TABLE IF NOT EXISTS todo_moves (seq INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, address TEXT NOT NULL, section TEXT NOT NULL);"
         ).map_err(error)?;
         // When a failed message may be tried again (Unix seconds); added after the table existed.
@@ -916,6 +918,74 @@ impl Database {
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
+    }
+
+    /// The active tasks whose stored row contains both words.
+    pub fn active_names_mentioning_both(&self, first: &str, second: &str) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT name FROM tasks WHERE status IN ('running', 'long_running', 'blocked') AND instr(text, ?2) > 0 AND instr(text, ?1) > 0 ORDER BY name")
+            .map_err(error)?;
+        query
+            .query_map([first, second], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+
+    /// Every task whose stored row contains `word`, any status.
+    pub fn names_mentioning(&self, word: &str) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT name FROM tasks WHERE instr(text, ?1) > 0 ORDER BY name")
+            .map_err(error)?;
+        query
+            .query_map([word], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+
+    /// Record one email sent to the human on `tag`: one row, not a rewrite of the whole sent log.
+    pub fn add_sent_row(&self, at: i64, tag: &str) -> Result<(), String> {
+        let sql = "INSERT INTO sent_mail (at, tag) VALUES (?1, ?2)";
+        if let Some(done) = one(sql, vec![at.into(), tag.to_owned().into()]) {
+            return done;
+        }
+        self.0.execute(sql, params![at, tag]).map_err(error).map(|_| ())
+    }
+
+    /// The sent rows as the old log's text, `EPOCH TAG` per line, oldest first.
+    pub fn sent_rows_text(&self) -> Result<String, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT at, tag FROM sent_mail ORDER BY id")
+            .map_err(error)?;
+        let rows = query
+            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .map_err(error)?;
+        let mut text = String::new();
+        for row in rows {
+            let (at, tag) = row.map_err(error)?;
+            text.push_str(&format!("{at} {tag}\n"));
+        }
+        Ok(text)
+    }
+
+    /// Drop sent rows older than `since` (epoch seconds).
+    pub fn prune_sent_rows(&self, since: i64) -> Result<(), String> {
+        let any: bool = self
+            .0
+            .query_row("SELECT EXISTS(SELECT 1 FROM sent_mail WHERE at < ?1)", [since], |row| row.get(0))
+            .map_err(error)?;
+        if !any {
+            return Ok(());
+        }
+        let sql = "DELETE FROM sent_mail WHERE at < ?1";
+        if let Some(done) = one(sql, vec![since.into()]) {
+            return done;
+        }
+        self.0.execute(sql, [since]).map_err(error).map(|_| ())
     }
 
     /// The active tasks whose text contains any of `words`.

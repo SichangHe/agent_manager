@@ -423,6 +423,7 @@ fn take_in(
     let main_manager = settings::get(settings, "main_manager");
     let task = &decide::route(&tasks, main_manager, &mail.subject, &mail.body)?.name.clone();
     let _lock = store.lock()?;
+    let _site = crate::store::Phase::new("watch.line425");
     write_private(stored, &decide::stored_mail(&mail.subject, &mail.body))
         .map_err(|error| format!("cannot write {}: {error}", stored.display()))?;
     let mut task = store.load(task)?;
@@ -525,6 +526,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
                 )
             };
             let _lock = store.lock()?;
+            let _site = crate::store::Phase::new("watch.line527");
             if let Some(routed) = routed
                 && !crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
                     .received_mail(&key)?
@@ -596,6 +598,7 @@ fn route_mail(
             let name = format!("routed-{kind}-{generation}-{uid}.txt");
             let captured = (|| -> Result<bool, String> {
                 let _lock = store.lock()?;
+                let _site = crate::store::Phase::new("watch.line598");
                 if crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
                     .received_mail(&key)?
                 {
@@ -687,6 +690,7 @@ fn store_guest_mail(
     let key = format!("guest:{mail_dir}/{stored}");
     {
         let _lock = store.lock()?;
+        let _site = crate::store::Phase::new("watch.line689");
         if crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
             .received_mail(&key)?
         {
@@ -722,6 +726,7 @@ fn store_guest_mail(
     )
     .map_err(failed)?;
     let _lock = store.lock()?;
+    let _site = crate::store::Phase::new("watch.line724");
     let mut task = store.load(&guest::task_name(settings))?;
     guest::queue(&mut task, &mail_dir, stored);
     store.receive_mail(&key, &task).map(|_| ())
@@ -892,6 +897,7 @@ fn deliver_block(
         match omnigent::set_hold(&plan.target, None)
             .and_then(|()| {
                 let _lock = store.lock()?;
+                let _site = crate::store::Phase::new("watch.line894");
                 crate::actions::clear_stopped(store, &plan.target)
             })
         {
@@ -1198,6 +1204,7 @@ impl Watcher {
                             log(&error);
                         }
                         let _lock = store.lock()?;
+                        let _site = crate::store::Phase::new("watch.line1200");
                         if let Err(error) = database.finish_message(id, true, "") {
                             log(&error);
                         }
@@ -1217,6 +1224,7 @@ impl Watcher {
                         ));
                         if started {
                             let _lock = store.lock()?;
+                            let _site = crate::store::Phase::new("watch.line1219");
                             if let Err(error) = database.finish_message(id, true, "") {
                                 log(&error);
                             }
@@ -1230,6 +1238,7 @@ impl Watcher {
             if deliver_block(settings, store, task, &plan, &block) {
                 self.failed_at.remove(name);
                 let _lock = store.lock()?;
+                let _site = crate::store::Phase::new("watch.line1232");
                 // `amh stop` may have dropped the message meanwhile; a crash before this line delivers it again.
                 let finishing = crate::store::Phase::new("deliver.finish_message");
                 if let Err(error) = database.finish_message(id, true, "") {
@@ -1332,7 +1341,11 @@ fn chase_answers(settings: &Settings, store: &Store) -> Result<(), String> {
         return Ok(());
     }
     let active = store.active()?;
-    let sent = store.record(mail::SENT_LOG)?;
+    // Older sends in the record, newer ones as rows.
+    let mut sent = store.record(mail::SENT_LOG)?;
+    if let Some(database) = store.database()? {
+        sent.push_str(&database.sent_rows_text()?);
+    }
     let paused: BTreeSet<&str> = active
         .iter()
         .filter(|task| omnigent::status(settings, task.address()).0 == "paused")
@@ -1561,7 +1574,8 @@ fn every(name: &'static str, every: Duration, work: fn(&Settings, &Store) -> Dur
 fn archive_once(_settings: &Settings, store: &Store) -> Duration {
     let mut wait = Duration::from_secs(3600);
     let phase = Instant::now();
-    let archived = store.lock().and_then(|_lock| {
+    // Off the store lock (it was held ~0.5 s): events are pruned through the writer, owners saved under short locks, the sent log trimmed by compare-and-set.
+    let archived = (|| -> Result<usize, String> {
         let mut database = crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?;
         crate::archive::archive_events(
             &mut database,
@@ -1593,9 +1607,10 @@ fn archive_once(_settings: &Settings, store: &Store) -> Duration {
             crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
                 .replace_record_if(crate::mail::SENT_LOG, &sent, &kept)?;
         }
+        crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?.prune_sent_rows(since)?;
         store.refresh_exports()?;
         Ok(count)
-    });
+    })();
     match archived {
         Ok(_) => wait = ARCHIVE_EVERY,
         Err(error) => log(&format!("archival failed: {error}")),

@@ -136,8 +136,20 @@ pub fn archive_requests(store: &Store, now: DateTime<Utc>) -> Result<usize, Stri
             persist_batch(&store.root.join("archive"), &day, "requests", &records)?;
             count += records.len();
         }
-        requests::write(task, &keep);
-        store.save(task)?;
+        // Each owner is changed under its own short lock, read fresh: the pass itself runs without the store lock.
+        let archived: BTreeSet<String> = requests::read(task)?
+            .into_iter()
+            .map(|r| r.id)
+            .filter(|id| !keep.iter().any(|k| &k.id == id))
+            .collect();
+        let _lock = store.lock()?;
+        let mut fresh = store.load(&task.name)?;
+        let left: Vec<_> = requests::read(&fresh)?
+            .into_iter()
+            .filter(|r| !archived.contains(&r.id))
+            .collect();
+        requests::write(&mut fresh, &left);
+        store.save(&fresh)?;
     }
     Ok(count)
 }

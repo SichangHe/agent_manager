@@ -873,10 +873,14 @@ pub fn record_sent(
         root: settings::work_logs(settings),
         state_dir: state_dir.to_owned(),
     };
-    store.append_record(
-        SENT_LOG,
-        &format!("{} {tag}\n", chrono::Utc::now().timestamp()),
-    )
+    // One row per email (appending to the whole log rewrote ~200 KB in the writer each time); older rows stay in the record, read together.
+    match store.database()? {
+        Some(database) => database.add_sent_row(chrono::Utc::now().timestamp(), tag),
+        None => store.append_record(
+            SENT_LOG,
+            &format!("{} {tag}\n", chrono::Utc::now().timestamp()),
+        ),
+    }
 }
 
 /// Email the human on the tag's thread and return the new Message-ID.

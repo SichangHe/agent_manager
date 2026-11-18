@@ -21,7 +21,7 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
     // Only active tasks whose row names the address (found in SQL), not every task parsed (~100 ms under the lock after each delivery).
     let candidates: Vec<Task> = match store.database()? {
         Some(database) => database
-            .active_names_mentioning(address)?
+            .active_names_mentioning_both(address, "agent_stopped: true")?
             .into_iter()
             .map(|name| store.load(&name))
             .collect::<Result<_, _>>()?,
@@ -1757,8 +1757,17 @@ pub fn run(values: &Value) -> Result<u8, String> {
         ("agent", "stop") => {
             let at = agents::address_of(&store, need("who"))?;
             let said = omnigent::stop(&settings, &at).map_err(failed)?;
+            // Candidates found in SQL before the lock (parsing every task under it took ~120 ms); each is read again under it.
+            let names = match store.database()? {
+                Some(database) => database.names_mentioning(&at)?,
+                None => store.all()?.into_iter().map(|task| task.name).collect(),
+            };
             let _lock = store.lock()?;
-            for mut task in store.all()?.into_iter().filter(|task| task.address() == at) {
+            for mut task in names
+                .iter()
+                .filter_map(|name| store.load(name).ok())
+                .filter(|task| task.address() == at)
+            {
                 task.fields.retain(|(key, _)| key != "agent_stopped");
                 task.fields
                     .push(("agent_stopped".to_owned(), "true".to_owned()));
