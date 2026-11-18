@@ -719,6 +719,26 @@ impl Store {
             .to_string()
     }
 
+    /// Whether the root copy of `name` is exactly the version committed in the work-log git history: an old state restored from git, not an edit, so removing it loses nothing.
+    // The manager: "amh left these task files unfiled ... the root copy is not merged" — all were git's committed old versions brought back to the root.
+    fn committed_copy(&self, name: &str) -> bool {
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&self.root)
+                .args(args)
+                .output()
+                .ok()
+                .filter(|out| out.status.success())
+                .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+        };
+        let file = self.root.join(name).to_string_lossy().into_owned();
+        match (git(&["rev-parse", "-q", "--verify", &format!("HEAD:{name}")]), git(&["hash-object", "--", &file])) {
+            (Some(committed), Some(here)) => !committed.is_empty() && committed == here,
+            _ => false,
+        }
+    }
+
     /// Decide the file's home from its status and move it there, so the root holds only active tasks.
     ///
     /// A done task goes to the `YYYYMM` folder of the month it became done; a reopened task returns to the root.
@@ -743,7 +763,7 @@ impl Store {
             (true, Some(month)) => {
                 let filed = self.root.join(month).join(name);
                 if root_file.is_file() {
-                    if fs::read(&root_file).ok() == fs::read(&filed).ok() {
+                    if fs::read(&root_file).ok() == fs::read(&filed).ok() || self.committed_copy(name) {
                         let _ = fs::remove_file(&root_file);
                     } else {
                         self.report_filing(database, &format!("{name}: edited at the root although filed under {}; the root copy is not merged", filed.parent().and_then(|p| p.file_name()).unwrap_or_default().to_string_lossy()))?;
@@ -768,7 +788,7 @@ impl Store {
                     database.set_record(&key, &found)?;
                     let filed = self.root.join(&found).join(name);
                     if root_file.is_file() {
-                        if fs::read(&root_file).ok() == fs::read(&filed).ok() {
+                        if fs::read(&root_file).ok() == fs::read(&filed).ok() || self.committed_copy(name) {
                             let _ = fs::remove_file(&root_file);
                         } else {
                             self.report_filing(database, &format!("{name}: edited at the root although filed under {found}; the root copy is not merged"))?;
@@ -1610,6 +1630,25 @@ mod tests {
             "exported to the filed folder"
         );
         assert!(!root.join("t.md").exists(), "not recreated at the root");
+        let _ = fs::remove_dir_all(&root);
+        Ok(())
+    }
+
+    #[test]
+    fn a_root_copy_equal_to_the_committed_version_is_recognized() -> Result<(), Box<dyn std::error::Error>> {
+        let root = std::env::temp_dir().join(format!("amh-committed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir(&root)?;
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&root).args(args).output();
+        git(&["init", "-q"])?;
+        fs::write(root.join("t.md"), "old\n")?;
+        git(&["add", "t.md"])?;
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"])?;
+        let store = Store { root: root.clone(), state_dir: root.join("state") };
+        assert!(store.committed_copy("t.md"));
+        fs::write(root.join("t.md"), "edited\n")?;
+        assert!(!store.committed_copy("t.md"));
+        assert!(!store.committed_copy("absent.md"));
         let _ = fs::remove_dir_all(&root);
         Ok(())
     }
