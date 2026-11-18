@@ -1374,8 +1374,14 @@ impl Store {
         }
         // Only the active tasks whose row names the address (an index-free scan in SQLite, no parsing of every task: that held the store lock ~25 ms).
         let mut matches: Vec<Task> = match self.database()? {
-            Some(database) => database
-                .active_names_mentioning(&address)?
+            // Indexed lookup first; the text scan only when the front matter quotes the address (then the column does not match it).
+            Some(database) => (if let at = database.active_names_at(&address)?
+                && !at.is_empty()
+            {
+                at
+            } else {
+                database.active_names_mentioning(&address)?
+            })
                 .into_iter()
                 .map(|name| self.load(&name))
                 .collect::<Result<Vec<_>, _>>()?,

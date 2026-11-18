@@ -175,6 +175,26 @@ impl Database {
                 )
                 .map_err(error)?;
         }
+        // A task's agent address, likewise computed and indexed, so `own` finds the caller's task in one lookup.
+        let has_runat: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_xinfo('tasks') WHERE name = 'runat')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !has_runat {
+            connection
+                .execute_batch(
+                    "ALTER TABLE tasks ADD COLUMN runat TEXT GENERATED ALWAYS AS (
+                         CASE WHEN instr(text, char(10) || 'runat: ') > 0 THEN
+                         substr(text, instr(text, char(10) || 'runat: ') + 8,
+                                instr(substr(text, instr(text, char(10) || 'runat: ') + 8), char(10)) - 1) END
+                     ) VIRTUAL;
+                     CREATE INDEX IF NOT EXISTS tasks_by_runat ON tasks(runat);",
+                )
+                .map_err(error)?;
+        }
         if !has_retry {
             connection
                 .execute_batch(
@@ -915,6 +935,19 @@ impl Database {
             .map_err(error)?;
         query
             .query_map([word], |row| row.get(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)
+    }
+
+    /// The active tasks whose front matter says `runat: ADDRESS`, through the `runat` index.
+    pub fn active_names_at(&self, address: &str) -> Result<Vec<String>, String> {
+        let mut query = self
+            .0
+            .prepare_cached("SELECT name FROM tasks WHERE runat = ?1 AND status IN ('running', 'long_running', 'blocked') ORDER BY name")
+            .map_err(error)?;
+        query
+            .query_map([address], |row| row.get(0))
             .map_err(error)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(error)
