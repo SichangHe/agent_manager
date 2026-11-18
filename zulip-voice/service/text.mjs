@@ -80,14 +80,36 @@ export function parseBlocks(body) {
 }
 
 /** What a speech engine should say for markdown `text`. */
-export function speechText(text) {
+const UNIT_WORDS = {hr: 'hour', h: 'hour', mo: 'month', yr: 'year', min: 'minute', sec: 'second', s: 'second'};
+
+/**
+ * Spoken form of numbers next to symbols. The speech engine DROPS or garbles a number in these cases (measured with the production TTS
+ * and STT workers, 2026-11-17): "~2%/hour" is spoken as "hour", "≈6.0%" as "percent", "~$5" as nothing, "6.0–8.0%" as "six zero eight zero percent",
+ * "+6.0%" as "plus six zero percent", "3%→8%" as "three percent. Tried eight percent"; "<6%" and ">6%" lose the comparison.
+ */
+export function speakNumbers(text) {
   return text
+    .replace(/[~≈∼]\s?(?=[$+\-−]?\d)/g, 'about ')
+    .replace(/\s?(?:→|⇒|->)\s?/g, ' to ')
+    .replace(/(^|[\s(])<\s?(?=\$?\d)/g, '$1less than ')
+    .replace(/(^|[\s(])>\s?(?=\$?\d)/g, '$1more than ')
+    .replace(/(\d)\s?[–—]\s?(?=[-+]?\$?\d)/g, '$1 to ')                            // en/em dash between numbers is a range
+    .replace(/(\d+(?:\.\d+)?)\s?-\s?(?=\d+(?:\.\d+)?\s?%)/g, '$1 to ')            // "50-60%" (a hyphen between plain numbers may be a date or an id: left alone)
+    .replace(/(\d)\.0+(?=\s?%|\s+to\s+[-+]?\d)/g, '$1')                             // "6.0%" and "6.0 to 8.0%": the spoken ".0" garbles
+    .replace(/(\d(?:\.\d+)?)\s?[kK]\b(?![-\w])/g, '$1 thousand')                       // "10k", "$1.5k" (spoken as the letter K otherwise)
+    .replace(/(\d(?:\.\d+)?)M\b(?![-\w])/g, '$1 million')                                // "2.5M", "779M"; "M1" (a chip) has no digit before the M
+    .replace(/\b(\d{1,3}):(\d)\b(?![:\d])/g, '$1 to $2')                                   // ratio "3:1"; a time such as 12:30 has two digits after the colon
+    .replace(/%\s?\/\s?(hour|hr|h|day|week|month|mo|year|yr|minute|min|second|sec|s)\b/gi, (_, u) => ' percent per ' + (UNIT_WORDS[u.toLowerCase()] ?? u.toLowerCase()));
+}
+
+export function speechText(text) {
+  return speakNumbers(text
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/https?:\/\/\S+/g, 'link')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/(\*\*|__|\*|~~)/g, '')
     .replace(/(\w)_(?=\w)/g, '$1 ')
-    .replace(/^>\s?/, '')
+    .replace(/^>\s?/, ''))
     .replace(/\s+/g, ' ')
     .trim();
 }

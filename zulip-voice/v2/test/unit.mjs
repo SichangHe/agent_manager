@@ -97,3 +97,23 @@ console.log('unit ok');
   const spoken = messageChunks('| a | b |\n|---|---|\n| 1 | 2 |').chunks.filter(c => c.speech).map(c => c.speech);
   assert.deepEqual(spoken, ['Table start.', 'a.', 'b.', 'Row 1.', '1.', '2.']);
 }
+
+{   // 🧑 "The speech drops numbers. E.g. 6.0% gets pronounced as zero percent": symbols next to numbers made the speech engine drop or garble them (measured with the production workers)
+  const cases = [
+    ['It allows ~2%/hour.', 'It allows about 2 percent per hour.'],
+    ['Use ~6.0%.', 'Use about 6%.'],
+    ['It costs ~$5.', 'It costs about $5.'],
+    ['Roughly ≈6.0% of cases.', 'Roughly about 6% of cases.'],
+    ['From 1–2% to 6.0–8.0%.', 'From 1 to 2% to 6 to 8%.'],
+    ['Between 50-60% of users.', 'Between 50 to 60% of users.'],
+    ['Went 3%→8% today.', 'Went 3% to 8% today.'],
+    ['It is <6% now, >4% then.', 'It is less than 6% now, more than 4% then.'],
+    ['Gain of +6.0%.', 'Gain of +6%.'],
+    ['Rate 6.0%/hour here.', 'Rate 6 percent per hour here.'],
+    ['10k users, 2.5M events, ratio 3:1, at 12:30.', '10 thousand users, 2.5 million events, ratio 3 to 1, at 12:30.'],
+    ['On 2026-11-17, v2.0 had 6.5% and 3.5 seconds.', 'On 2026-11-17, v2.0 had 6.5% and 3.5 seconds.'],   // dates, versions, real decimals stay
+    ['Use <br> tags and a>b, in ~/bin.', 'Use <br> tags and a>b, in ~/bin.'],
+    ['An Apple M1 did 779M routes.', 'An Apple M1 did 779 million routes.'],
+  ];
+  for (const [from, to] of cases) assert.equal(speechText(from), to);
+}
