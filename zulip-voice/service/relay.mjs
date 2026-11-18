@@ -362,7 +362,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   let prioCache = {at: 0, value: {}};
   async function priorities() {
     if (now() - prioCache.at < 30000) return prioCache.value;
-    const value = await new Promise(res => execFile(process.env.AMH_BIN || '/home/sichangheagent/.config/bin/amh', ['task', 'priorities', '--json'], {timeout: 3000}, (e, out) => { try { res(e ? {} : JSON.parse(out)); } catch { res({}); } }));
+    const value = await new Promise(res => execFile(globalThis.process.env.AMH_BIN || '/home/sichangheagent/.config/bin/amh', ['task', 'priorities', '--json'], {timeout: 3000}, (e, out) => { try { res(e ? {} : JSON.parse(out)); } catch { res({}); } }));
     prioCache = {at: now(), value}; return value;
   }
 

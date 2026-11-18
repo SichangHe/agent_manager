@@ -117,3 +117,10 @@ console.log('unit ok');
   ];
   for (const [from, to] of cases) assert.equal(speechText(from), to);
 }
+
+{   // The relay's own function named `process` shadows Node's `process`: any `process.env` inside createRelay reads a property of that function and throws, which broke every ping (and so priorities) for days.
+  const {readFileSync} = await import('node:fs');
+  const src = readFileSync(new URL('../../service/relay.mjs', import.meta.url), 'utf8');
+  const from = src.indexOf('export async function createRelay'), inner = src.slice(from, src.indexOf('\n}\n', from));   // the function body only: startup code after it may use process
+  assert.equal(/\bprocess\.(env|argv|exit|cwd|platform)\b/.test(inner.replace(/globalThis\.process\./g, '')), false, 'use globalThis.process inside createRelay: a local function named `process` shadows it');
+}
