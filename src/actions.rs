@@ -2159,7 +2159,8 @@ mod maintain_tests {
             &root.join("TODO.md"),
             "current:\n\nhuman pending:\n\nlow priority:\n\nprevious:\n",
         )?;
-        let _lock = store.lock()?;
+        // `maintain` takes the store lock per task itself.
+        drop(store.lock()?);
         assert!(super::maintain(&store)?.is_empty());
         assert_eq!(store.load("waiter.md")?.status(), "blocked");
         let human = store.load("human.md")?;
