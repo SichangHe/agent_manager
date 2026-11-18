@@ -18,6 +18,13 @@ use crate::{decide, guest, omnigent, requests, settings, taskfile, view, watch, 
 
 pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
     let _phase = crate::store::Phase::new("clear_stopped");
+    // Most deliveries go to agents that were never stopped: a record lookup instead of scanning rows. Marks made before the record existed are found once by `index_stopped`.
+    if let Some(database) = store.database()?
+        && database.record(&format!("stopped:{address}"))?.is_none()
+        && database.record("stopped-index:v1")?.is_some()
+    {
+        return Ok(());
+    }
     // Only active tasks whose row names the address (found in SQL), not every task parsed (~100 ms under the lock after each delivery).
     let candidates: Vec<Task> = match store.database()? {
         Some(database) => database
@@ -34,7 +41,27 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
         task.fields.retain(|(key, _)| key != "agent_stopped");
         store.save(&task)?;
     }
+    if let Some(database) = store.database()? {
+        database.delete_record(&format!("stopped:{address}"))?;
+    }
     Ok(())
+}
+
+/// Once: remember the address of every active task still marked stopped (for `clear_stopped`'s quick check).
+pub fn index_stopped(store: &Store) -> Result<(), String> {
+    let Some(database) = store.database()? else {
+        return Ok(());
+    };
+    if database.record("stopped-index:v1")?.is_some() {
+        return Ok(());
+    }
+    for name in database.active_names_mentioning("agent_stopped: true")? {
+        let task = store.load(&name)?;
+        if task.field("agent_stopped") == Some("true") {
+            database.set_record(&format!("stopped:{}", task.address()), "1")?;
+        }
+    }
+    database.set_record("stopped-index:v1", "1")
 }
 
 /// Commit dependency releases and delivery intents; the watcher sends them with `deliver_requests`.
@@ -1763,6 +1790,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 None => store.all()?.into_iter().map(|task| task.name).collect(),
             };
             let _lock = store.lock()?;
+            // Remembered, so clearing stopped marks after each delivery looks only when one exists.
+            if let Some(database) = store.database()? {
+                database.set_record(&format!("stopped:{at}"), "1")?;
+            }
             for mut task in names
                 .iter()
                 .filter_map(|name| store.load(name).ok())

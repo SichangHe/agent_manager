@@ -1779,6 +1779,9 @@ pub fn run() -> u8 {
             log(&line);
         }
         log_elapsed("turn replies", phase);
+        if let Err(error) = crate::actions::index_stopped(&store) {
+            log(&format!("indexing stopped marks failed: {error}"));
+        }
         // Large rows from before the split shrink a few per pass, outside any command.
         if let Err(error) = store.compact_rows(3) {
             log(&format!("compacting task rows failed: {error}"));

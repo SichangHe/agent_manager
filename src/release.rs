@@ -292,6 +292,8 @@ fn flush_task_bodies() -> Result<String, String> {
     // Queued task-list moves and resolved requests go back where an older build reads them.
     database.fold_todo(true)?;
     database.fold_sent_rows()?;
+    // Stopped marks an older build sets are not remembered: index them again when this build returns.
+    database.delete_record("stopped-index:v1")?;
     let restored = database.restore_resolved()?;
     Ok(format!(
         "amh: {moved} long task bodies joined back and {restored} resolved requests put back for the older build\n"

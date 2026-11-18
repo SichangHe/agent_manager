@@ -203,6 +203,7 @@ fn revive(settings: &Settings, store: &Store, table: &str, name: &str) -> Result
     };
     let address = agents::start_task(settings, store, &new)?;
     let _lock = store.lock()?;
+    let _site = crate::store::Phase::new("jobs.line205");
     let mut task = store.load(name)?;
     let blocked_on = task.field("blocked_on").map(str::to_owned);
     tasks::set_status(&mut task, "long_running", blocked_on.as_deref())?;

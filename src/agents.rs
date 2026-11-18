@@ -92,6 +92,7 @@ pub fn follow_moves(settings: &Settings, store: &Store) -> Result<Vec<String>, S
             }
         }
         let _lock = store.lock()?;
+        let _site = crate::store::Phase::new("agents.line94");
         let mut fresh = store.load(&task.name)?;
         if fresh.address() != old {
             continue;
@@ -221,6 +222,7 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
     .map_err(agent)?;
     {
         let _lock = store.lock()?;
+        let _site = crate::store::Phase::new("agents.line223");
         let mut task = if store.contains(start.name)? {
             store.load(start.name)?
         } else {
@@ -312,6 +314,7 @@ pub fn close_task(
 ) -> Result<String, String> {
     let task = {
         let _lock = store.lock()?;
+        let _site = crate::store::Phase::new("agents.line314");
         let mut task = store.load(name)?;
         crate::requests::can_close(&task, &store.all()?)?;
         if !store.queued_mail(name)?.is_empty() {

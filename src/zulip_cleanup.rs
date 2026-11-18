@@ -178,14 +178,18 @@ pub fn run(settings: &Settings, store: &Store) -> Result<String, String> {
             if own_message_uploads(settings, message).is_err() {
                 continue;
             }
-            let _lock = store.lock()?;
-            let current_task = store.load(&format!("{topic}.md"))?;
-            if current_task.status() != "done"
-                || !current_task.items.is_empty()
-                || requests::read(&current_task)?
-                    .iter()
-                    .any(|request| request.stage != requests::Stage::Resolved)
-            {
+            // The check needs the lock; the Zulip call (~15–20 ms over the network) runs after it is released.
+            let closed = {
+                let _lock = store.lock()?;
+                let _site = crate::store::Phase::new("zulip_cleanup.line183");
+                let current_task = store.load(&format!("{topic}.md"))?;
+                current_task.status() == "done"
+                    && current_task.items.is_empty()
+                    && requests::read(&current_task)?
+                        .iter()
+                        .all(|request| request.stage == requests::Stage::Resolved)
+            };
+            if !closed {
                 continue;
             }
             zulip::api(settings, "DELETE", &format!("messages/{id}"), &[])?;
