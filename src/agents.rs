@@ -109,6 +109,12 @@ pub fn follow_moves(settings: &Settings, store: &Store) -> Result<Vec<String>, S
             }
         }
         store.save(&fresh)?;
+        // A stopped mark moves with the agent: remember it at the new address.
+        if fresh.field("agent_stopped") == Some("true")
+            && let Some(database) = store.database()?
+        {
+            database.set_record(&format!("stopped:{new}"), "1")?;
+        }
         store.place(&fresh)?;
         for report in work::repointed(store.active()?, &old, &new) {
             store.save(&report)?;

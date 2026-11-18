@@ -41,8 +41,16 @@ pub fn clear_stopped(store: &Store, address: &str) -> Result<(), String> {
         task.fields.retain(|(key, _)| key != "agent_stopped");
         store.save(&task)?;
     }
+    // Forgotten only when no task at the address (of any status) still carries the mark.
     if let Some(database) = store.database()? {
-        database.delete_record(&format!("stopped:{address}"))?;
+        let still = database
+            .names_mentioning(address)?
+            .iter()
+            .filter_map(|name| store.load(name).ok())
+            .any(|task| task.address() == address && task.field("agent_stopped") == Some("true"));
+        if !still {
+            database.delete_record(&format!("stopped:{address}"))?;
+        }
     }
     Ok(())
 }
@@ -55,7 +63,8 @@ pub fn index_stopped(store: &Store) -> Result<(), String> {
     if database.record("stopped-index:v1")?.is_some() {
         return Ok(());
     }
-    for name in database.active_names_mentioning("agent_stopped: true")? {
+    let _lock = store.lock()?;
+    for name in database.names_mentioning("agent_stopped: true")? {
         let task = store.load(&name)?;
         if task.field("agent_stopped") == Some("true") {
             database.set_record(&format!("stopped:{}", task.address()), "1")?;
