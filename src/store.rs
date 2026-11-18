@@ -392,7 +392,15 @@ impl Store {
             .record(&format!("month:{name}"))?
             .unwrap_or_default();
         // A file untouched since the last export holds no typing; one stat instead of reading it (this runs in every save).
-        if !force && untouched_since(&self.root.join(&month).join(name), stamp(database)?) {
+        let path = self.root.join(&month).join(name);
+        if !force && untouched_since(&path, stamp(database)?) {
+            return Ok(None);
+        }
+        // Nor does a file still exactly as the exporter left it.
+        if !force
+            && let Some(now) = file_stamp(&path)
+            && database.record(&format!("filestat:{name}"))?.as_deref() == Some(now.as_str())
+        {
             return Ok(None);
         }
         if name == "TODO.md" {
@@ -441,6 +449,19 @@ impl Store {
             known.push(key);
         }
         Ok(Some(database))
+    }
+
+    /// The lock under which task files are written (exports); held, task files do not change.
+    pub fn export_lock(&self) -> Result<File, String> {
+        let exporting = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.state_dir.join("amh-export.lock"))
+            .map_err(|error| format!("amh: cannot open the export lock: {error}"))?;
+        exporting
+            .lock()
+            .map_err(|error| format!("amh: cannot take the export lock: {error}"))?;
+        Ok(exporting)
     }
 
     /// Regenerate exports on every lock, repairing an interrupted export from committed state.
@@ -513,6 +534,13 @@ impl Store {
             }
             if recorded.as_deref() != Some(&text) {
                 database.set_export_text(&name, &text, row_before.as_deref())?;
+            }
+            // The file as amh left it (mtime and size): a save that finds it so knows nothing was typed without reading it.
+            if let Some(stamp) = file_stamp(&path) {
+                let key = format!("filestat:{name}");
+                if database.record(&key)?.as_deref() != Some(stamp.as_str()) {
+                    database.set_record(&key, &stamp)?;
+                }
             }
         }
         database.set_record("export:through", &through.to_string())?;
@@ -1322,6 +1350,16 @@ impl Store {
             return self.load(name);
         }
         let address = omnigent::own_address()?;
+        // The task last found at this address, checked: one row read instead of scanning every active row for the address (4–7 ms in each command that names no task file).
+        let key = format!("own:{address}");
+        if let Some(database) = self.database()?
+            && let Some(name) = database.record(&key)?
+            && let Ok(task) = self.load(&name)
+            && task.address() == address
+            && task.is_active()
+        {
+            return Ok(task);
+        }
         // Only the active tasks whose row names the address (an index-free scan in SQLite, no parsing of every task: that held the store lock ~25 ms).
         let mut matches: Vec<Task> = match self.database()? {
             Some(database) => database
@@ -1335,7 +1373,13 @@ impl Store {
         .filter(|task| task.address() == address)
         .collect();
         match matches.len() {
-            1 => Ok(matches.remove(0)),
+            1 => {
+                let task = matches.remove(0);
+                if let Some(database) = self.database()? {
+                    let _ = database.set_record(&key, &task.name);
+                }
+                Ok(task)
+            }
             n => Err(format!(
                 "amh: {n} active tasks run at {address}; pass --task-file NAME.md"
             )),
@@ -1991,4 +2035,11 @@ mod tests {
 /// The inode of `path`, 0 when it does not exist.
 fn inode(path: &std::path::Path) -> u64 {
     fs::metadata(path).map_or(0, |meta| std::os::unix::fs::MetadataExt::ino(&meta))
+}
+
+/// A file's modification time (ns) and size, as `MTIME:SIZE`; `None` when it cannot be read.
+fn file_stamp(path: &std::path::Path) -> Option<String> {
+    let meta = fs::metadata(path).ok()?;
+    let at = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}:{}", at.as_nanos(), meta.len()))
 }

@@ -1569,6 +1569,22 @@ fn archive_once(_settings: &Settings, store: &Store) -> Duration {
             chrono::Utc::now(),
         )?;
         let count = crate::archive::archive_requests(store, chrono::Utc::now())?;
+        // The sent-mail log only needs recent rows (replies are chased for days, not months); it grew to ~290 KB, rewritten in full by every send.
+        let sent = store.record(crate::mail::SENT_LOG)?;
+        let since = chrono::Utc::now().timestamp() - 30 * 86_400;
+        let kept: String = sent
+            .lines()
+            .filter(|row| {
+                row.split_whitespace()
+                    .next()
+                    .and_then(|at| at.parse::<i64>().ok())
+                    .is_none_or(|at| at >= since)
+            })
+            .map(|row| format!("{row}\n"))
+            .collect();
+        if kept.len() != sent.len() {
+            store.set_record(crate::mail::SENT_LOG, &kept)?;
+        }
         store.refresh_exports()?;
         Ok(count)
     });
@@ -1588,7 +1604,8 @@ fn commit_once(settings: &Settings, store: &Store) -> Duration {
     let phase = Instant::now();
     // A failed run says nothing about oversize files or merges, so their records stay as they are; one failure streak is told once.
     let mut notices: Vec<(&str, String, String)> = Vec::new();
-    match crate::history::commit_and_push(&store.root, || store.lock()) {
+    // Building the commit needs only the task files to stay still, which the export lock gives; the store lock stays free for commands (130–200 ms under it before).
+    match crate::history::commit_and_push(&store.root, || store.export_lock()) {
         Ok(done) => {
             let oversize = oversize_notice(&done.oversize);
             notices.push(("oversize-notified", oversize.clone(), oversize));
@@ -1714,10 +1731,8 @@ pub fn run() -> u8 {
         if last_maintain.is_none_or(|at| at.elapsed() >= MAINTAIN_EVERY) {
             let phase = Instant::now();
             last_maintain = Some(Instant::now());
-            match store
-                .lock()
-                .and_then(|_lock| crate::actions::maintain(&store))
-            {
+            // `maintain` takes the store lock per task itself.
+            match crate::actions::maintain(&store) {
                 Ok(failed) => {
                     for line in failed {
                         log(&format!("wait upkeep failed for {line}"));

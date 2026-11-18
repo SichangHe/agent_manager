@@ -210,9 +210,17 @@ pub fn maintain(store: &Store) -> Result<Vec<String>, String> {
     let mut failed = Vec::new();
     // A task with no live Omnigent agent gets no reminders: they could never arrive.
     let live = |task: &Task| task.address().starts_with(omnigent::PREFIX);
+    // Listed without the store lock; each task then takes it briefly, read fresh, so a pass never holds it for all ~270 tasks (11–23 ms).
     for task in store.active()?.into_iter().filter(live) {
         let name = task.name.clone();
-        if let Err(error) = maintain_task(store, &database, task, now) {
+        let result = store.lock().and_then(|_lock| {
+            let fresh = store.load(&name)?;
+            if !fresh.is_active() || !live(&fresh) {
+                return Ok(());
+            }
+            maintain_task(store, &database, fresh, now)
+        });
+        if let Err(error) = result {
             failed.push(format!("{name}: {error}"));
         }
     }
