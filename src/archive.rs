@@ -146,7 +146,8 @@ pub fn archive_requests(store: &Store, now: DateTime<Utc>) -> Result<usize, Stri
         let mut fresh = store.load(&task.name)?;
         let left: Vec<_> = requests::read(&fresh)?
             .into_iter()
-            .filter(|r| !archived.contains(&r.id))
+            // Removed only if still resolved as when it was archived (a request reopened since stays).
+            .filter(|r| !(archived.contains(&r.id) && r.stage == requests::Stage::Resolved))
             .collect();
         requests::write(&mut fresh, &left);
         store.save(&fresh)?;

@@ -291,6 +291,7 @@ fn flush_task_bodies() -> Result<String, String> {
     let moved = database.flush_old_bodies()?;
     // Queued task-list moves and resolved requests go back where an older build reads them.
     database.fold_todo(true)?;
+    database.fold_sent_rows()?;
     let restored = database.restore_resolved()?;
     Ok(format!(
         "amh: {moved} long task bodies joined back and {restored} resolved requests put back for the older build\n"

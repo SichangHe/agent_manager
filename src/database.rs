@@ -972,6 +972,32 @@ impl Database {
         Ok(text)
     }
 
+    /// Before a rollback: append the sent rows to the sent-log record (where an older build reads them) and drop the rows.
+    pub fn fold_sent_rows(&mut self) -> Result<usize, String> {
+        let exists: bool = self
+            .0
+            .query_row("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name = 'sent_mail')", [], |row| row.get(0))
+            .map_err(error)?;
+        if !exists {
+            return Ok(0);
+        }
+        let text = self.sent_rows_text()?;
+        let rows = text.lines().count();
+        let transaction = self
+            .0
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(error)?;
+        transaction
+            .execute(
+                "INSERT INTO records (name, text) VALUES (?1, ?2) ON CONFLICT(name) DO UPDATE SET text = records.text || excluded.text",
+                params![crate::mail::SENT_LOG, text],
+            )
+            .map_err(error)?;
+        transaction.execute("DELETE FROM sent_mail", []).map_err(error)?;
+        transaction.commit().map_err(error)?;
+        Ok(rows)
+    }
+
     /// Drop sent rows older than `since` (epoch seconds).
     pub fn prune_sent_rows(&self, since: i64) -> Result<(), String> {
         let any: bool = self
