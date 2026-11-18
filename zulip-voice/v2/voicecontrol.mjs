@@ -175,7 +175,14 @@ export function createVoiceControl(ctx) {
     }
     const listening = !!vc || choiceOpen();
     // Domain words bias reply dictation only; never a prompt that names the control words: the model echoes it back on noise. Start-word clips also get keyword spotting on the server.
-    const r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening);
+    let r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening);
+    // 🧑 "if the front end. Detects something like the start words. But confidence is low. Then. We should request the backend to do it again. And confirm."
+    const lowConfidence = r.ok && !listening && (r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB);
+    if (lowConfidence && Date.now() - lastHitAt < 3000) {
+      log('vc', 'local start-word hit with low server confidence; retrying backend transcription');
+      const retry = await voice.stt(blob, undefined, true);
+      if (retry.ok) r = retry;
+    }
     if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
       log('vc', `stt failed: ${r.error}`);
       if (vc?.mode === 'command') {   // 🧑 command mode with no connection gave zero feedback: say what still works (the on-device words), at most every 6 s

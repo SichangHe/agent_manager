@@ -9,7 +9,8 @@
   :root { --bg: #000; --fg: #ececf0; --muted: #8e9199; --line: #26272b; --panel: #17181b; --accent: #4c8dff; --mine: #1d2a44; --hl: #4a4220; --danger: #ff6b6b; }
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
-html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overscroll-behavior: none; }
+/* 🧑 "Your thread switching UI on the web can be scrolled left and right. It should not be able to scroll horizontally." */
+html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg); overscroll-behavior: none; overflow-x: hidden; }
 body { position: fixed; inset: 0; }
 [hidden] { display: none !important; }
 button { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; touch-action: manipulation; }
