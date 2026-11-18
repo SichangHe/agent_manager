@@ -160,6 +160,16 @@ pub fn redirect_reason(tag: &str, thread: Option<&Task>, stored: &str) -> String
     }
 }
 
+/// Whether a manager's message to an agent passes on the human's words, so the agent's end-of-turn reply goes back to the human.
+// 🧑 "relayed messages count as system messages and agent replies thus do not get dispatched back to the human for those"
+pub fn relays_human(message: &str) -> bool {
+    let lower = message.to_lowercase();
+    ["human (verbatim)", "from the human", "the human wrote", "the human said", "the human asked"]
+        .iter()
+        .any(|mark| lower.contains(mark))
+        || routed_names(message).is_empty() && message.contains("manager_mail/zulip-")
+}
+
 /// A closed task whose agent session can be resumed, so the human's message in its thread reopens it.
 pub fn reopens(task: &Task) -> bool {
     task.status() == "done" && task.address().starts_with(crate::omnigent::PREFIX)
@@ -1520,6 +1530,14 @@ mod tests {
             question_answers(&parts[..1], "Subject: x\n\nNeither,\ngo back"),
             [pair("Which way?", "Neither,\ngo back")]
         );
+    }
+
+    #[test]
+    fn relayed_human_words_are_recognized() {
+        assert!(relays_human("Human (verbatim): \"why?\" Context: x"));
+        assert!(relays_human("From the human, in the t thread: \"do it\""));
+        assert!(relays_human("see /w/manager_mail/zulip-123.txt"));
+        assert!(!relays_human("CPU coordination is now enforced"));
     }
 
     #[test]

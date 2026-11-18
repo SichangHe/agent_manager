@@ -1175,6 +1175,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     task.address().to_owned()
                 }
             };
+            let relayed = flag("human") || decide::relays_human(&message);
+            let sent_s = crate::replies::now_s();
             let message = work::envelope(&from, &message);
             // Inside amhd the message becomes an outbox row and the caller does not wait for Omnigent; a held agent is still refused.
             if crate::request::serving() && std::env::var("AMHD_OUTBOX").as_deref() != Ok("0") {
@@ -1184,6 +1186,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 crate::daemon::outbox::enqueue(&settings::state_dir(), &to, &message, &from)?;
             } else {
                 omnigent::send(&settings, &to, &message).map_err(failed)?;
+            }
+            // A relayed human message is answered like one sent directly: the agent's end-of-turn text goes to the human.
+            if relayed && let Err(error) = crate::replies::expect(&store.state_dir, &to, sent_s) {
+                eprintln!("amh: the reply to the relayed human message will not be forwarded: {error}");
             }
             say(NO_REPEAT);
             // The writer lock is taken only when there is something to write: a stopped mark to clear, or routed mail to hand over.
