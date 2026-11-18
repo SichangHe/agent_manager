@@ -265,6 +265,37 @@ impl Database {
         }
     }
 
+    /// Delete a small named record, through the daemon's writer when there is one.
+    pub fn delete_record(&self, name: &str) -> Result<(), String> {
+        let sql = "DELETE FROM records WHERE name = ?1";
+        if let Some(done) = one(sql, vec![name.to_owned().into()]) {
+            return done;
+        }
+        self.0.execute(sql, [name]).map_err(error).map(|_| ())
+    }
+
+    /// Set record `name` to `new` only if it still reads `old`; false when it changed meanwhile.
+    pub fn replace_record_if(&self, name: &str, old: &str, new: &str) -> Result<bool, String> {
+        let write = crate::daemon::commit::route(|| crate::daemon::commit::Write {
+            preconditions: vec![crate::daemon::commit::Precondition {
+                sql: "SELECT (SELECT text FROM records WHERE name = ?1) IS ?2".into(),
+                params: vec![name.to_owned().into(), old.to_owned().into()],
+            }],
+            statements: vec![crate::daemon::commit::statement(
+                "UPDATE records SET text = ?2 WHERE name = ?1",
+                vec![name.to_owned().into(), new.to_owned().into()],
+            )],
+        });
+        match write {
+            Some(done) => Ok(done? == crate::daemon::commit::Outcome::Committed),
+            None => self
+                .0
+                .execute("UPDATE records SET text = ?3 WHERE name = ?1 AND text = ?2", params![name, old, new])
+                .map(|n| n == 1)
+                .map_err(error),
+        }
+    }
+
     /// Whether request `id` was resolved and moved to `resolved_items`.
     pub fn resolved_item(&self, id: &str) -> Result<bool, String> {
         self.0

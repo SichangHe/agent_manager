@@ -1571,7 +1571,13 @@ fn archive_once(_settings: &Settings, store: &Store) -> Duration {
         let count = crate::archive::archive_requests(store, chrono::Utc::now())?;
         // The sent-mail log only needs recent rows (replies are chased for days, not months); it grew to ~290 KB, rewritten in full by every send.
         let sent = store.record(crate::mail::SENT_LOG)?;
-        let since = chrono::Utc::now().timestamp() - 30 * 86_400;
+        // Rows a still-awaited reply may need stay, however old.
+        let oldest_awaited = store
+            .record(AWAITING)?
+            .lines()
+            .filter_map(|row| row.split_whitespace().next()?.parse::<f64>().ok())
+            .fold(f64::MAX, f64::min);
+        let since = (chrono::Utc::now().timestamp() - 30 * 86_400).min(oldest_awaited as i64);
         let kept: String = sent
             .lines()
             .filter(|row| {
@@ -1582,8 +1588,10 @@ fn archive_once(_settings: &Settings, store: &Store) -> Duration {
             })
             .map(|row| format!("{row}\n"))
             .collect();
+        // Only if no send appended meanwhile (sends append without the store lock).
         if kept.len() != sent.len() {
-            store.set_record(crate::mail::SENT_LOG, &kept)?;
+            crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
+                .replace_record_if(crate::mail::SENT_LOG, &sent, &kept)?;
         }
         store.refresh_exports()?;
         Ok(count)

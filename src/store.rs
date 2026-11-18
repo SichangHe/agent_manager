@@ -536,11 +536,15 @@ impl Store {
                 database.set_export_text(&name, &text, row_before.as_deref())?;
             }
             // The file as amh left it (mtime and size): a save that finds it so knows nothing was typed without reading it.
-            if let Some(stamp) = file_stamp(&path) {
-                let key = format!("filestat:{name}");
-                if database.record(&key)?.as_deref() != Some(stamp.as_str()) {
-                    database.set_record(&key, &stamp)?;
+            // Recorded only if the file still holds what was exported, read after the stamp: typing that landed meanwhile is never vouched for.
+            let key = format!("filestat:{name}");
+            match file_stamp(&path) {
+                Some(stamp) if fs::read_to_string(&path).ok().as_deref() == Some(text.as_str()) => {
+                    if database.record(&key)?.as_deref() != Some(stamp.as_str()) {
+                        database.set_record(&key, &stamp)?;
+                    }
                 }
+                _ => database.delete_record(&key)?,
             }
         }
         database.set_record("export:through", &through.to_string())?;
@@ -1133,6 +1137,14 @@ impl Store {
                 events.push(log::event_value("message queued", &task.name,
                     serde_json::json!({"channel": "block", "to": task.name, "text": block.join("\n")})));
             }
+        }
+        // A task that now runs at an address (new address, or active again) may share it with the task `own` remembers there: forget that, so `own` scans and finds both.
+        if old
+            .as_ref()
+            .is_none_or(|before| before.address() != task.address() || (!before.is_active() && task.is_active()))
+            && let Some(database) = self.database()?
+        {
+            database.delete_record(&format!("own:{}", task.address()))?;
         }
         if old
             .as_ref()
