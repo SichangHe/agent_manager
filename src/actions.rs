@@ -1214,6 +1214,11 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let relayed = flag("human") || decide::relays_human(&message);
             let sent_s = crate::replies::now_s();
             let message = work::envelope(&from, &message);
+            // 🧑 "Not only should you release those agents": the human's words release a held agent, relayed or direct.
+            if relayed && let Some(why) = omnigent::held(&to) {
+                omnigent::set_hold(&to, None)?;
+                eprintln!("amh: released {to} (held: {why}) for the human's relayed message");
+            }
             // Inside amhd the message becomes an outbox row and the caller does not wait for Omnigent; a held agent is still refused.
             if crate::request::serving() && std::env::var("AMHD_OUTBOX").as_deref() != Ok("0") {
                 if let Some(why) = omnigent::held(&to) {
