@@ -200,7 +200,8 @@ pub fn route<'a>(
         {
             Some(tagged)
         }
-        Some(tagged) if staffed(tagged) && for_manager(body) => manager_of(tagged).or(Some(tagged)),
+        // 🧑 "if I say for manager, it does not go to the manager": a task whose manager stopped falls back to the main manager, never to its own agent.
+        Some(tagged) if staffed(tagged) && for_manager(body) => manager_of(tagged),
         Some(tagged) if staffed(tagged) => Some(tagged),
         // 🧑 "Why do those messages go to you? I send them directly to that agent."
         // A closed task's agent session still exists: the message reopens the task and resumes that agent.
