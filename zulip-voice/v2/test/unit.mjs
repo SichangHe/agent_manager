@@ -76,6 +76,8 @@ assert.ok(ms > 1000 && ms < 8000, 'wav duration ' + ms);
   assert.ok(G.clearWinner(G.rankTopics(topics, 'alpha')));
   assert.equal(G.choiceAnswer('second', {names: ['a', 'b'], confirm: false}, q => G.rankTopics(topics, q)), 'b');
   assert.equal(G.choiceAnswer('yes', {names: ['a'], confirm: true}, () => []), 'a');
+  assert.equal(G.choiceAnswer('number one please', {names: ['a', 'b'], confirm: false}, () => []), 'a');
+  assert.equal(G.choiceAnswer('number 3', {names: ['a', 'b', 'c'], confirm: false}, () => []), 'c');
   assert.equal(G.afterStartWord('Attention, send the build', 'attention'), 'send the build');
   assert.equal(G.afterStartWord('send the build', 'attention'), null);
   assert.equal(G.stripResumePhrase('ship it over and out', 'over'), 'ship it');

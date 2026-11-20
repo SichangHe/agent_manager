@@ -115,6 +115,13 @@ export function createVoiceControl(ctx) {
       else { recorder.beep('cancel'); vcIdle(); ctx.maybeAutoplay(); }
       return;
     }
+    const num = {NUMBER_ONE: 0, NUMBER_TWO: 1, NUMBER_THREE: 2}[tag];
+    if (num !== undefined) {   // 🧑 "say number one as soon as that is the correct agent": answered on-device, even mid-list
+      if (!choiceOpen() || pendingChoice.confirm || !pendingChoice.names[num]) return;
+      lastLocalCommandMs = Date.now(); lat.stage('switch', 'answer-heard');
+      const name = pendingChoice.names[num]; pendingChoice = null;
+      closeSessionForChoice(); ctx.switchTopic(name, true); vcIdle(); return;
+    }
     if (!inCommand) return;
     if (tag === 'SKIP_FORWARD' || tag === 'SKIP_BACKWARD') {   // runs once now; a spoken count ("skip forward three") is added when the transcript arrives
       lastLocalNav = {dir: tag === 'SKIP_FORWARD' ? 1 : -1, ms: Date.now()};
@@ -254,10 +261,11 @@ export function createVoiceControl(ctx) {
     armCommandTimer();
     if (rest) runCommands(rest);
   }
-  function armCommandTimer() { clearTimeout(vc.timer); vc.timer = setTimeout(() => leaveCommandMode('silence'), COMMAND_SILENCE_MS); }
+  function armCommandTimer() { clearTimeout(vc.timer); vc.timer = setTimeout(() => leaveCommandMode('silence'), COMMAND_SILENCE_MS + Math.max(0, sayingUntil - Date.now())); }   // our own spoken prompt does not eat the window
   /** Back to INPUT mode with the draft kept. */
   function leaveCommandMode(why) {
     if (!vc || vc.mode !== 'command') return;
+    if (why === 'silence' && !vc.text.trim()) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); log('vc', 'command mode left (silence) with nothing dictated: standby'); setDraft(vc.base); vc = null; recorder.setReplyMode(false); recorder.beep('done'); ctx.resumeAfterPause(); vcIdle(); return; }   // 🧑 an unrecognized command must not end in input mode
     clearTimeout(vc.timer); vc.mode = 'input'; log('vc', `command mode left (${why}); back to input`);
     recorder.beep('ready'); setVcState('dictating', 'say your reply');
     armSessionTimer();
@@ -273,11 +281,11 @@ export function createVoiceControl(ctx) {
     while (tokens.length && vc) {
       const t = tokens[0], two = tokens.slice(0, 2).join(' ');
       if (SEND_LOG_RE.test(two) || SEND_LOG_RE.test(tokens.slice(0, 3).join(' '))) { tokens.splice(0, SEND_LOG_RE.test(two) ? 2 : 3); log('vc', 'send log by voice'); tick('log', 'sending the log'); ctx.sendLog('voice command').then(r => { if (!r?.ok) sayAndMute('Sending the log failed'); }); continue; }
-      if (NEXT_AGENT_RE.test(tokens.slice(0, 4).join(' ')) || NEXT_AGENT_RE.test(tokens.slice(0, 3).join(' ')) || NEXT_AGENT_RE.test(two)) { log('vc', 'next agent with unread messages'); done.push('next agent'); finishSession(true); bargePaused = false; ctx.switchNextUnread(); left = true; break; }
-      if (SWITCH_BACK_RE.test(tokens.slice(0, 3).join(' ')) || SWITCH_BACK_RE.test(two)) { log('vc', 'switch back to the previous agent'); done.push('switch back'); finishSession(true); bargePaused = false; ctx.switchBack(); left = true; break; }
+      if (NEXT_AGENT_RE.test(tokens.slice(0, 4).join(' ')) || NEXT_AGENT_RE.test(tokens.slice(0, 3).join(' ')) || NEXT_AGENT_RE.test(two)) { log('vc', 'next agent with unread messages'); done.push('next agent'); recorder.beep('tick'); finishSession(true); bargePaused = false; ctx.switchNextUnread(); left = true; break; }
+      if (SWITCH_BACK_RE.test(tokens.slice(0, 3).join(' ')) || SWITCH_BACK_RE.test(two)) { log('vc', 'switch back to the previous agent'); done.push('switch back'); recorder.beep('tick'); finishSession(true); bargePaused = false; ctx.switchBack(); left = true; break; }
       if (/^(switch|switched|switching|go)$/.test(t) && /^(to|agent|agents)$/.test(tokens[1] ?? '')) {   // Whisper often hears "switched to"; the name is free-form: it takes the rest of the utterance and ends the chain
         const name = tokens.slice(/^(agent|agents)$/.test(tokens[1]) && tokens[2] === 'to' ? 3 : 2).join(' ');
-        done.push('switch'); finishSession(true); voiceSwitch(name); left = true; break;
+        done.push('switch'); recorder.beep('tick'); finishSession(true); voiceSwitch(name); left = true; break;
       }
       if (CANCEL_RE.test(two) || CANCEL_RE.test(t)) { cancelSession(); return done; }
       const take = [3, 2, 1].find(n => navCommand(tokens.slice(0, n).join(' ')));   // longest prefix that is one navigation command ("next three", "previous message", "back")
@@ -292,7 +300,6 @@ export function createVoiceControl(ctx) {
     }
     if (done.length) log('vc', `commands: ${done.join(', ')}`);
     if (said.length) sayAndMute(said.join(', '));   // e.g. "next message", "back 2", "paused"
-    if (!done.length && ignored.length && vc?.mode === 'command') armCommandTimer();
     if (navigated && vc && !left) { finishSession(); vcIdle(); left = true; }
     if (vc && !left) armCommandTimer();
     return done;

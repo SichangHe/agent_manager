@@ -52,7 +52,7 @@ const LOCAL_CMD_THRESHOLD = 0.3;
 export function commandPhrases(topics) {
   const names = topics.map(spokenName).filter(Boolean);
   const unique = [...new Set(names)].filter(n => !names.some(o => o !== n && o.startsWith(n + ' ')));   // "alpha" is left out while "alpha beta" exists: it would fire first
-  const fixed = [['CANCEL', 'cancel'], ['STOP', 'stop'], ['POSITIVE', 'positive'], ['NEGATIVE', 'negative'], ['SKIP_FORWARD', 'skip forward'], ['SKIP_BACKWARD', 'skip backward']];
+  const fixed = [['CANCEL', 'cancel'], ['STOP', 'stop'], ['POSITIVE', 'positive'], ['NEGATIVE', 'negative'], ['SKIP_FORWARD', 'skip forward'], ['SKIP_BACKWARD', 'skip backward'], ['NUMBER_ONE', 'number one'], ['NUMBER_TWO', 'number two'], ['NUMBER_THREE', 'number three']];
   return [...fixed.map(([tag, text]) => ({tag, text, threshold: LOCAL_CMD_THRESHOLD})),
     ...unique.map(n => ({tag: 'SWITCH_TO_' + n.toUpperCase().replace(/[^A-Z0-9]+/g, '_'), text: 'switch to ' + n, threshold: LOCAL_CMD_THRESHOLD, say: 'switch to ' + n}))];
 }
@@ -104,7 +104,8 @@ export const NEGATIVE_RE = /^(negative|no|nope|cancel|cancel that|none|never min
 /** The answer `w` (normalized) to an open switch question `{names, confirm}`: the picked name, or null. A numbered list also accepts the name itself. */
 export function choiceAnswer(w, {names, confirm}, rank) {
   if (confirm) return POSITIVE_RE.test(w) ? names[0] : null;
-  const i = ['one first 1', 'two second 2', 'three third 3'].findIndex(g => g.split(' ').includes(w.replace(/^number /, '')));
+  const t = w.split(' ').filter(Boolean), n = t[0] === 'number' || t[0] === 'the' ? t[1] : t.length === 1 ? t[0] : null;   // "number one", "number one please", "the first", "one"
+  const i = n ? ['one first 1 won', 'two second 2 to too', 'three third 3'].findIndex(g => g.split(' ').includes(n)) : -1;
   if (i >= 0) return names[i];
   const r = rank(w.replace(/^(switch to|go to|agent)\s+/, ''));
   return w && clearWinner(r) ? r[0].t.name : null;
