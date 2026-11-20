@@ -554,6 +554,7 @@ pub fn drop_open_work(store: &Store, name: &str, why: &str) -> Result<(), String
 
 /// Said after every `amh tell` that sends.
 // 🧑 "after agent sends something. Amh would say. Never repeat this. In. Your terminal output. Again"
+const OTHERS_NO_REPEAT: &str = "Never repeat this in your final text.\n";
 const NO_REPEAT: &str = "Your final text of this turn now goes to nobody; anything more for the human needs another `amh tell human`.\n";
 
 /// Whether the agent of `task` may message the human: its tool is in `human.writers`, or its model is admitted for that tool.
@@ -1092,7 +1093,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 Some(sink) => format!(
                     "recorded in {sink}, which your manager reads; it is not woken. Do not send it again. Only a blocker (--blocked) or your final result (--done) wakes your manager\n"
                 ),
-                None => format!("message sent to your manager; do not send it again\n{NO_REPEAT}"),
+                None => format!("message sent to your manager; do not send it again\n{OTHERS_NO_REPEAT}"),
             }
         }
         ("tell", "human") => {
@@ -1232,7 +1233,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
             if relayed && let Err(error) = crate::replies::expect(&store.state_dir, &to, sent_s) {
                 eprintln!("amh: the reply to the relayed human message will not be forwarded: {error}");
             }
-            say(NO_REPEAT);
+            say(OTHERS_NO_REPEAT);
             // The writer lock is taken only when there is something to write: a stopped mark to clear, or routed mail to hand over.
             let stopped = store
                 .active_mentioning(std::slice::from_ref(&to))?
