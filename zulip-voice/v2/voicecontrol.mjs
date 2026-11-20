@@ -292,6 +292,7 @@ export function createVoiceControl(ctx) {
     }
     if (done.length) log('vc', `commands: ${done.join(', ')}`);
     if (said.length) sayAndMute(said.join(', '));   // e.g. "next message", "back 2", "paused"
+    if (!done.length && ignored.length && vc?.mode === 'command') armCommandTimer();
     if (navigated && vc && !left) { finishSession(); vcIdle(); left = true; }
     if (vc && !left) armCommandTimer();
     return done;
