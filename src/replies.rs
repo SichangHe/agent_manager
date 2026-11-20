@@ -230,10 +230,18 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
         };
         if text.is_empty() {
             settle(&mut log, format!("turn reply of {address}: the turn already told the human with amh; no echo"));
+            // 🧑 "Even if an agent used the end of turn. Message to respond. If they have multiple unread messages, we should still produce a new term and tell them"
+            if let Err(error) = merge_nudge(settings, store, &address) {
+                log.push(format!("merge reminder for {address} failed: {error}"));
+            }
             continue;
         }
         match send(settings, store, &address, &text) {
             Ok(to) => settle(&mut log, format!("turn reply of {address} sent to {to}")),
+            Err(error) if error.contains("already sent the human this exact message") => settle(
+                &mut log,
+                format!("turn reply of {address}: already sent with amh; no echo"),
+            ),
             Err(error) if now_s() - latest_s > RETRY_S => settle(
                 &mut log,
                 format!("turn reply of {address} failed; dropped: {error}"),
@@ -242,6 +250,21 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
         }
     }
     log
+}
+
+/// Start a turn of the agent at `address` asking it to merge its unread updates when the human has 3 or more unread.
+fn merge_nudge(settings: &Settings, store: &Store, address: &str) -> Result<(), String> {
+    let Some(task) = store.active()?.into_iter().find(|task| task.address() == address) else {
+        return Ok(());
+    };
+    if !crate::zulip::enabled(settings) || !actions::writes_to_human(settings, &task)? {
+        return Ok(());
+    }
+    let reminder = crate::zulip::consolidation_reminder(settings, task.tag(), "")?;
+    if reminder.is_empty() {
+        return Ok(());
+    }
+    omnigent::send(settings, address, &reminder)
 }
 
 /// Send `text`, the end-of-turn reply of the agent at `address`, to the human, or to its manager when it may not write to the human; returns who got it.

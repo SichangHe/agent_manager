@@ -188,8 +188,16 @@ pub fn consolidation_reminder(
         }
     }
     // 🧑 "We allow 2 messages, one from previous turn, one from this end message, right?"
-    if ids.len() < 2 {
+    // An empty `current` means no message was just sent (the turn told the human with amh earlier): the newest unread one is among `ids`, so 3 are needed.
+    if ids.len() < if current.is_empty() { 3 } else { 2 } {
         return Ok(String::new());
+    }
+    if current.is_empty() {
+        return Ok(format!(
+            "The human has not read {} of your updates of this task: {}. Merge them now: read them with `amh mail unread`, send ONE update that holds everything still worth reading from them, with --replaces for each of these IDs. Human messages, and yours that the human replied after, are never replaced.",
+            ids.len(),
+            ids.join(", ")
+        ));
     }
     Ok(format!(
         "The human has not read {} earlier update(s) of this task: {}. Merge them now: read them with `amh mail unread`, send ONE update that holds everything still worth reading from them and from the message you just sent, with --replaces for each of these IDs and for the message you just sent. Human messages, and yours that the human replied after, are never replaced.",
