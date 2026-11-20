@@ -554,7 +554,7 @@ pub fn drop_open_work(store: &Store, name: &str, why: &str) -> Result<(), String
 
 /// Said after every `amh tell` that sends.
 // 🧑 "after agent sends something. Amh would say. Never repeat this. In. Your terminal output. Again"
-const NO_REPEAT: &str = "Never repeat this in your final text.\n";
+const NO_REPEAT: &str = "Your final text of this turn now goes to nobody; anything more for the human needs another `amh tell human`.\n";
 
 /// Whether the agent of `task` may message the human: its tool is in `human.writers`, or its model is admitted for that tool.
 pub fn writes_to_human(settings: &Settings, task: &Task) -> Result<bool, String> {
