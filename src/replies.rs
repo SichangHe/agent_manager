@@ -59,6 +59,18 @@ pub fn expect(state_dir: &Path, address: &str, asked_s: i64) -> Result<(), Strin
         .map_err(|error| format!("cannot record the reply owed by {address}: {error}"))
 }
 
+/// Whether a tool call ran `amh tell human`, which already gave the human this turn's answer.
+fn told_human(item: &Value) -> bool {
+    let call = [&item["arguments"], &item["args"], &item["input"]]
+        .iter()
+        .map(|field| match field {
+            Value::String(text) => text.clone(),
+            other => other.to_string(),
+        })
+        .collect::<String>();
+    call.contains("amh") && call.contains("tell human")
+}
+
 fn text_of(item: &Value) -> Option<String> {
     let text: String = (item["type"] == "message" && item["role"] == "assistant")
         .then(|| item["content"].as_array())
@@ -101,7 +113,13 @@ pub fn reply(items: &[Value], asked_s: &[i64], newest_ended: bool) -> Option<(St
             continue;
         };
         answered.push(*asked);
-        if !answers.iter().any(|known| known.0 == first.0) {
+        // 🧑 "Stop duplicating messages to me. Either you send with amh or use end-of-turn output": a turn that already messaged the human with `amh tell human` owes no echo.
+        let told = items[first.0 + 1..].iter().any(|item| {
+            item["type"] == "function_call"
+                && item["created_at"].as_i64().is_some_and(|at| at > *asked)
+                && told_human(item)
+        });
+        if !told && !answers.iter().any(|known| known.0 == first.0) {
             answers.push(first);
         }
     }
@@ -210,6 +228,10 @@ pub fn forward(settings: &Settings, store: &Store) -> Vec<String> {
             }
             log.push(line);
         };
+        if text.is_empty() {
+            settle(&mut log, format!("turn reply of {address}: the turn already told the human with amh; no echo"));
+            continue;
+        }
         match send(settings, store, &address, &text) {
             Ok(to) => settle(&mut log, format!("turn reply of {address} sent to {to}")),
             Err(error) if now_s() - latest_s > RETRY_S => settle(
@@ -278,20 +300,21 @@ mod tests {
         assert_eq!(reply(&[user(10), said(5, "old")], &asked, true), None);
         // Still working: newest text not known to have ended the turn.
         assert_eq!(reply(&[said(12, "working"), user(10)], &asked, false), None);
-        // A mid-turn `amh tell human` does not cancel the reply.
+        // A turn that ran `amh tell human` already answered: the end-of-turn text is not echoed.
         let event = json!({"type":"resource_event","created_at":15});
         let ended = [event, said(14, " done \n"), output(13), tool(12), user(10)];
-        assert_eq!(
-            reply(&ended, &asked, true),
-            Some(("done".to_owned(), vec![10]))
-        );
+        assert_eq!(reply(&ended, &asked, true), Some((String::new(), vec![10])));
+        // Another tool call does not count.
+        let other = json!({"type":"function_call","created_at":12,"arguments":"ls"});
+        let plain = [said(14, "done"), output(13), other, user(10)];
+        assert_eq!(reply(&plain, &asked, true), Some(("done".to_owned(), vec![10])));
         // uiclient_steer.md: the answer ended the turn; a notification started another turn, whose text is not owed.
         let steer = [
             said(30, "later"),
             user(29),
             said(20, "answer"),
             output(15),
-            tool(12),
+            json!({"type":"function_call","created_at":12,"arguments":"ls"}),
             user(10),
         ];
         assert_eq!(
