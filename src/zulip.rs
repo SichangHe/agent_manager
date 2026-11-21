@@ -206,6 +206,93 @@ pub fn consolidation_reminder(
     ))
 }
 
+/// Longest message amh builds by folding earlier updates in; Zulip refuses more than 10000 characters.
+const FOLD_LIMIT: usize = 9000;
+
+/// Fold the task's earlier updates the human has not read (and did not reply after) into `body`, newest first while they fit; returns the new body and the folded IDs to delete.
+///
+/// PB reports and IDs in `skip` (already given with --replaces) are left alone. Nothing is lost: each earlier text is kept verbatim below the new one.
+// 🧑 "Agents are not replacing their unread messages with a singular one. Why? Let the amh agent fix this permanently"
+pub fn fold_unread(
+    settings: &Settings,
+    tag: &str,
+    body: &str,
+    skip: &[String],
+) -> Result<(String, Vec<String>), String> {
+    if mail::REPORT_LABELS.contains(&tag) || settings::get(settings, "zulip.stream_id").is_empty() {
+        return Ok((body.to_owned(), Vec::new()));
+    }
+    let bot = api(settings, "GET", "users/me", &[])?["user_id"]
+        .as_u64()
+        .ok_or("Zulip profile has no user ID")?;
+    let stream: u64 = settings::get(settings, "zulip.stream_id")
+        .parse()
+        .map_err(|_| "invalid zulip.stream_id")?;
+    let narrow = json!([
+        {"operator":"sender","operand":bot},
+        {"operator":"stream","operand":stream},
+        {"operator":"topic","operand":tag}
+    ]);
+    let result = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "20".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    let messages = result["messages"]
+        .as_array()
+        .ok_or("Zulip response has no messages")?;
+    let mut earlier = Vec::new();
+    for message in retained_updates(messages, bot, tag, "").iter().rev() {
+        let Some(id) = message["id"].as_u64() else { continue };
+        let key = format!("zulip:{id}");
+        if skip.contains(&key) || !unread_by_human(settings, id)? || answered(settings, id)? {
+            continue;
+        }
+        let text = message["content"].as_str().unwrap_or_default();
+        earlier.push((key, folded_text(text, tag)));
+    }
+    Ok(fold(body, earlier))
+}
+
+/// The text of an earlier update without its `[tag] title` header line.
+fn folded_text(content: &str, tag: &str) -> String {
+    match content.split_once("\n\n") {
+        Some((header, rest)) if header.starts_with(&format!("[{tag}] ")) => rest.trim().to_owned(),
+        _ => content.trim().to_owned(),
+    }
+}
+
+/// `body` with the `earlier` texts (newest first) appended while the whole stays under `FOLD_LIMIT`, oldest of them last; returns it and the IDs taken.
+fn fold(body: &str, earlier: Vec<(String, String)>) -> (String, Vec<String>) {
+    const HEAD: &str = "\n\n---\nYour earlier unread updates of this task, merged here by amh:";
+    let mut taken = Vec::new();
+    let mut size = body.chars().count() + HEAD.chars().count();
+    for (id, text) in earlier {
+        let more = text.chars().count() + 2;
+        if size + more > FOLD_LIMIT {
+            break;
+        }
+        size += more;
+        taken.push((id, text));
+    }
+    if taken.is_empty() {
+        return (body.to_owned(), Vec::new());
+    }
+    let mut out = format!("{body}{HEAD}");
+    for (_, text) in &taken {
+        out.push_str("\n\n");
+        out.push_str(text);
+    }
+    (out, taken.into_iter().map(|(id, _)| id).collect())
+}
+
 /// Whether the message's header line `[tag] title` has a PB report label as its title, as `mail::is_report` decides for an email subject.
 fn is_report_update(message: &Value) -> bool {
     let header = message["content"]
@@ -971,6 +1058,20 @@ mod tests {
         Ok(())
     }
     use super::*;
+
+    #[test]
+    fn earlier_unread_updates_are_folded_newest_first_within_the_limit() {
+        assert_eq!(folded_text("[t] Status\n\nbody one", "t"), "body one");
+        assert_eq!(folded_text("plain", "t"), "plain");
+        let (out, ids) = fold("new", vec![("zulip:2".into(), "two".into()), ("zulip:1".into(), "one".into())]);
+        assert_eq!(ids, ["zulip:2", "zulip:1"]);
+        assert!(out.starts_with("new\n\n---\n") && out.ends_with("two\n\none"));
+        let (same, none) = fold("new", vec![]);
+        assert_eq!((same.as_str(), none.len()), ("new", 0));
+        let big = "x".repeat(FOLD_LIMIT);
+        let (_, kept) = fold("new", vec![("zulip:3".into(), big), ("zulip:2".into(), "two".into())]);
+        assert!(kept.is_empty());
+    }
 
     #[test]
     fn report_replies_go_to_the_configured_owner_else_the_pb_owner() {

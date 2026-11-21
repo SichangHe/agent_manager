@@ -614,19 +614,38 @@ pub fn tell_human(
     report_label: Option<&str>,
 ) -> Result<(String, String), String> {
     let tag = report_label.unwrap_or_else(|| task.tag());
+    // 🧑 "Agents are not replacing their unread messages with a singular one. Why? Let the amh agent fix this permanently"
+    // amh folds the task's earlier unread updates into this one and deletes them, so the human has one unread message per task.
+    let zulip = crate::zulip::enabled(settings);
+    let folded = match zulip && report_label.is_none() {
+        true => crate::zulip::fold_unread(settings, tag, body, replaces),
+        false => Ok((body.to_owned(), Vec::new())),
+    };
+    let (body, folded) = folded.unwrap_or_else(|error| {
+        eprintln!("amh: earlier unread updates were not merged: {error}");
+        (body.to_owned(), Vec::new())
+    });
     let sent = mail::send(
         settings,
         &settings::state_dir(),
         tag,
         subject,
-        body,
+        &body,
         task.address(),
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
-    if crate::zulip::enabled(settings) {
-        let receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n{NO_REPEAT}");
-        let reminder = zulip_sent_followup(crate::zulip::replace(settings, replaces), || {
+    if zulip {
+        let mut receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n{NO_REPEAT}");
+        if !folded.is_empty() {
+            receipt.push_str(&format!(
+                "\namh merged your {} earlier unread update(s) into it and removed them: {}\n",
+                folded.len(),
+                folded.join(", ")
+            ));
+        }
+        let all: Vec<String> = replaces.iter().cloned().chain(folded).collect();
+        let reminder = zulip_sent_followup(crate::zulip::replace(settings, &all), || {
             crate::zulip::consolidation_reminder(settings, tag, &message_id)
         })
         .unwrap_or_else(|error| {
