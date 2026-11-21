@@ -18,7 +18,10 @@ export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(.
     const merged = signal ? AbortSignal.any([timeout, signal]) : timeout;
     let response;
     try {
-      response = await fetchFn(`${site}/api/v1/${path}${method === 'GET' && [...body].length ? '?' + body : ''}`, {method, headers: {Authorization: authorization}, body: method === 'GET' ? undefined : body, signal: merged, redirect: 'error'});
+      // 🧑 "the app is stuck after Wi-Fi is out and is switched to 5G ... until I refreshed": iOS Safari left a fetch on the dead Wi-Fi socket pending for 330 s
+      // despite abort(), so the poll loop never moved on. The race rejects as soon as the signal fires; the abandoned fetch is ignored.
+      const aborted = new Promise((_, reject) => { if (merged.aborted) reject(merged.reason); else merged.addEventListener('abort', () => reject(merged.reason), {once: true}); });
+      response = await Promise.race([fetchFn(`${site}/api/v1/${path}${method === 'GET' && [...body].length ? '?' + body : ''}`, {method, headers: {Authorization: authorization}, body: method === 'GET' ? undefined : body, signal: merged, redirect: 'error'}), aborted]);
     } catch (error) {
       const kind = timeout.aborted ? 'timeout' : signal?.aborted ? 'aborted' : 'network';
       const result = {ok: false, kind, status: 0, code: kind, error: `${label}: ${kind}`, uncertain: method !== 'GET'};
