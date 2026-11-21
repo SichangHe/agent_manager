@@ -18,6 +18,7 @@ const SEND_DEADLINE_MS = 6000;   // `send` posts what is transcribed by now; slo
 const COALESCE_MS = 3000;        // messages arriving within this window of the first share one tail bundle
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
 const MAX_DELETES_PER_SWEEP = 40;
+const CLEANUP_RESERVE_CALLS = 100;   // Zulip calls kept for live traffic (stt, send, ping); cleanup waits below this
 const SWEEP_INTERVAL_MS = 3600000;   // cleanup runs once an hour: at about 100 KB per clip even 500 clips an hour stay far below the 100 MB cap, and deletes are the main Zulip API cost
 const EARLY_SWEEP_FRACTION = 0.8;    // ...unless the stored clips pass this share of the cap
 const HUMAN_CLEANUP_PER_MIN = 5;   // the human key is shared with the phone (200 calls/min): cleanup may use only a trickle of it, per relay
@@ -376,10 +377,15 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   }
 
   /** Deletes finished results and uploads: result messages one by one, uploads after one attachment listing. */
+  // 🧑 "it still shows stand sending ... We. Get stuck like this": an unbounded cleanup sent ~480 DELETEs in 3 min and rate-limited the bot, so stt/send/ping stalled.
+  // Cleanup now spends at most MAX_DELETES_PER_SWEEP calls per sweep and stops while Zulip reports few calls left; the rest waits for the next sweep.
+  let deleteBudget = MAX_DELETES_PER_SWEEP;
+  const mayDelete = () => deleteBudget > 0 && api.remaining() > CLEANUP_RESERVE_CALLS;
   async function cleanup(due) {
     const uris = [];
     for (const record of due) {
-      if (record.responseId) { try { await api.call('DELETE', 'messages/' + record.responseId); delete record.responseId; } catch { continue; } }
+      if (!mayDelete()) break;
+      if (record.responseId) { deleteBudget--; try { await api.call('DELETE', 'messages/' + record.responseId); delete record.responseId; } catch { continue; } }
       if (record.uri) uris.push(record);
       else record.status = 'done';
     }
@@ -389,7 +395,8 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
         try {
           for (const key of ['uri']) {
             const item = record[key] && attachments.find(a => '/user_uploads/' + a.path_id === record[key]);
-            if (item) await api.call('DELETE', 'attachments/' + item.id);
+            if (item) { if (!mayDelete()) throw Error('cleanup budget spent');   // kept for the next sweep
+              deleteBudget--; await api.call('DELETE', 'attachments/' + item.id); }
             delete record[key];
           }
           record.status = 'done';
@@ -517,6 +524,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
         }
       }
       // Clips rendered with an older loudness chain are dropped (a few per sweep); the next unread render makes fresh ones.
+      deleteBudget = MAX_DELETES_PER_SWEEP;
       const quiet = Object.entries(records).filter(([, r]) => r.proactive && r.status === 'sent' && r.uri && r.chain !== CHAIN).slice(0, MAX_DELETES_PER_SWEEP);
       if (quiet.length) { await cleanup(quiet.map(([, r]) => r)); for (const [id, r] of quiet) if (r.status === 'done') delete records[id]; console.log(`replaced ${quiet.length} quiet legacy clips`); }
       const stored = Object.values(records).filter(r => r.status === 'sent' && r.uri).reduce((n, r) => n + (r.bytes ?? 0), 0);
@@ -532,6 +540,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
       await cleanup([...full]);
       // Results of explicit requests are only needed for a moment; their clips stay until acked, the size cap or the TTL.
       for (const r of sent.filter(r => r.uri && !r.proactive && r.responseId && !full.has(r) && age(r) > orphanTtlMs)) {
+        if (!mayDelete()) break; deleteBudget--;
         if (await api.call('DELETE', 'messages/' + r.responseId).then(() => true, () => false)) delete r.responseId;
       }
       await save();
