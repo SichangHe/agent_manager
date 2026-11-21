@@ -8,7 +8,10 @@ const KWS_BASE = './kws/';   // build.mjs rewrites this to the hashed asset dire
 const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A #0.15 :2.0 @KATANA\n▁MA C AR ON I @MACARONI';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
 const THRESHOLD = 0.25;   // tuned in research-kws: 41/42 clips, no false hit in 35 minutes of agent speech
 
-const loadScript = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });
+// 🧑 "I did not get any indicators": loading the spotter again after unload re-ran these scripts, which threw "Can't create duplicate variable: 'Stream'" and left the on-device words off. Each script now loads once per page.
+const loadedScripts = new Map();
+const loadScript = src => { if (!loadedScripts.has(src)) loadedScripts.set(src, loadScriptOnce(src).catch(e => { loadedScripts.delete(src); throw e; })); return loadedScripts.get(src); };
+const loadScriptOnce = src => new Promise((resolve, reject) => { const el = document.createElement('script'); el.src = src; el.onload = resolve; el.onerror = () => reject(Error('failed to load ' + src)); document.head.append(el); });
 
 /** A spotter over the loaded model with `keywords` (one `PIECES [:boost] [#threshold] @TAG` per line). */
 function makeKws(keywords, threshold, module) {
