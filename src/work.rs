@@ -68,9 +68,9 @@ pub fn problem_of(task: &Task, state: &str) -> Option<Problem> {
 }
 
 /// The tool a new agent runs when none is named.
-// 🧑 (via the main manager) "Make Codex use Astra low by default instead of Sol ... shift management work from Claude to it"
+// 🧑 (Nov 21, via quota_support.md) "Claude should do everything now. Codex for uiclient experiments only" / "I mean the screenshot agent runs"
 pub fn default_tool(_as_manager: bool) -> &'static str {
-    "codex"
+    "claude"
 }
 
 /// The `getagentsmd` guides a new agent of a task starts with.
@@ -633,7 +633,7 @@ pub mod tests {
         );
         assert_eq!(
             (default_tool(true), default_tool(false)),
-            ("codex", "codex")
+            ("claude", "claude")
         );
     }
 

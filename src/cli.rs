@@ -157,7 +157,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("task").required(true).value_name("TASK.md").help("new or existing task file name; also the agent's tag, which names its message thread"))
                 .arg(Arg::new("dir").long("dir").required(true).help("directory the agent works in"))
                 .arg(Arg::new("prompt").long("prompt").required(true).value_name("FILE").help("file holding the goal: one goal line, then sub-goals as bullets"))
-                .arg(Arg::new("tool").long("tool").value_parser(["claude", "codex", "cursor", "antigravity"]).help("default: claude for managers, codex for workers"))
+                .arg(Arg::new("tool").long("tool").value_parser(["claude", "codex", "cursor", "antigravity"]).help("default: claude (codex only for uiclient screenshot experiments, by --tool codex)"))
                 .arg(Arg::new("model").long("model").help("default: the tool's usual model"))
                 .arg(Arg::new("effort").long("effort").help("reasoning effort; default: the tool's usual effort"))
                 .arg(Arg::new("account").long("account").value_name("NAME").help("use only the proxy accounts tagged NAME (e.g. burner), kept on restart and replace; `none` unpins. Untagged sessions never use tagged accounts"))
