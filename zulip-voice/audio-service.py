@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128", "sherpa-onnx", "transformers>=5.13", "accelerate"]
+# dependencies = ["kokoro==0.9.4", "soundfile>=0.13,<0.14", "faster-whisper==1.2.1", "torch==2.9.1+cu128", "sherpa-onnx", "transformers>=5.13", "accelerate", "misaki[zh]==0.9.4"]
 # [[tool.uv.index]]
 # name = "pytorch-cuda"
 # url = "https://download.pytorch.org/whl/cu128"
@@ -11,6 +11,7 @@
 """Local speech worker; the UI server validates browser requests before proxying."""
 
 import io
+import re
 import json
 import os
 import subprocess
@@ -55,6 +56,12 @@ class Speech:
             self.tts = KPipeline(
                 lang_code="a", repo_id="hexgrad/Kokoro-82M", device="cuda"
             )
+            # 🧑 "The voice does not handle Chinese at all. It pronounces every single character as Chinese character."
+            # The English pipeline reads each Han character as "Chinese letter"; Chinese runs go to the Mandarin pipeline, which shares the model.
+            self.tts_zh = KPipeline(
+                lang_code="z", repo_id="hexgrad/Kokoro-82M", device="cuda", model=self.tts.model
+            )
+            self.speak("中文已就绪。")
             self.speak("Speech is ready. Please choose your conversation.")
         elif self.engine == "qwen3":
             self.load_qwen3()
@@ -72,11 +79,14 @@ class Speech:
 
     def speak(self, text: str) -> bytes | str:
         """Return a mono WAV or an error, without retaining conversation text."""
-        chunks = [
-            result.audio.cpu().numpy()
-            for result in self.tts(text, voice="af_heart")
-            if result.audio is not None
-        ]
+        chunks = []
+        for chinese, run in split_chinese(text):
+            pipeline, voice = (self.tts_zh, "zf_xiaobei") if chinese else (self.tts, "af_heart")
+            chunks += [
+                result.audio.cpu().numpy()
+                for result in pipeline(run, voice=voice)
+                if result.audio is not None
+            ]
         if not chunks:
             return "No speech produced for this text."
         output = io.BytesIO()
@@ -207,6 +217,23 @@ class Speech:
             "avg_logprob": sum(segment.avg_logprob for segment in parts) / len(parts) if parts else -9.0,
             "kws": None if heard is None else heard,
         }
+
+
+HAN = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+CHINESE_RUN = re.compile(f"[{HAN}](?:[{HAN}\u3000-\u303f\uff00-\uffef0-9\\s]*[{HAN}\u3000-\u303f\uff00-\uffef])?")
+
+
+def split_chinese(text: str) -> list[tuple[bool, str]]:
+    """Text cut into (is_chinese, run) pieces in order; a Chinese run starts with a Han character and keeps CJK punctuation and digits inside it."""
+    pieces, at = [], 0
+    for m in CHINESE_RUN.finditer(text):
+        if text[at:m.start()].strip():
+            pieces.append((False, text[at:m.start()]))
+        pieces.append((True, m.group()))
+        at = m.end()
+    if text[at:].strip():
+        pieces.append((False, text[at:]))
+    return pieces
 
 
 def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
