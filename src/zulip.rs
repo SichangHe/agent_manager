@@ -683,34 +683,98 @@ fn answered(settings: &Settings, id: u64) -> Result<bool, String> {
         .is_some_and(|found| !found.is_empty()))
 }
 
+/// The report channels from `[zulip.report_streams]`: (label, channel name).
+pub fn report_streams(settings: &Settings) -> Vec<(String, String)> {
+    settings
+        .iter()
+        .filter_map(|(key, value)| {
+            let label = key.strip_prefix("zulip.report_streams.")?;
+            (!value.is_empty()).then(|| (label.to_owned(), value.clone()))
+        })
+        .collect()
+}
+
+/// The task tag that gets the human's replies in a report topic: `[zulip.report_owners]` names it, else the PB reports' owner.
+// 🧑 "I want those threads to be monitored so that I can just directly reply back in those threads. To do certain tasks."
+pub fn report_owner<'a>(settings: &'a Settings, topic: &'a str) -> &'a str {
+    match settings::get(settings, &format!("zulip.report_owners.{topic}")) {
+        "" => task_topic(topic),
+        owner => owner.trim_end_matches(".md"),
+    }
+}
+
+/// The human's messages after `cursor`, in the main conversation and in every report channel, oldest first.
 pub fn incoming(settings: &Settings, cursor: u64) -> Result<Vec<Value>, String> {
     let human: u64 = settings::get(settings, "zulip.human_id")
         .parse()
         .map_err(|_| "invalid zulip.human_id")?;
     let stream = settings::get(settings, "zulip.stream_id");
-    let conversation = if stream.is_empty() {
+    let mut conversations = vec![if stream.is_empty() {
         json!({"operator":"dm","operand":human})
     } else {
         json!({"operator":"stream","operand":stream.parse::<u64>().map_err(|_| "invalid zulip.stream_id")?})
-    };
-    let narrow = json!([conversation,{"operator":"sender","operand":human}]);
-    let result = api(
+    }];
+    conversations.extend(
+        report_streams(settings)
+            .into_iter()
+            .map(|(_, channel)| json!({"operator":"stream","operand":channel})),
+    );
+    let mut all: Vec<Value> = Vec::new();
+    for conversation in conversations {
+        let narrow = json!([conversation,{"operator":"sender","operand":human}]);
+        let result = api(
+            settings,
+            "GET",
+            "messages",
+            &[
+                ("anchor", cursor.to_string()),
+                ("num_before", "0".to_owned()),
+                ("num_after", "100".to_owned()),
+                ("include_anchor", "false".to_owned()),
+                ("apply_markdown", "false".to_owned()),
+                ("narrow", narrow.to_string()),
+            ],
+        )?;
+        all.extend(
+            result["messages"]
+                .as_array()
+                .ok_or("Zulip response has no messages")?
+                .iter()
+                .cloned(),
+        );
+    }
+    all.sort_by_key(|message| message["id"].as_u64().unwrap_or_default());
+    all.dedup_by_key(|message| message["id"].as_u64().unwrap_or_default());
+    Ok(all)
+}
+
+/// The bot's latest message before `id` in the same report channel and topic: what the human replies to.
+pub fn replied_to(settings: &Settings, message: &Value) -> Option<String> {
+    let id = message["id"].as_u64()?;
+    let channel = message["display_recipient"].as_str()?;
+    let bot = api(settings, "GET", "users/me", &[]).ok()?["user_id"].as_u64()?;
+    let narrow = json!([
+        {"operator":"stream","operand":channel},
+        {"operator":"topic","operand":message["subject"].as_str().unwrap_or_default()},
+        {"operator":"sender","operand":bot}
+    ]);
+    let found = api(
         settings,
         "GET",
         "messages",
         &[
-            ("anchor", cursor.to_string()),
-            ("num_before", "0".to_owned()),
-            ("num_after", "100".to_owned()),
+            ("anchor", id.to_string()),
+            ("num_before", "1".to_owned()),
+            ("num_after", "0".to_owned()),
             ("include_anchor", "false".to_owned()),
             ("apply_markdown", "false".to_owned()),
             ("narrow", narrow.to_string()),
         ],
-    )?;
-    Ok(result["messages"]
-        .as_array()
-        .ok_or("Zulip response has no messages")?
-        .clone())
+    )
+    .ok()?;
+    found["messages"].as_array()?.last()?["content"]
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Find a task header in a direct message or quoted reply; otherwise route to the main manager.
@@ -907,6 +971,19 @@ mod tests {
         Ok(())
     }
     use super::*;
+
+    #[test]
+    fn report_replies_go_to_the_configured_owner_else_the_pb_owner() {
+        let settings = Settings::from([
+            ("zulip.report_streams.pb digest".to_owned(), "pb-digest".to_owned()),
+            ("zulip.report_streams.pb news".to_owned(), "pb-news".to_owned()),
+            ("zulip.report_owners.pb digest".to_owned(), "pb_support.md".to_owned()),
+        ]);
+        assert_eq!(report_owner(&settings, "pb digest"), "pb_support");
+        assert_eq!(report_owner(&settings, "pb news"), "stock_news_watch");
+        assert_eq!(report_owner(&settings, "t_sub"), "t_sub");
+        assert_eq!(report_streams(&settings).len(), 2);
+    }
     #[test]
     fn disabled_consolidation_needs_no_credentials() -> Result<(), String> {
         let settings = Settings::from([(

@@ -495,13 +495,27 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
         let body = message["content"]
             .as_str()
             .ok_or("Zulip message has no content")?;
-        let subject = if settings::get(settings, "zulip.stream_id").is_empty() {
-            crate::zulip::subject(body)
-        } else {
+        let channel = message["display_recipient"].as_str().unwrap_or_default();
+        let report = crate::zulip::report_streams(settings)
+            .into_iter()
+            .any(|(_, name)| name == channel);
+        let subject = if report || !settings::get(settings, "zulip.stream_id").is_empty() {
             let topic = message["subject"]
                 .as_str()
                 .ok_or("Zulip stream message has no topic")?;
-            format!("[{}] Zulip message", crate::zulip::task_topic(topic))
+            format!("[{}] Zulip message", crate::zulip::report_owner(settings, topic))
+        } else {
+            crate::zulip::subject(body)
+        };
+        // A reply in a report channel names the report it answers, so the agent knows which item the human means.
+        let with_context;
+        let body = match report.then(|| crate::zulip::replied_to(settings, &message)).flatten() {
+            Some(report_text) => {
+                let quoted: String = report_text.lines().map(|line| format!("> {line}\n")).collect();
+                with_context = format!("{body}\n\nIn {channel}, replying to the report:\n{quoted}");
+                with_context.as_str()
+            }
+            None => body,
         };
         let name = format!("zulip-{id}.txt");
         let stored = store.root.join("manager_mail").join(&name);
