@@ -19,7 +19,7 @@ const BUILD = 'v2.0';
 const log = createLog();
 const lat = createLatency(log);
 addEventListener('error', e => log('err', `${e.message} @${e.filename?.split('/').pop()}:${e.lineno}`));
-addEventListener('unhandledrejection', e => log('err', `unhandled: ${e.reason?.message ?? e.reason}`));
+addEventListener('unhandledrejection', e => log('err', `unhandled: ${e.reason?.message ?? e.reason} @ ${String(e.reason?.stack ?? '').split('\n').slice(0, 3).join(' | ')}`));   // the stack says where, for the next report
 
 // ---- boot ----
 let cfg = store.get(ACCOUNT_KEY, null) ?? await login(store, log);

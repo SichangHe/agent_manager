@@ -45,14 +45,17 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
   }
 
   /** Waits briefly for the service's pre-rendered bundle, then asks for the next few chunks of this message in one batch request. */
+  // 🧑 log 2026-11-21 "can't access property "msgId", it is undefined": a new message replaced `items` during the awaits below, so items[i] was gone. The item is held from the start.
   async function ensureBundle(i) {
-    for (let waited = 0; !bundleOf(items[i]) && waited < PRERENDER_WAIT_MS; waited += 250) await new Promise(r => setTimeout(r, 250));
-    if (bundleOf(items[i])) return null;
+    const first = items[i], list = items;
+    if (!first) return null;
+    for (let waited = 0; !bundleOf(first) && waited < PRERENDER_WAIT_MS; waited += 250) await new Promise(r => setTimeout(r, 250));
+    if (bundleOf(first) || list !== items) return null;
     const group = [];
-    for (let j = i; j < items.length && group.length < BATCH_CHUNKS && items[j].msgId === items[i].msgId && items[j].idx === items[i].idx + group.length && !bundleOf(items[j]); j++) group.push(items[j]);
+    for (let j = i; j < list.length && group.length < BATCH_CHUNKS && list[j].msgId === first.msgId && list[j].idx === first.idx + group.length && !bundleOf(list[j]); j++) group.push(list[j]);
     const r = await voice.ttsBatch(group.map(g => g.text));
     if (!r.ok) return r;
-    localParts.set(`${items[i].msgId}:${items[i].idx}`, {...r.clip, id: r.clip.id, messageId: items[i].msgId, firstIdx: items[i].idx});
+    localParts.set(`${first.msgId}:${first.idx}`, {...r.clip, id: r.clip.id, messageId: first.msgId, firstIdx: first.idx});
     return null;
   }
 
@@ -110,7 +113,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     const slot = victim();
     const loaded = await load(slot, r.url);
     if (myGen !== gen) return {stale: true};
-    if (!loaded) { clips.delete(i); localParts.delete(`${items[i].msgId}:${r.bundle.part.firstIdx}`); voice.dropPart?.(r.bundle.part); return {error: 'audio failed to load'}; }
+    if (!loaded) { clips.delete(i); localParts.delete(`${r.bundle.part.messageId ?? items[i]?.msgId}:${r.bundle.part.firstIdx}`); voice.dropPart?.(r.bundle.part); return {error: 'audio failed to load'}; }
     slot.ready = true; slot.bundleId = variantId(r.bundle.part); slot.used = Date.now();
     return {slot, seekMs: r.bundle.startMs, bundle: r.bundle};
   }
