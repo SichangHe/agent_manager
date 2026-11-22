@@ -20,6 +20,7 @@ mod guest;
 mod history;
 mod jobs;
 mod log;
+mod machines;
 mod mail;
 mod mail_routes;
 mod omnigent;

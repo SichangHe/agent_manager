@@ -96,6 +96,7 @@ pub fn unread(
     let store = crate::store::Store {
         root: settings::work_logs(settings),
         state_dir: state_dir.to_owned(),
+        machine: crate::machines::me(settings),
     };
     let known = store.record("amh-zulip-read.txt")?;
     let known: Vec<u64> = known.lines().filter_map(|id| id.parse().ok()).collect();

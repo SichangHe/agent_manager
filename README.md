@@ -39,6 +39,7 @@ records, all under the work-log root (`work_logs` in `env.toml`)
 - name of a task file without `.md` = tag in email subjects `[tag]`
 
 modules
+- several machines sharing the work logs (`src/machines.rs`): `docs/machines.md`
 - Zulip (`src/zulip.rs`): human updates, uploads, task-topic replies, replacement deletion, and retained email migration aliases
     - transport settings and flow: `docs/zulip.md`
 - turn replies (`src/replies.rs`): end-of-turn text goes to whoever started the turn: `docs/turn-replies.md`

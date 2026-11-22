@@ -524,6 +524,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
             // Routing reads every task: done before the lock, which then covers only queuing to the chosen task (read again).
             let routed = if crate::database::Database::open(&store.state_dir.join("amh.sqlite3"))?
                 .received_mail(&key)?
+                || !crate::machines::takes(store, &subject)?
             {
                 None
             } else {
@@ -1083,6 +1084,8 @@ fn poll_mail() {
     loop {
         let Some(_busy) = busy() else { park_forever() };
         match settings::load() {
+            // Only `main` reads the mailboxes: two readers would race to mark the same email read.
+            Ok(settings) if !crate::machines::reads_mail(&settings) => park_forever(),
             Ok(settings) => {
                 let began = Instant::now();
                 intake.take_in(&settings, &Store::new(&settings));
@@ -1673,7 +1676,18 @@ fn commit_once(settings: &Settings, store: &Store) -> Duration {
         }
     }
     log_elapsed("git commit", phase);
-    COMMIT_EVERY
+    match store.machine {
+        Some(_) => crate::machines::SYNC_EVERY,
+        None => COMMIT_EVERY,
+    }
+}
+
+/// Deliver the messages other machines left for this machine's agents (`machines::deliver`).
+fn machine_mail_once(settings: &Settings, store: &Store) -> Duration {
+    for line in crate::machines::deliver(settings, store) {
+        log(&line);
+    }
+    crate::machines::SYNC_EVERY
 }
 
 /// Take in the human's Zulip messages.
@@ -1724,6 +1738,7 @@ pub fn run() -> u8 {
     every("Zulip intake", MAIL_POLL, zulip_once);
     every("archive", ARCHIVE_EVERY, archive_once);
     every("git commit", COMMIT_EVERY, commit_once);
+    every("machine mail", crate::machines::SYNC_EVERY, machine_mail_once);
     loop {
         let Some(_busy) = busy() else { return 0 };
         let settings = match settings::load() {

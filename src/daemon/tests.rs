@@ -284,6 +284,7 @@ fn store_with_task(
     let store = Store {
         root: dir.join("records"),
         state_dir: dir.join("state"),
+        machine: None,
     };
     std::fs::create_dir_all(&store.root)?;
     std::fs::create_dir_all(&store.state_dir)?;

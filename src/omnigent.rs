@@ -418,6 +418,10 @@ fn send_checked(
     // A message to a session that moved goes to where the agent lives now; the watcher updates the task file soon after.
     let moved = moved_to(settings, address);
     let address = moved.as_deref().unwrap_or(address);
+    // An agent of another machine gets the message through git; that machine's watcher delivers it.
+    if let Some(task) = crate::machines::remote_at(settings, address) {
+        return crate::machines::post(settings, &task, text);
+    }
     if let Some(why) = held(address) {
         return Err(format!("{address} is held ({why}); keep requests pending"));
     }

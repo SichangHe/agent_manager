@@ -1,0 +1,39 @@
+# Several machines
+(authored by agents unless marked 🧑)
+
+- 🧑 "The state is replicated. But. Tolerates large disconnections. And. Agents can talk to each other just like in the same machine."
+- 🧑 "We could probably make Git not conflict with a bit of effort ... we do want separate responsibilities. Try to implement it in a clean way."
+- code: `src/machines.rs`; off unless `env.toml` sets `machine = "NAME"`
+    - unset: amh behaves as on one machine; no file scans, 600 s git sync
+    - once a second machine exists, `main` must set `machine = "main"` too, or it never redirects sends or delivers posts
+        - even unset, a database never imports a task naming another machine
+- each machine runs its own amh watcher, Omnigent, and agents; they share only the work-log git repository
+    - no live link needed: a machine cut off keeps running its agents; what it wrote reaches the others at the next sync after it reconnects
+- ownership: a task belongs to one machine
+    - its `machine` field; absent = `main`, the machine amh ran on alone before, so old task files need no change
+    - a task saved on a machine other than `main` gets `machine: NAME` (`Store::prepare`)
+    - only the owner's database holds it; a new database imports only its own tasks (`Store::owns`)
+    - another machine's file is never exported or edited here; `Store::load` of it says which machine owns it
+    - so every git file has one writer and the git sync (`history.rs`) never meets a conflict
+- task list: `TODO.md` on `main`, `TODO.NAME.md` elsewhere (`machines::todo_file`); the database still calls it `TODO.md`
+- messages between agents: same commands as before
+    - `omnigent::send_checked` sees an address run by another machine's task (`remote_at`) and writes `machine_mail/OWNER/TIME-SENDER-PID.md` instead (`post`): `to: NAME.md` header, then the text
+        - addressed to the task name, so the owner delivers to whatever agent runs it then
+    - `amh tell agent NAME.md` finds another machine's task by its file (`agents::address_of`)
+        - `remote_at` asks the database first; only an address of no local open task reads the root's task files
+    - the owner's watcher, every `SYNC_EVERY`, sends unacknowledged posts in its folder oldest first (`deliver`, own watcher thread `machine mail`)
+        - handled post -> `machine_mail/OWNER/acked/FILE`, written only by the owner and carried by git, so a new clone or lost state folder never resends
+        - posts and acknowledgments are never edited or deleted: a deletion could meet a machine offline for weeks
+        - at least once: a crash between send and acknowledgment repeats one message
+        - task moved to another machine: passed on to it; task with no agent yet, unknown task, failed send: retried next round
+    - latency: about two syncs (`SYNC_EVERY`, 60 s once `machine` is set)
+- the human
+    - every machine sends to Zulip
+    - Zulip intake: each machine takes only messages whose `[tag]` task it owns; untagged or unknown tags go to `main` (`takes`)
+        - a message to a task made on another machine less than one sync ago reaches `main`'s routing (its manager or main manager) and also the owner
+    - email intake only on `main` (`reads_mail`): two readers would race to mark mail read
+- not done yet
+    - moving a task to another machine (failover); a move away from a machine that is only offline would run the task twice until it returns
+    - task identity beyond the file name: two machines making the same name while apart would conflict
+    - fencing a machine that returns after its tasks moved
+- setting up a machine: clone the work logs, install amh and Omnigent, write its `env.toml` with `machine`, `work_logs`, `[omnigent]`, `[zulip]` credentials; no `[mail]` needed

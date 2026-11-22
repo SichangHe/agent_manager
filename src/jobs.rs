@@ -228,6 +228,7 @@ mod tests {
         let store = Store {
             root: dir.clone(),
             state_dir: dir.clone(),
+            machine: None,
         };
         let settings = [
             ("job.check.every".to_owned(), "1h".to_owned()),
@@ -255,6 +256,7 @@ mod tests {
         let migrated = Store {
             root: legacy.clone(),
             state_dir: legacy.clone(),
+            machine: None,
         };
         assert!(Jobs::default().tick(&settings, &migrated).is_empty());
         assert!(!legacy.join(RECORD).exists());
@@ -266,6 +268,7 @@ mod tests {
         let unavailable = Store {
             root: failed.clone(),
             state_dir: failed,
+            machine: None,
         };
         assert!(Jobs::default().tick(&settings, &unavailable)[0].starts_with("cannot read"));
         assert!(!unavailable.state_dir.join("job-check.log").exists());

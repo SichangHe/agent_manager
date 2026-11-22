@@ -2168,6 +2168,7 @@ mod maintain_tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         for (name, at) in [
             ("retired.md", "retired"),
@@ -2234,6 +2235,7 @@ mod maintain_tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         let file = |name: &str, status: &str, on: &str| {
             taskfile::write(

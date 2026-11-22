@@ -269,7 +269,12 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
 /// Where the agent of `who` runs: the address a task file records; an address is passed through.
 pub fn address_of(store: &Store, who: &str) -> Result<String, String> {
     if who.ends_with(".md") {
-        Ok(store.load(who)?.address().to_owned())
+        // Another machine's task is not in this machine's database; its file still names its agent.
+        let remote = || crate::machines::remote_tasks(store).ok()?.into_iter().find(|task| task.name == who);
+        match store.load(who) {
+            Ok(task) => Ok(task.address().to_owned()),
+            Err(error) => remote().map(|task| task.address().to_owned()).ok_or(error),
+        }
     } else {
         Ok(who.to_owned())
     }

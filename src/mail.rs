@@ -872,6 +872,7 @@ pub fn record_sent(
     let store = crate::store::Store {
         root: settings::work_logs(settings),
         state_dir: state_dir.to_owned(),
+        machine: crate::machines::me(settings),
     };
     // One row per email (appending to the whole log rewrote ~200 KB in the writer each time); older rows stay in the record, read together.
     match store.database()? {

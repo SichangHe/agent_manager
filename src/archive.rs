@@ -242,6 +242,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         let _lock = store.lock()?;
         let now = Utc::now();

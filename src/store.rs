@@ -12,6 +12,8 @@ use crate::{database::Database, log, omnigent, requests, settings, taskfile};
 pub struct Store {
     pub root: PathBuf,
     pub state_dir: PathBuf,
+    /// This machine's name (`machines::me`); `None` when amh runs on one machine.
+    pub machine: Option<String>,
 }
 
 /// A wait for the lock at least this long is logged with the holder's name.
@@ -187,6 +189,30 @@ impl Store {
         Self {
             root: settings::work_logs(values),
             state_dir: settings::state_dir(),
+            machine: crate::machines::me(values),
+        }
+    }
+
+    /// The file this machine exports its task list to (`machines::todo_file`); the database keeps calling it `TODO.md`.
+    fn todo_file(&self) -> String {
+        crate::machines::todo_file(self.machine.as_deref())
+    }
+
+    /// Whether `task` belongs to this machine.
+    fn owns(&self, task: &Task) -> bool {
+        crate::machines::owner(task) == self.machine.as_deref().unwrap_or(crate::machines::MAIN)
+    }
+
+    /// The error for a task this machine does not hold: another machine's names that machine.
+    fn missing(&self, name: &str) -> String {
+        let owner = fs::read_to_string(self.root.join(name))
+            .ok()
+            .and_then(|text| Task::parse(name, &text).ok())
+            .filter(|task| !self.owns(task))
+            .map(|task| crate::machines::owner(&task).to_owned());
+        match owner {
+            Some(owner) => format!("amh: {name} belongs to machine {owner}; run this there, or send its agent a message"),
+            None => format!("amh: no task file {name} in the work-log root"),
         }
     }
 
@@ -263,6 +289,7 @@ impl Store {
         if !set_up && !database.initialized()? {
             self.recover_transfer()?;
             let mut tasks = self.markdown_tasks()?;
+            tasks.retain(|task| self.owns(task));
             for task in &mut tasks {
                 let mut records = requests::read(task)?;
                 let mut changed = false;
@@ -280,7 +307,7 @@ impl Store {
                 .iter()
                 .map(|task| (task.name.clone(), task.render()))
                 .collect();
-            match fs::read_to_string(self.root.join("TODO.md")) {
+            match fs::read_to_string(self.root.join(self.todo_file())) {
                 Ok(text) => snapshots.push(("TODO.md".to_owned(), text)),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => return Err(format!("amh: cannot import TODO.md: {error}")),
@@ -788,7 +815,10 @@ impl Store {
             && text.contains("done")
             && Task::parse(name, text).is_ok_and(|task| task.status() == "done");
         let recorded = database.record(&key)?.filter(|month| !month.is_empty());
-        let root_file = self.root.join(name);
+        let root_file = match name {
+            "TODO.md" => self.root.join(self.todo_file()),
+            _ => self.root.join(name),
+        };
         let (from, to) = match (done, recorded) {
             (false, None) => return Ok(root_file),
             (false, Some(month)) => (self.root.join(month).join(name), root_file),
@@ -967,9 +997,7 @@ impl Store {
         }
         if let Some(database) = self.database()? {
             // As stored: a long task's older body stays in `task_old_body` (its marker field says how long); saving it back keeps that body. `load_whole` reads it all.
-            let text = database
-                .task_stored(name)?
-                .ok_or_else(|| format!("amh: no task file {name} in the work-log root"))?;
+            let text = database.task_stored(name)?.ok_or_else(|| self.missing(name))?;
             return Task::parse(name, &text).map_err(|message| format!("amh: {message}"));
         }
         let text = fs::read_to_string(self.locate(name))
@@ -1116,6 +1144,13 @@ impl Store {
     pub fn prepare(&self, task: &Task) -> Result<(Task, Vec<serde_json::Value>), String> {
         let _phase = Phase::new("save.prepare");
         let mut task = task.clone();
+        // A task made on a machine other than `main` names its machine, so the others leave it alone.
+        if let Some(me) = &self.machine
+            && me != crate::machines::MAIN
+            && task.field("machine").is_none()
+        {
+            task.fields.push(("machine".to_owned(), me.clone()));
+        }
         let current = requests::sync(&mut task)?;
         requests::validate(&task)?;
         let old = match self.database()? {
@@ -1273,7 +1308,7 @@ impl Store {
                 .todo_text()?
                 .ok_or_else(|| "amh: no TODO.md in database".to_owned());
         }
-        fs::read_to_string(self.root.join("TODO.md"))
+        fs::read_to_string(self.root.join(self.todo_file()))
             .map_err(|error| format!("amh: cannot read TODO.md: {error}"))
     }
 
@@ -1541,6 +1576,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         taskfile::write(&root.join("TODO.md"), "current:\nt.md\n\nprevious:\n")?;
         taskfile::write(
@@ -1611,6 +1647,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.clone(),
+            machine: None,
         };
         Database::open(&root.join("amh.sqlite3"))?;
         fs::write(root.join("sent"), "legacy\n")?;
@@ -1672,6 +1709,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         let text = "---\nstatus: done\nrunat: omnigent://worker\n---\n\nbody\n";
         taskfile::write(&root.join("t.md"), text)?;
@@ -1706,7 +1744,7 @@ mod tests {
         fs::write(root.join("t.md"), "old\n")?;
         git(&["add", "t.md"])?;
         git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"])?;
-        let store = Store { root: root.clone(), state_dir: root.join("state") };
+        let store = Store { root: root.clone(), state_dir: root.join("state"), machine: None };
         assert!(store.committed_copy("t.md"));
         fs::write(root.join("t.md"), "edited\n")?;
         assert!(!store.committed_copy("t.md"));
@@ -1724,6 +1762,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         taskfile::write(
             &root.join("t.md"),
@@ -1766,6 +1805,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         drop(store.lock()?);
         store.sync_files()?;
@@ -1847,6 +1887,7 @@ mod tests {
         let git_only = Store {
             root: root.clone(),
             state_dir: root.join("none"),
+            machine: None,
         };
         let empty = Database::open(&root.join("empty.sqlite3"))?;
         assert_eq!(git_only.done_month(&empty, "t.md", &mut None), "202605");
@@ -1912,6 +1953,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         taskfile::write(
             &root.join("t.md"),
@@ -1950,6 +1992,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         taskfile::write(
             &root.join("t.md"),
@@ -1992,6 +2035,7 @@ mod tests {
         let store = Store {
             root: root.clone(),
             state_dir: root.join("state"),
+            machine: None,
         };
         let text = "---\nstatus: running\nrunat: omnigent://worker\npending_task_items:\n  - implement SQLite\n---\n\noriginal body\n";
         taskfile::write(&root.join("source.md"), text)?;
