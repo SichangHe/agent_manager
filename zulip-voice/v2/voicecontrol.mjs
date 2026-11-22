@@ -55,7 +55,7 @@ export function createVoiceControl(ctx) {
   const kwsHitMs = {};
   let lastHitAt = 0;   // when the latest local keyword fired, to log hit -> feedback
   let lastLocalCommandMs = 0, lastLocalTag = '', lastLocalTagMs = 0, localPhrases = new Map(), lastCommandWindowMs = 0, prebuildTimer = 0;
-  const SKIP_COUNT_WAIT_MS = 3000;   // how long an on-device "skip" waits for the transcript's count
+  const SKIP_COUNT_WAIT_MS = 1000;   // 🧑 "I don't want the skip command to become slow. Maybe wait for one second"   // how long an on-device "skip" waits for the transcript's count
   let lastLocalNav = null;   // {dir, ms}: a "skip forward/backward" heard on the device; the transcript may add a count
   let startWordUploads = [], emptyRun = 0, backoffUntil = 0;
 
@@ -129,7 +129,7 @@ export function createVoiceControl(ctx) {
       // 🧑 "skip backward, and with a number. It tries to skip too quickly, and sometimes doesn't register that number": the skip now waits for the transcript's count; one step if none comes.
       const dir = tag === 'SKIP_FORWARD' ? 1 : -1;
       clearTimeout(lastLocalNav?.timer);
-      lastLocalNav = {dir, ms: Date.now(), timer: setTimeout(() => { if (lastLocalNav?.dir !== dir) return; lastLocalNav = null; log('vc', 'no count in time: skipping one'); runCommands(dir > 0 ? 'skip forward' : 'skip backward'); }, SKIP_COUNT_WAIT_MS)};
+      lastLocalNav = {dir, ms: Date.now(), timer: setTimeout(() => { if (lastLocalNav?.dir !== dir) return; lastLocalNav = {dir, ms: Date.now(), skipped: true}; log('vc', 'no count in time: skipping one'); runCommands(dir > 0 ? 'skip forward' : 'skip backward'); }, SKIP_COUNT_WAIT_MS)};
       log('vc', 'skip heard on device: waiting for the count'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
     }
     lastLocalCommandMs = Date.now();
@@ -214,9 +214,13 @@ export function createVoiceControl(ctx) {
     if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
     if (lastLocalNav) {   // "skip forward three": the device heard the skip and waits for this transcript's count
       const said = normalize(afterStartWord(heard) ?? heard).replace(/^katana\s+/, ''), nav = navCommand(said), d = lastLocalNav.dir;
+      const skipped = lastLocalNav.skipped && Date.now() - lastLocalNav.ms < 10000;
       clearTimeout(lastLocalNav.timer); lastLocalNav = null;
-      if (nav && nav.dir === d) { log('vc', `skip count from the transcript: ${nav.count}`); runCommands(said); vcIdle(); return; }
-      runCommands(d > 0 ? 'skip forward' : 'skip backward');
+      if (skipped) {   // the one step already happened: a late count adds the rest
+        if (nav && nav.dir === d && nav.count > 1) { log('vc', `late count from the transcript: ${nav.count - 1} more`); ctx.navigate({...nav, count: nav.count - 1}); vcIdle(); return; }
+        if (nav && nav.dir === d) { vcIdle(); return; }
+      } else if (nav && nav.dir === d) { log('vc', `skip count from the transcript: ${nav.count}`); runCommands(said); vcIdle(); return; }
+      else runCommands(d > 0 ? 'skip forward' : 'skip backward');
     }
     if (choiceOpen()) {   // while a switch question is open, answers are matched first, even inside a session
       const w = normalize(afterStartWord(heard) ?? heard);
