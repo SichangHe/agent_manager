@@ -33,6 +33,15 @@ settings (dotted keys, `env.toml` or `config.toml`)
 - `quota.deny`: comma list of auth file names never to use; a new credential is used at once
 - `quota.redeem`: `"true"`
 - `quota.notify_task`
+- `quota.apikeys`: comma list naming the proxy's `claude-api-key` entries in config order (the management API shows no names)
+- `quota.apikey.<name>.monthly_tokens`: monthly limit in `total` tokens of the proxy usage store; no source exposes it, so unset means unknown
+- `quota.apikey_late_days` (default 3), `quota.usage_db` (default `~/.local/state/proxy-usage/usage.sqlite`)
+
+api keys (`quota_apikey`)
+- usage: sum of `total` per `auth_index` (in each row's `raw`) of the usage store since the UTC month start; burn over the last 6 h
+- reset: next UTC month start; need = quota left / hours left
+- priority: held at -1 (below subscriptions) until `quota.apikey_late_days` before the month end, then one above the top subscription rank while quota is left, via `PATCH claude-api-key` by index
+- `proxy_actions` never touches them; only this step writes their priority
 
 tests: `cargo test quota`
 - pure tables and random-input properties in `quota_core`; fake proxy on a real socket for full cycles, crash, timeout, shadow, new credential in `quota_observer`

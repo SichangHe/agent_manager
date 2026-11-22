@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
+use crate::quota_apikey as apikey;
 use crate::quota_core::{self as core, Act, Bucket, Reading, Snapshot, Status};
 use crate::settings;
 use crate::store::Store;
@@ -194,15 +195,47 @@ impl Proxy {
             .map_err(|e| format!("proxy auth-files: {e:?}"))
     }
 
+    /// `(auth_index, priority)` of each Claude API key of the proxy config, in config order.
+    pub fn api_keys(&self) -> Result<Vec<(String, i64)>, String> {
+        let answer = self
+            .agent
+            .get(&format!("{}/claude-api-key", self.url))
+            .header("Authorization", &self.key)
+            .call();
+        let listed = self
+            .json(answer)
+            .map_err(|e| format!("proxy claude-api-key: {e:?}"))?;
+        Ok(listed["claude-api-key"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|k| {
+                (
+                    k["auth-index"].as_str().unwrap_or_default().to_owned(),
+                    k["priority"].as_i64().unwrap_or_default(),
+                )
+            })
+            .collect())
+    }
+
     pub fn apply(&self, act: &Act) -> Result<(), String> {
         let (path, body) = match act {
-            Act::Enable(name) => ("status", json!({"name": name, "disabled": false})),
-            Act::Disable(name) => ("status", json!({"name": name, "disabled": true})),
-            Act::Priority(name, rank) => ("fields", json!({"name": name, "priority": rank})),
+            Act::Enable(name) => (
+                "auth-files/status",
+                json!({"name": name, "disabled": false}),
+            ),
+            Act::Disable(name) => ("auth-files/status", json!({"name": name, "disabled": true})),
+            Act::Priority(name, rank) => {
+                ("auth-files/fields", json!({"name": name, "priority": rank}))
+            }
+            Act::KeyPriority(_, index, rank) => (
+                "claude-api-key",
+                json!({"index": index, "value": {"priority": rank}}),
+            ),
         };
         let sent = self
             .agent
-            .patch(&format!("{}/auth-files/{path}", self.url))
+            .patch(&format!("{}/{path}", self.url))
             .header("Authorization", &self.key)
             .send_json(body);
         self.json(sent)
@@ -575,7 +608,28 @@ pub fn cycle(
         .collect();
     let (buckets, stepped) = core::step(&prev.buckets, &eligible, now);
     events.extend(stepped);
-    let acts = core::proxy_actions(&buckets, &readings, &denied, &ours);
+    let mut acts = core::proxy_actions(&buckets, &readings, &denied, &ours);
+    // The keys rank above every subscription only late in the month; a failed read leaves them as they are.
+    let api_keys = match proxy
+        .api_keys()
+        .and_then(|listed| apikey::read(settings, &listed, now))
+    {
+        Ok(keys) => keys,
+        Err(e) => {
+            log(&format!("api keys: {e}"));
+            prev.api_keys.clone()
+        }
+    };
+    let top = core::priorities(&buckets)
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0);
+    acts.extend(
+        apikey::changes(&api_keys, top, now, apikey::late_days(settings))
+            .into_iter()
+            .map(|(name, index, rank)| Act::KeyPriority(name, index, rank)),
+    );
     let intended: BTreeSet<String> = acts.iter().map(|a| format!("{a:?}")).collect();
     for act in &acts {
         let key = format!("{act:?}");
@@ -592,7 +646,7 @@ pub fn cycle(
                 match act {
                     Act::Disable(n) => ours.insert(n.clone()),
                     Act::Enable(n) => ours.remove(n),
-                    Act::Priority(..) => false,
+                    Act::Priority(..) | Act::KeyPriority(..) => false,
                 };
                 files.event(now, "action", &key, json!({}));
             }
@@ -859,6 +913,7 @@ pub fn cycle(
         seen: prev.seen.union(&names).cloned().collect(),
         ours,
         appeared_at,
+        api_keys,
     };
     for e in &events {
         files.event(now, e.kind, &e.subject, json!({}));
@@ -1022,7 +1077,7 @@ pub fn status(state_dir: &Path, now: i64) -> Result<String, String> {
     )
     .map(|r| crate::quota_pace::summary_lines(&r))
     .unwrap_or_else(|e| format!("pace: {e}\n"));
-    Ok(status_text(&snapshot, now, &events) + &pace)
+    Ok(status_text(&snapshot, now, &events) + &pace + &apikey::lines(&snapshot.api_keys, now))
 }
 
 #[cfg(test)]

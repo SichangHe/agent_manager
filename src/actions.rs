@@ -1578,6 +1578,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 format!("{report}\n")
             } else {
                 crate::quota_pace::text(&report)
+                    + &crate::quota_apikey::lines(
+                        &snapshot.api_keys,
+                        chrono::Utc::now().timestamp(),
+                    )
             }
         }
         ("quota", "status") => {

@@ -25,6 +25,7 @@ mod mail_routes;
 mod omnigent;
 mod org;
 mod quota;
+mod quota_apikey;
 mod quota_core;
 mod quota_observer;
 mod quota_pace;

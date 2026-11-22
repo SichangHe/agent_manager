@@ -490,6 +490,8 @@ pub enum Act {
     Enable(String),
     Disable(String),
     Priority(String, i64),
+    /// A Claude API key from the proxy config: `(name, index in the proxy's key list, priority)`.
+    KeyPriority(String, usize, i64),
 }
 
 /// What the proxy must change so its routing matches the buckets; the observer is the sole writer of `disabled` and `priority`.
@@ -846,6 +848,8 @@ pub struct Snapshot {
     pub ours: BTreeSet<String>,
     /// Per pool, when `quota_appeared` last happened.
     pub appeared_at: BTreeMap<String, i64>,
+    /// Monthly-quota Claude API keys of the proxy config.
+    pub api_keys: Vec<crate::quota_apikey::KeyUse>,
 }
 
 impl Snapshot {
@@ -853,7 +857,8 @@ impl Snapshot {
         json!({"version": 1, "generated_at": self.generated_at, "live": self.live,
             "buckets": self.buckets.iter().map(Bucket::to_json).collect::<Vec<_>>(),
             "pools": self.pools.iter().map(|(k, p)| (k.clone(), p.to_json())).collect::<serde_json::Map<_, _>>(),
-            "seen": self.seen, "ours": self.ours, "appeared_at": self.appeared_at})
+            "seen": self.seen, "ours": self.ours, "appeared_at": self.appeared_at,
+            "api_keys": self.api_keys.iter().map(|k| k.to_json()).collect::<Vec<_>>()})
     }
 
     pub fn from_json(v: &Value) -> Self {
@@ -887,6 +892,12 @@ impl Snapshot {
                 .into_iter()
                 .flatten()
                 .filter_map(|(k, t)| Some((k.clone(), t.as_i64()?)))
+                .collect(),
+            api_keys: v["api_keys"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(crate::quota_apikey::KeyUse::from_json)
                 .collect(),
         }
     }
