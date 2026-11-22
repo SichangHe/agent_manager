@@ -883,7 +883,7 @@ scenarios.agentSearch = async () => {
   const sp = await L.speechWav('Katana. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(16000), yes.subarray(yes.indexOf('data') + 8), gap(20000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sw.wav': Buffer.concat([head, data])});
-  const c = await L.openClient({url: srv2.url, mic: '/__sw.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
+  const c = await L.openClient({url: srv2.url, mic: '/__sw.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-switch-confirm': true}});
   const p = c.page;
   try {
     await L.waitFor(p, 'alpha', () => document.querySelector('#feed').innerText.includes('Alpha agent'));

@@ -191,3 +191,11 @@ html.picker-open, html.picker-open body { position: fixed; inset: 0; width: 100%
 #mode-banner[data-mode='input'] { background: #1f7a4d; }
 #mode-banner[data-mode='command'] { background: #8a4b0f; }
 #mode-banner b { margin-right: 4px; }
+/* 🧑 "Your agent switching window can still be scrolled left and right. Fix that.": nothing in the picker may be wider than the screen, and it only scrolls up and down */
+#picker, #picker .sheet, #picker #topics { overflow-x: hidden; max-width: 100vw; touch-action: pan-y; }
+#picker .sheet > *, #picker #topics li { min-width: 0; max-width: 100%; box-sizing: border-box; }
+#picker #topics .name { overflow-wrap: anywhere; padding-right: 36px; }
+/* 🧑 "That interface should also have the search bar at the bottom. And elements. Arranged to go bottom up.": the search row sits at the bottom, the first agent right above it, later ones further up */
+#picker .sheet { flex-direction: column-reverse; }
+#picker #topics { display: flex; flex-direction: column-reverse; }
+#picker #topics li { flex-shrink: 0; }
