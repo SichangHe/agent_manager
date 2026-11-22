@@ -71,7 +71,7 @@ if (cache) {   // an older build cached channel-topic messages twice (also witho
 
 const player = createPlayer({
   log, voice,
-  onItemStart(item) { log('audio', `start ${item.key}`); lat.finish('play:' + item.msgId, 'ready+playing'); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); if (follow) scrollToNow(); updateJump(); setMediaSession(item); },
+  onItemStart(item) { userHold = false; log('audio', `start ${item.key}`); lat.finish('play:' + item.msgId, 'ready+playing'); if (burst?.pending) return; store.set('voice2-pos', {topic: current, msgId: item.msgId, idx: item.idx}); store.set('voice2-last', {topic: current, msgId: item.msgId, idx: item.idx}); if (after(item, watermark())) store.set(wmKey(current), {msgId: item.msgId, idx: item.idx}); pausedItem = {topic: current, msgId: item.msgId, idx: item.idx}; const before = model.unreadAgentMessages(current).filter(m => m.id < item.msgId).map(m => m.id); if (before.length) markRead(before); nowMsgId = item.msgId; nowIdx = item.idx; highlight(); if (follow) scrollToNow(); updateJump(); setMediaSession(item); },
   onItemEnd(item) {
     if (!item.last) { if (burst) log('read', `chunk ${item.key} ended mid-skip (not last)`); return; }
     store.set('voice2-pos', null); if (pausedItem?.msgId === item.msgId) pausedItem = null;
@@ -415,7 +415,11 @@ const watermark = () => store.get(wmKey(current), null);
 const pastWatermark = it => after(it, watermark());
 /** What was paused (by a voice session or otherwise) and is not finished: resumes it mid-chunk, else falls back to autoplay. */
 let pausedItem = null;
+// 🧑 "I need a way to pause the. Play, so I can think": a spoken pause holds until "resume"/"play" or until something plays again; ending a voice session no longer undoes it.
+let userHold = false;
+function holdPlayback(on) { userHold = on; log('app', on ? 'playback held by pause' : 'playback hold released'); }
 function resumeAfterPause() {
+  if (userHold) { log('app', 'held by pause: not resuming'); return; }
   { const wait = vctl.soundLeftMs?.() ?? 0; if (wait > 0 && wait < 3000) { clearTimeout(resumeAfterPause.t); resumeAfterPause.t = setTimeout(resumeAfterPause, wait + 60); return; } }   // let a chime finish first
   player.unlock(); setFollow(true); if (nowMsgId !== null) scrollToNow();
   const st = player.position().status;
@@ -700,11 +704,11 @@ function navigate({dir, whole, count}) {
 }
 
 const vctl = createVoiceControl({
-  store, log, lat, player, zulip, voice, model, draft: draftEl, autosize, saveDraft, navigate, send, sendLocal, switchTopic, switchBack, switchNextUnread, sendLog, maybeAutoplay, resumeAfterPause,
+  store, log, lat, player, zulip, voice, model, draft: draftEl, autosize, saveDraft, navigate, send, sendLocal, switchTopic, switchBack, switchNextUnread, sendLog, maybeAutoplay, resumeAfterPause, holdPlayback,
   current: () => current, topicOf, dictating: () => dictation.active(), onClip: (...a) => dictation.onClip(...a), onLevel: drawLevel,
 });
 const dictation = createDictation({
-  log, player, voice, recorder: () => vctl.recorder, draft: draftEl, autosize, saveDraft, send, sendLocal, resumeAfterPause, maybeAutoplay,
+  log, player, voice, recorder: () => vctl.recorder, draft: draftEl, autosize, saveDraft, send, sendLocal, resumeAfterPause, holdPlayback, maybeAutoplay,
   voiceDown: () => voiceState.ok === false, isLive: () => events.info().state === 'live',
 });
 $('composer').onsubmit = event => {

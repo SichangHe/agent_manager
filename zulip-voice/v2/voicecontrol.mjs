@@ -55,6 +55,7 @@ export function createVoiceControl(ctx) {
   const kwsHitMs = {};
   let lastHitAt = 0;   // when the latest local keyword fired, to log hit -> feedback
   let lastLocalCommandMs = 0, lastLocalTag = '', lastLocalTagMs = 0, localPhrases = new Map(), lastCommandWindowMs = 0, prebuildTimer = 0;
+  const SKIP_COUNT_WAIT_MS = 3000;   // how long an on-device "skip" waits for the transcript's count
   let lastLocalNav = null;   // {dir, ms}: a "skip forward/backward" heard on the device; the transcript may add a count
   let startWordUploads = [], emptyRun = 0, backoffUntil = 0;
 
@@ -77,6 +78,7 @@ export function createVoiceControl(ctx) {
 
   /** Our own spoken prompt: the microphone ignores speech while it plays; a keyword still interrupts it. */
   function sayAndMute(text) { sayingUntil = Date.now() + 2500 + text.length * 70; recorder.muteFor(2500 + text.length * 70, true); player.say(text).then(ms => { sayingUntil = Date.now() + ms; recorder.muteFor(ms, true); }); }
+  function sayThen(text, then) { sayingUntil = Date.now() + 2500 + text.length * 70; recorder.muteFor(2500 + text.length * 70, true); player.say(text).then(ms => { sayingUntil = Date.now() + (ms || 0); recorder.muteFor(ms || 0, true); setTimeout(then, (ms || 0) + 150); }, () => then()); }
   function interruptPrompt(by) { player.stopSay(); sayingUntil = 0; announcingUntil = 0; recorder.unmute(); log('vc', `prompt interrupted by ${by}`); }
 
   // ---- on-device keywords ----
@@ -124,8 +126,11 @@ export function createVoiceControl(ctx) {
     }
     if (!inCommand) return;
     if (tag === 'SKIP_FORWARD' || tag === 'SKIP_BACKWARD') {   // runs once now; a spoken count ("skip forward three") is added when the transcript arrives
-      lastLocalNav = {dir: tag === 'SKIP_FORWARD' ? 1 : -1, ms: Date.now()};
-      runCommands(tag === 'SKIP_FORWARD' ? 'skip forward' : 'skip backward'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
+      // 🧑 "skip backward, and with a number. It tries to skip too quickly, and sometimes doesn't register that number": the skip now waits for the transcript's count; one step if none comes.
+      const dir = tag === 'SKIP_FORWARD' ? 1 : -1;
+      clearTimeout(lastLocalNav?.timer);
+      lastLocalNav = {dir, ms: Date.now(), timer: setTimeout(() => { if (lastLocalNav?.dir !== dir) return; lastLocalNav = null; log('vc', 'no count in time: skipping one'); runCommands(dir > 0 ? 'skip forward' : 'skip backward'); }, SKIP_COUNT_WAIT_MS)};
+      log('vc', 'skip heard on device: waiting for the count'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
     }
     lastLocalCommandMs = Date.now();
     runCommands(localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' '));
@@ -207,10 +212,11 @@ export function createVoiceControl(ctx) {
       log('vc', 'rejected as noise: too short or low confidence'); standby(); return;
     }
     if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
-    if (lastLocalNav && Date.now() - lastLocalNav.ms < 10000) {   // "skip forward three": the device already skipped once, add the rest
-      const nav = navCommand(normalize(afterStartWord(heard) ?? heard).replace(/^katana\s+/, ''));
-      if (nav && nav.dir === lastLocalNav.dir && nav.count > 1) { log('vc', `count from the transcript: ${nav.count - 1} more`); ctx.navigate({...nav, count: nav.count - 1}); lastLocalNav = null; vcIdle(); return; }
-      lastLocalNav = null;
+    if (lastLocalNav) {   // "skip forward three": the device heard the skip and waits for this transcript's count
+      const said = normalize(afterStartWord(heard) ?? heard).replace(/^katana\s+/, ''), nav = navCommand(said), d = lastLocalNav.dir;
+      clearTimeout(lastLocalNav.timer); lastLocalNav = null;
+      if (nav && nav.dir === d) { log('vc', `skip count from the transcript: ${nav.count}`); runCommands(said); vcIdle(); return; }
+      runCommands(d > 0 ? 'skip forward' : 'skip backward');
     }
     if (choiceOpen()) {   // while a switch question is open, answers are matched first, even inside a session
       const w = normalize(afterStartWord(heard) ?? heard);
@@ -276,7 +282,7 @@ export function createVoiceControl(ctx) {
     const done = [];
     const said = [];   // what was done, in words: a bare sound never says which command it was
     const tick = (name, words = name) => { done.push(name); said.push(words); recorder.beep('tick'); };
-    let navigated = false, left = false; const ignored = [];
+    let navigated = false, left = false; const ignored = [], navs = [];
     const finishSession = (discard = false) => { if (!vc) return; clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); setDraft(discard ? vc.base : vc.base + (vc.text ? (vc.base ? ' ' : '') + vc.text : '')); ctx.saveDraft(); vc = null; recorder.setReplyMode(false); };
     while (tokens.length && vc) {
       const t = tokens[0], two = tokens.slice(0, 2).join(' ');
@@ -289,9 +295,9 @@ export function createVoiceControl(ctx) {
       }
       if (CANCEL_RE.test(two) || CANCEL_RE.test(t)) { cancelSession(); return done; }
       const take = [3, 2, 1].find(n => navCommand(tokens.slice(0, n).join(' ')));   // longest prefix that is one navigation command ("next three", "previous message", "back")
-      if (take) { const nav = navCommand(tokens.splice(0, take).join(' ')); ctx.navigate(nav); tick('navigate', `${nav.dir === 0 ? 'again' : nav.dir > 0 ? 'next' : 'back'}${nav.whole ? ' message' : ''}${nav.count > 1 ? ' ' + nav.count : ''}`); navigated = true; continue; }
-      if (/^(stop|pause|wait)$/.test(t)) { tokens.shift(); player.pause(); tick('pause', 'paused'); continue; }
-      if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play', 'playing'); navigated = true; ctx.resumeAfterPause(); continue; }
+      if (take) { const nav = navCommand(tokens.splice(0, take).join(' ')); navs.push(nav); tick('navigate', `${nav.dir === 0 ? 'again' : nav.dir > 0 ? 'next' : 'back'}${nav.whole ? ' message' : ''}${nav.count > 1 ? ' ' + nav.count : ''}`); navigated = true; continue; }
+      if (/^(stop|pause|wait)$/.test(t)) { tokens.shift(); player.pause(); ctx.holdPlayback?.(true); tick('pause', 'paused'); continue; }
+      if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play', 'playing'); navigated = true; ctx.holdPlayback?.(false); ctx.resumeAfterPause(); continue; }
       log('vc', `command mode ignored "${t}"`); tokens.shift(); ignored.push(t);
     }
     if (!done.length && ignored.length && vc) {   // heard something, understood nothing: say so and show the commands (silence would look like a hang)
@@ -299,7 +305,10 @@ export function createVoiceControl(ctx) {
       log('vc', `command not recognized: "${ignored.join(' ')}"`); recorder.beep('empty'); toast(`Command not recognized: “${ignored.join(' ')}”. ${help}`); sayAndMute('Command not recognized. Say next, back, switch to, or cancel.');
     }
     if (done.length) log('vc', `commands: ${done.join(', ')}`);
-    if (said.length) sayAndMute(said.join(', '));   // e.g. "next message", "back 2", "paused"
+    // 🧑 "It should, say. Back, with the number first, and then, start playing": navigation waits until the confirmation has been spoken, so the two never overlap.
+    if (said.length && navs.length) sayThen(said.join(', '), () => { for (const nav of navs) ctx.navigate(nav); });
+    else if (said.length) sayAndMute(said.join(', '));   // e.g. "paused"
+    else for (const nav of navs) ctx.navigate(nav);
     if (navigated && vc && !left) { finishSession(); vcIdle(); left = true; }
     if (vc && !left) armCommandTimer();
     return done;
