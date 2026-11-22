@@ -317,13 +317,13 @@ export function createVoiceControl(ctx) {
       }
       if (CANCEL_RE.test(two) || CANCEL_RE.test(t)) { cancelSession(); return done; }
       const take = [3, 2, 1].find(n => navCommand(tokens.slice(0, n).join(' ')));   // longest prefix that is one navigation command ("next three", "previous message", "back")
-      if (take) { const nav = navCommand(tokens.splice(0, take).join(' ')); navs.push(nav); tick('navigate', `${nav.dir === 0 ? 'again' : nav.dir > 0 ? 'next' : 'back'}${nav.whole ? ' message' : ''}${nav.count > 1 ? ' ' + nav.count : ''}`); navigated = true; continue; }
+      if (take) { const nav = navCommand(tokens.splice(0, take).join(' ')); navs.push(nav); tick('navigate', `${nav.restart ? 'from the start' : nav.dir === 0 ? 'again' : nav.dir > 0 ? 'next' : 'back'}${nav.whole && !nav.restart ? ' message' : ''}${nav.count > 1 ? ' ' + nav.count : ''}`); navigated = true; continue; }
       if (/^(stop|pause|wait)$/.test(t)) { tokens.shift(); player.pause(); ctx.holdPlayback?.(true); tick('pause', 'paused'); continue; }
       if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play', 'playing'); navigated = true; ctx.holdPlayback?.(false); ctx.resumeAfterPause(); continue; }
       log('vc', `command mode ignored "${t}"`); tokens.shift(); ignored.push(t);
     }
     if (!done.length && ignored.length && vc) {   // heard something, understood nothing: say so and show the commands (silence would look like a hang)
-      const help = 'Commands: next, back, next message, previous message, next agent, switch to NAME, stop, play, cancel.';
+      const help = 'Commands: next, back, restart, next message, previous message, next agent, switch to NAME, stop, play, cancel.';
       log('vc', `command not recognized: "${ignored.join(' ')}"`); recorder.beep('empty'); toast(`Command not recognized: “${ignored.join(' ')}”. ${help}`); sayAndMute('Command not recognized. Say next, back, switch to, or cancel.');
     }
     if (done.length) log('vc', `commands: ${done.join(', ')}`);

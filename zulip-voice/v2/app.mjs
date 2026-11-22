@@ -691,9 +691,14 @@ draftEl.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey 
 draftEl.addEventListener('focus', () => setTimeout(() => { if (atBottom()) feed.scrollTop = feed.scrollHeight; }, 300));
 
 /** Navigation by voice: chunk or whole-message steps, or replay of the current chunk (dir 0). */
-function navigate({dir, whole, count}) {
-  log('vc', `navigate ${dir > 0 ? 'next' : dir < 0 ? 'previous' : 'again'}${whole ? ' message' : ''} x${count}`);
+function navigate({dir, whole, count, restart}) {
+  log('vc', `navigate ${restart ? 'restart message' : dir > 0 ? 'next' : dir < 0 ? 'previous' : 'again'}${whole ? ' message' : ''} x${count}`);
   player.unlock();
+  if (restart) {   // the message being read (or last heard) from its first sentence
+    const last = store.get('voice2-last', null), m = nowMsgId !== null ? model.find(nowMsgId) : last && model.find(last.msgId);
+    if (m) playFrom(m, 0); else jump(-1, true);
+    return;
+  }
   if (dir === 0) {
     const m = nowMsgId !== null ? model.find(nowMsgId) : null, last = store.get('voice2-last', null);
     const target = m ? {m, idx: nowIdx} : last && model.find(last.msgId) ? {m: model.find(last.msgId), idx: last.idx} : null;
