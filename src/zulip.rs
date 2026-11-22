@@ -309,7 +309,6 @@ fn mergeable(
     Ok(earlier)
 }
 
-// 🧑 "I'm seeing agents failing to replace their multiple messages with a single one. Why is this happening again?" — matching only `[tag] ` missed every `[tag]` header, so nothing was ever merged.
 /// The first and last three words of an update's text, without its `[tag]` header, to recognise it by.
 fn hint(content: &str, tag: &str) -> String {
     let text = match content.split_once('\n') {
@@ -324,6 +323,7 @@ fn hint(content: &str, tag: &str) -> String {
 }
 
 /// Whether `line` is the header amh puts on the task's updates: `[tag]` alone (no subject, since babe50f) or `[tag] title`.
+// 🧑 "I'm seeing agents failing to replace their multiple messages with a single one. Why is this happening again?" — matching only `[tag] ` missed every `[tag]` header, so nothing was ever merged.
 fn is_header(line: &str, tag: &str) -> bool {
     let line = line.trim_end();
     line == format!("[{tag}]") || line.starts_with(&format!("[{tag}] "))
