@@ -327,13 +327,36 @@ pub fn compact(settings: &Settings, state: &Path, only: Option<&str>) -> Result<
     let bot = api(settings, "GET", "users/me", &[])?["user_id"]
         .as_u64()
         .ok_or("Zulip profile has no user ID")?;
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-    for (_, topic, _, _) in unread(settings, state)? {
-        *counts.entry(topic).or_default() += 1;
-    }
+    // The topics of the bot's newest updates, in one call; `mergeable` then checks each with one call per unread update.
+    let topics: Vec<String> = match only {
+        Some(only) => vec![only.to_owned()],
+        None => {
+            let narrow = json!([{"operator":"sender","operand":bot},{"operator":"stream","operand":stream}]);
+            let newest = api(
+                settings,
+                "GET",
+                "messages",
+                &[
+                    ("anchor", "newest".to_owned()),
+                    ("num_before", "200".to_owned()),
+                    ("num_after", "0".to_owned()),
+                    ("narrow", narrow.to_string()),
+                ],
+            )?;
+            let mut topics: Vec<String> = newest["messages"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|message| message["subject"].as_str().map(str::to_owned))
+                .collect();
+            topics.sort();
+            topics.dedup();
+            topics
+        }
+    };
     let mut done = Vec::new();
-    for (tag, n) in counts {
-        if n < 2 || mail::REPORT_LABELS.contains(&tag.as_str()) || only.is_some_and(|only| only != tag) {
+    for tag in topics {
+        if mail::REPORT_LABELS.contains(&tag.as_str()) {
             continue;
         }
         let narrow = json!([
