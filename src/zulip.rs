@@ -390,6 +390,45 @@ fn request(
     Ok(result)
 }
 
+/// `body` with each `[switch: TASK]` line naming the bare task tag: trimmed, without `.md`.
+pub fn switch_lines(body: &str) -> String {
+    body.lines()
+        .map(|line| match line.trim().strip_prefix("[switch:").and_then(|rest| rest.strip_suffix(']')) {
+            Some(task) => format!("[switch: {}]", task.trim().trim_end_matches(".md")),
+            None => line.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The task the last `[switch: TASK]` line names.
+fn switch_target(body: &str) -> Option<String> {
+    body.lines().rev().find_map(|line| {
+        let task = line.trim().strip_prefix("[switch:")?.strip_suffix(']')?.trim();
+        (!task.is_empty()).then(|| task.to_owned())
+    })
+}
+
+/// Whether the bot has posted in topic `tag` of the main channel.
+fn topic_exists(settings: &Settings, tag: &str) -> Result<bool, String> {
+    let stream: u64 = settings::get(settings, "zulip.stream_id")
+        .parse()
+        .map_err(|_| "invalid zulip.stream_id")?;
+    let narrow = json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":tag}]);
+    let found = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "1".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    Ok(found["messages"].as_array().is_some_and(|m| !m.is_empty()))
+}
+
 pub fn send(
     settings: &Settings,
     state: &Path,
@@ -408,6 +447,14 @@ pub fn send(
     // 🤖 manager request: "make amh refuse duplicate human messages from one task within a short window"
     if sender != mail::WATCHER {
         recent_duplicate(state, tag, subject, body)?;
+    }
+    // 🧑 "support the usage without the .md too": a `[switch: TASK]` line names the task's topic; it must exist before the client follows it.
+    let body = &switch_lines(body);
+    if let Some(target) = switch_target(body).filter(|target| target != tag)
+        && !settings::get(settings, "zulip.stream_id").is_empty()
+        && !topic_exists(settings, &target)?
+    {
+        send(settings, state, &target, "Conversation", &format!("Opened so you can switch here from {tag}."), mail::WATCHER, &[])?;
     }
     let recipient = settings::get(settings, "zulip.human_id");
     let id: u64 = recipient
@@ -1058,6 +1105,14 @@ mod tests {
         Ok(())
     }
     use super::*;
+
+    #[test]
+    fn switch_lines_name_the_bare_task() {
+        assert_eq!(switch_lines("hi\n[switch: memo.md]"), "hi\n[switch: memo]");
+        assert_eq!(switch_lines(" [switch:  memo ] "), "[switch: memo]");
+        assert_eq!(switch_target("a\n[switch: x]\n[switch: memo]"), Some("memo".to_owned()));
+        assert_eq!(switch_target("no switch"), None);
+    }
 
     #[test]
     fn earlier_unread_updates_are_folded_newest_first_within_the_limit() {
