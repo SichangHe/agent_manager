@@ -17,6 +17,7 @@ const EMPTY_SESSION_MS = 8000;
 const COMMAND_SILENCE_MS = 8000;
 const EARCON_GAIN = {cancel: 0.85, command: 0.75, empty: 0.7};
 // 🧑 "play beats once in a while. Maybe every five second ... a double beat. That is low" / "only ... when the user is silent, ... indicating that they are still in either input or command mode"
+const MODE_BANNER_MS = 3500;   // how long the "still listening" bar stays after a beat
 const MODE_PULSE_MS = 5000;   // a session silent this long gets a low double beat, repeated at this interval; input: low then higher (A3, E4); command: two equal low beats (A3)
 EARCON_GAIN.pulseInput = EARCON_GAIN.pulseCommand = 0.35;   // the quiet ones were the ones the human could not hear
 const CHOICE_MS = 20000;
@@ -70,15 +71,18 @@ export function createVoiceControl(ctx) {
   const showSessionText = () => setDraft([vc.base.trim(), vc.text].filter(Boolean).join(' '));
 
   // 🧑 "maybe the user would not understand that the beats. Are. Indicating that they are still in a certain mode, so maybe we should also add. Visual indicators in case they freak out."
-  function showModeBanner() {
+  // 🧑 "You should. Show the indicator for still listening when you play that beat": the bar appears with each beat for a few seconds, and goes when the session ends.
+  let bannerUntil = 0;
+  function showModeBanner(flash = false) {
     const el = $('mode-banner'); if (!el) return;
     const mode = vc && !vc.ending ? (vc.mode === 'command' ? 'command' : 'input') : null;
-    el.hidden = !mode; if (!mode) return;
+    if (flash) bannerUntil = Date.now() + MODE_BANNER_MS;
+    el.hidden = !mode || Date.now() > bannerUntil; if (el.hidden) return;
     el.dataset.mode = mode;
     $('mode-name').textContent = mode === 'command' ? 'Command mode' : 'Input mode';
     $('mode-hint').textContent = mode === 'command'
-      ? `Say a command: next, back, pause, resume, switch to NAME. "${resumePhrase()}" leaves, "${cancelWord()}" cancels. Two equal low beats = still in command mode.`
-      : `What you say becomes your reply. "${resumePhrase()}" sends, "${cancelWord()}" cancels. A low rising beat = still listening.`;
+      ? `Still listening. Say a command: next, back, pause, resume, switch to NAME. "${resumePhrase()}" leaves, "${cancelWord()}" cancels. Two equal low beats = still in command mode.`
+      : `Still listening. What you say becomes your reply. "${resumePhrase()}" sends, "${cancelWord()}" cancels. A low rising beat = still listening.`;
   }
   const setVcState = (state, label) => { showModeBanner(); $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
   const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
@@ -354,6 +358,8 @@ export function createVoiceControl(ctx) {
     if (!ranked.length) { log('vc', 'no agent matches'); toast(`No agent called “${spoken}”`); sayAndMute(`No agent called ${spoken}`); return; }
     const clear = clearWinner(ranked), names = clear ? [ranked[0].t.name] : ranked.slice(0, 3).map(x => x.t.name);
     const readable = n => n.replace(/[_-]/g, ' ');
+    // 🧑 "if I say "switch to some agent name," and ... only found one match, we don't need to wait for me to say "positive." We just switch there immediately" / "Maybe this would be a configuration that we can toggle."
+    if (clear && !store.get('voice2-switch-confirm', false)) { log('vc', `one clear match: switching to ${names[0]} at once`); closeSessionForChoice(); ctx.switchTopic(names[0], true); vcIdle(); return; }
     askChoice(names, clear, clear ? `Switch to ${readable(names[0])}?` : names.map((n, i) => `${i + 1}, ${readable(n)}.`).join(' '));
     lat.stage('switch', 'question-shown');
   }
@@ -375,13 +381,13 @@ export function createVoiceControl(ctx) {
 
   // ---- input mode: the reply session ----
   let lastVoiceMs = 0, lastPulseMs = 0;
-  setInterval(showModeBanner, 500);   // also catches session ends that skip setVcState
+  setInterval(() => showModeBanner(), 500);   // hides it after MODE_BANNER_MS or when the session ends
   setInterval(() => {   // the mode beat: only in an open session, only while nobody (neither the human nor the app) is making sound
     if (!vc || vc.ending || recorder.inUtterance() || Date.now() < sayingUntil || recorder.earconLeftMs() > 0) { if (recorder.inUtterance()) lastVoiceMs = Date.now(); return; }
     if (['playing', 'loading'].includes(player.position().status)) return;
     const quietSince = Math.max(lastVoiceMs, lastPulseMs, vc.openedAt ?? 0);
     if (Date.now() - quietSince < MODE_PULSE_MS) return;
-    lastPulseMs = Date.now(); recorder.beep(vc.mode === 'command' ? 'pulseCommand' : 'pulseInput');
+    lastPulseMs = Date.now(); recorder.beep(vc.mode === 'command' ? 'pulseCommand' : 'pulseInput'); showModeBanner(true);
   }, 500);
   function openSession(rest, quiet = false) {
     bargePaused = false;
@@ -516,6 +522,7 @@ export function createVoiceControl(ctx) {
   $('set-silence').value = store.get('voice2-long-silence-s', LONG_SILENCE_DEFAULT_S);
   $('set-silence').onchange = e => store.set('voice2-long-silence-s', Math.max(0, Number(e.target.value) || 0));
   $('set-kws').checked = kwsEnabled();
+  { const box = $('set-switch-confirm'); if (box) { box.checked = store.get('voice2-switch-confirm', false); box.onchange = e => store.set('voice2-switch-confirm', e.target.checked); } }
   $('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) loadKws(); else if (!e.target.checked) kwsSpotter.unload(); };
   $('set-voice').onchange = e => setVoiceControl(e.target.checked);
   $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "tomato"' : 'Voice control off'); };

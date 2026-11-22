@@ -1735,7 +1735,7 @@ scenarios.positiveAnswer = async ({srv}) => {
   const ws = await Promise.all(['Katana.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__pa.wav': Buffer.concat([head, data])});
-  const c = await L.openClient({url: srv2.url, mic: '/__pa.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true}});
+  const c = await L.openClient({url: srv2.url, mic: '/__pa.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true, 'voice2-switch-confirm': true}});
   const p = c.page;
   try {
     await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 2, 45000);
@@ -1785,7 +1785,7 @@ scenarios.switchEarcons = async ({srv}) => {
   const ws = await Promise.all(['Katana.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__se.wav': Buffer.concat([head, data])});
-  const c = await L.openClient({url: srv2.url, mic: '/__se.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const c = await L.openClient({url: srv2.url, mic: '/__se.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-switch-confirm': true}});
   const p = c.page;
   try {
     await p.evaluate(() => { window.__tones = []; const orig = window.__voice.player.earcon; window.__voice.player.earcon = (notes, s) => { window.__tones.push(notes.join('/')); return orig.call(window.__voice.player, notes, s); }; });
@@ -2023,7 +2023,7 @@ scenarios.switchNameAfterList = async ({srv}) => {
   const ws = await Promise.all(['Katana.', 'Switch to.', 'Human manager.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(6000), pcm(ws[2]), gap(7000), pcm(ws[3]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sn.wav': Buffer.concat([head, data])});
-  const c = await L.openClient({url: srv2.url, mic: '/__sn.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const c = await L.openClient({url: srv2.url, mic: '/__sn.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-switch-confirm': true}});
   const p = c.page;
   try {
     await L.waitFor(p, 'topics', () => window.__voice.model.topics().length >= 3, 45000);

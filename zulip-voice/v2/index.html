@@ -12,17 +12,19 @@
 </head>
 <body>
 <div id="app" hidden>
-  <header id="bar">
-    <button id="agent" class="chip" aria-label="Choose agent"><span id="agent-name">…</span><svg viewBox="0 0 24 24" class="i"><path d="M6 9l6 6 6-6"/></svg><b id="agent-unread" hidden></b></button>
-    <span class="grow"></span>
-    <button id="conn" class="chip quiet" aria-label="Connection and debug"><i id="conn-dot"></i><span id="conn-text"></span></button>
-    <button id="settings" class="icon" aria-label="Settings"><svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
-  </header>
   <main id="feed" aria-label="Conversation"></main>
   <button id="jump" hidden>Jump to playing</button>
   <div id="net" hidden>No connection. Messages and audio will resume by themselves.</div>
   <div id="banner" hidden></div>
+  <!-- 🧑 "let's just move all the control to the bottom of the screen" -->
   <footer id="dock">
+    <div id="mode-banner" hidden><b id="mode-name"></b> <span id="mode-hint"></span></div>
+    <header id="bar">
+      <button id="agent" class="chip" aria-label="Choose agent"><span id="agent-name">…</span><svg viewBox="0 0 24 24" class="i"><path d="M6 9l6 6 6-6"/></svg><b id="agent-unread" hidden></b></button>
+      <span class="grow"></span>
+      <button id="conn" class="chip quiet" aria-label="Connection and debug"><i id="conn-dot"></i><span id="conn-text"></span></button>
+      <button id="settings" class="icon" aria-label="Settings"><svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
+    </header>
     <div id="transport">
       <button id="prev" class="icon" aria-label="Previous message"><svg viewBox="0 0 24 24" class="i"><path d="M6 5v14M19 5L9 12l10 7z"/></svg></button>
       <button id="play" class="icon big" aria-label="Play"><svg viewBox="0 0 24 24" class="i play"><path d="M8 5l11 7-11 7z"/></svg><svg viewBox="0 0 24 24" class="i pause"><path d="M8 5v14M16 5v14"/></svg><span class="spin"></span></button>
@@ -48,12 +50,11 @@
       <button type="submit" id="send" class="icon round accent" aria-label="Send" disabled><svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
     </form>
   </footer>
-  <div id="mode-banner" hidden><b id="mode-name"></b> <span id="mode-hint"></span></div>
   <div id="toast" hidden></div>
   <div id="tap-flash" aria-hidden="true"></div>
 </div>
 
-<dialog id="picker" class="top" aria-label="Choose agent"><div class="sheet">
+<dialog id="picker" aria-label="Choose agent"><div class="sheet">
   <div class="sheet-head"><input id="search" type="search" placeholder="Search agents" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <ul id="topics"></ul>
 </div></dialog>
@@ -90,6 +91,7 @@
     <label class="row"><span>Start word (default: attention)</span><input id="set-start" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
     <label class="row"><span>Long silence finishes a reply (seconds, 0 = off)</span><input id="set-silence" type="number" min="0" max="30" step="1" style="width:70px;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
     <label class="row"><span>On-device keyword recognition (on by default; uses about 300 MB more memory, turn off if the page reloads on its own)</span><input id="set-kws" type="checkbox"></label>
+    <label class="row"><span>Ask "Switch to X?" before a voice switch with one clear match (off: switch at once; say switch again if it is wrong)</span><input id="set-switch-confirm" type="checkbox"></label>
     <label class="row"><span>Hide attachments</span><input id="set-hide-att" type="checkbox"></label>
     <label class="row"><span>Speed <b id="set-rate-text"></b></span><input id="set-rate" type="range" min="0.5" max="3" step="0.1"></label>
   </section>
