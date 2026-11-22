@@ -386,11 +386,21 @@ pub fn compact(settings: &Settings, state: &Path, only: Option<&str>) -> Result<
         if folded.is_empty() {
             continue;
         }
-        let sent = send(settings, state, &tag, "", &body, mail::WATCHER, &[])?;
+        let sent = match send(settings, state, &tag, "", &body, mail::WATCHER, &[]) {
+            Ok(sent) => sent,
+            Err(error) => {
+                done.push(format!("{tag}: not merged: {error}"));
+                continue;
+            }
+        };
         let mut gone = folded.clone();
         gone.push(newest_id);
-        replace(settings, &gone)?;
-        done.push(format!("{tag}: {} updates merged into {sent}", gone.len()));
+        // A deletion that fails stays queued in amh-zulip-deletions and is retried with the next replacement.
+        let removed = match replace(settings, &gone) {
+            Ok(()) => String::new(),
+            Err(error) => format!("; some old ones are queued for deletion: {error}"),
+        };
+        done.push(format!("{tag}: {} updates merged into {sent}{removed}", gone.len()));
     }
     Ok(done)
 }
