@@ -854,7 +854,8 @@ $('picker').addEventListener('close', () => { pickerClosedMs = Date.now(); });
 function fitPicker() {
   const p = $('picker'), v = window.visualViewport;
   if (!p.open || !v) return;
-  p.style.position = 'fixed'; p.style.top = v.offsetTop + 'px'; p.style.margin = '0 auto'; p.style.maxHeight = Math.max(160, v.height - 8) + 'px';
+  // 🧑 "The list still does not. Grow from the bottom up": the picker was pinned to the top of the visible area; it now sits on the bottom edge (just above the keyboard) and grows upward.
+  p.style.position = 'fixed'; p.style.top = 'auto'; p.style.bottom = Math.max(0, window.innerHeight - v.offsetTop - v.height) + 'px'; p.style.margin = '0 auto'; p.style.maxHeight = Math.max(160, v.height - 8) + 'px';
   p.firstElementChild.style.maxHeight = p.style.maxHeight;
 }
 window.visualViewport?.addEventListener('resize', fitPicker);
