@@ -89,12 +89,12 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
 
   /** Loads `url` into `slot` and resolves true once it can play. */
   async function load(slot, url) {
-    slot.ready = false; slot.bundleId = null;
+    slot.ready = false; slot.bundleId = null; slot.loadingUrl = url;
     slot.el.src = url;
     slot.el.playbackRate = rate;
     slot.el.load();
     return new Promise(resolve => {
-      const done = ok => { slot.el.removeEventListener('canplay', onOk); slot.el.removeEventListener('error', onErr); clearTimeout(timer); resolve(ok); };
+      const done = ok => { if (!ok && slot.loadingUrl === url) slot.loadingUrl = null; slot.el.removeEventListener('canplay', onOk); slot.el.removeEventListener('error', onErr); clearTimeout(timer); resolve(ok); };
       const onOk = () => done(true), onErr = () => { log('audio', `load error code=${slot.el.error?.code} msg=${slot.el.error?.message} src=${String(url).slice(-40)}`); done(false); };
       const timer = setTimeout(() => done(false), 15000);
       slot.el.addEventListener('canplay', onOk); slot.el.addEventListener('error', onErr);
@@ -131,9 +131,12 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       if (!bundle || seen.has(bundle.part.id)) continue;
       seen.add(bundle.part.id);
       if (slots.some(s => s.bundleId === variantId(bundle.part) && s.ready)) continue;
-      const idle = victim();
+      // 🧑 "The speech now. Repeats the first half of agent messages. And then ... it just cuts off": pre-loading picked its slot before an await, and playback could load another
+      // bundle into the same slot meanwhile; pre-loading then labelled the slot with its own bundle, so playback later seeked inside the wrong audio. It now picks the slot after the
+      // wait, skips slots mid-load, and labels the slot only if its own URL is still the one loaded there.
       const r = await clipFor(i).url;
-      if (r.ok && idle !== active && await load(idle, r.url)) { idle.ready = true; idle.bundleId = variantId(bundle.part); idle.used = Date.now(); log('audio', `warmed ${bundle.part.id.slice(-18)}`); }
+      const idle = slots.filter(s => s !== active && !(s.loadingUrl && !s.ready)).sort((a, b) => (a.ready ? 1 : 0) - (b.ready ? 1 : 0) || a.used - b.used)[0];
+      if (r.ok && idle && await load(idle, r.url) && idle.loadingUrl === r.url && idle !== active) { idle.ready = true; idle.bundleId = variantId(bundle.part); idle.used = Date.now(); log('audio', `warmed ${bundle.part.id.slice(-18)}`); }
     }
     warming = false;
   }
