@@ -180,6 +180,7 @@ pub fn consolidation_reminder(
         Ok(stream) => ids.extend(
             mergeable(settings, stream, tag, messages, bot, &[current.to_owned()])?
                 .into_iter()
+                .map(|(id, _)| id)
                 .take(NEWEST),
         ),
         Err(_) => {
@@ -248,7 +249,11 @@ pub fn unread_earlier(settings: &Settings, tag: &str, skip: &[String]) -> Result
     let messages = result["messages"]
         .as_array()
         .ok_or("Zulip response has no messages")?;
-    mergeable(settings, stream, tag, messages, bot, skip)
+    // 🧑 "do we also give the very short start and end of the messages? ... Three words. At the start and end."
+    Ok(mergeable(settings, stream, tag, messages, bot, skip)?
+        .into_iter()
+        .map(|(id, hint)| format!("{id} (\"{hint}\")"))
+        .collect())
 }
 
 /// The task's updates newer than the human's last message in the topic and not yet read, newest first.
@@ -262,7 +267,7 @@ fn mergeable(
     messages: &[Value],
     bot: u64,
     skip: &[String],
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<(String, String)>, String> {
     let human: u64 = settings::get(settings, "zulip.human_id")
         .parse()
         .map_err(|_| "invalid zulip.human_id")?;
@@ -299,13 +304,26 @@ fn mergeable(
         if !unread_by_human(settings, id)? {
             break;
         }
-        earlier.push(key);
+        earlier.push((key, hint(message["content"].as_str().unwrap_or_default(), tag)));
     }
     Ok(earlier)
 }
 
-/// Whether `line` is the header amh puts on the task's updates: `[tag]` alone (no subject, since babe50f) or `[tag] title`.
 // 🧑 "I'm seeing agents failing to replace their multiple messages with a single one. Why is this happening again?" — matching only `[tag] ` missed every `[tag]` header, so nothing was ever merged.
+/// The first and last three words of an update's text, without its `[tag]` header, to recognise it by.
+fn hint(content: &str, tag: &str) -> String {
+    let text = match content.split_once('\n') {
+        Some((first, rest)) if is_header(first, tag) => rest,
+        _ => content,
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    match words.len() {
+        0..=6 => words.join(" "),
+        n => format!("{} … {}", words[..3].join(" "), words[n - 3..].join(" ")),
+    }
+}
+
+/// Whether `line` is the header amh puts on the task's updates: `[tag]` alone (no subject, since babe50f) or `[tag] title`.
 fn is_header(line: &str, tag: &str) -> bool {
     let line = line.trim_end();
     line == format!("[{tag}]") || line.starts_with(&format!("[{tag}] "))
@@ -1128,6 +1146,8 @@ mod tests {
     fn a_header_without_a_title_is_the_task_s_update() {
         assert!(is_header("[t]", "t") && is_header("[t] Status", "t"));
         assert!(!is_header("[t2]", "t") && !is_header("[tt] x", "t"));
+        assert_eq!(hint("[t]\n\na b c d e f g", "t"), "a b c … e f g");
+        assert_eq!(hint("x y", "t"), "x y");
         let bot = 7;
         let messages = [
             json!({"id": 1, "sender_id": bot, "content": "[t]\n\nold"}),
