@@ -13,7 +13,8 @@ import {speechPieces, assembleReply, removeControlWords, stripTrailingControl, l
 const MAX_TEXT_CHARS = 10000;
 const MAX_BATCH = 20;
 const MAX_TAIL_BATCH = 60;       // chunks in one pre-rendered tail bundle (about 4 minutes of speech)
-const SHORT_MESSAGE_CHUNKS = 3;  // messages up to this many chunks are rendered as a single bundle
+const SHORT_MESSAGE_CHUNKS = 3;
+const FIRST_TAIL_CHUNKS = 2;     // the first tail bundle after the head; later ones double  // messages up to this many chunks are rendered as a single bundle
 const SEND_DEADLINE_MS = 6000;   // `send` posts what is transcribed by now; slower clips are added by an edit
 const COALESCE_MS = 3000;        // messages arriving within this window of the first share one tail bundle
 const ORPHAN_SWEEP_MS = 1000 * Number(process.env.VOICE_ORPHAN_SWEEP_S || 300);   // listing 500 messages and attachments costs 3+ calls; deletes are capped below
@@ -460,10 +461,14 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     async renderTails(burst) {
       const spans = burst.spans.filter(sp => sp.n > 0);
       let n = 0;
+      // 🧑 "first it plays the first sentence, and then it lags for a very long time, and then it starts playing the rest": the whole tail was one bundle,
+      // so playback waited for every chunk (7 chunks took 12 s). Bundles now grow 2, 4, 8, ... chunks: each is ready before the one before it finishes playing.
+      let cap = FIRST_TAIL_CHUNKS;
       while (spans.length) {
         const group = []; let count = 0;
-        while (spans.length && count < MAX_TAIL_BATCH) {
-          const sp = spans[0], take = Math.min(sp.n, MAX_TAIL_BATCH - count);
+        const limit = Math.min(cap, MAX_TAIL_BATCH); cap *= 2;
+        while (spans.length && count < limit) {
+          const sp = spans[0], take = Math.min(sp.n, limit - count);
           group.push({messageId: sp.messageId, firstIdx: sp.firstIdx, n: take}); count += take;
           if (take === sp.n) spans.shift(); else { sp.firstIdx += take; sp.n -= take; }
         }
