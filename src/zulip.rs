@@ -174,17 +174,28 @@ pub fn consolidation_reminder(
     if current_is_report(messages, current) {
         return Ok(String::new());
     }
-    let prior = retained_updates(messages, bot, tag, current);
     let mut ids = Vec::new();
-    for id in prior
-        .iter()
-        .rev()
-        .take(NEWEST)
-        .filter_map(|message| message["id"].as_u64())
-    {
-        // A message the human replied after cannot be replaced, so asking to merge it only repeats.
-        if unread_by_human(settings, id)? && !answered(settings, id)? {
-            ids.push(format!("zulip:{id}"));
+    match stream.parse::<u64>() {
+        // One call per unread update: see `mergeable`.
+        Ok(stream) => ids.extend(
+            mergeable(settings, stream, tag, messages, bot, &[current.to_owned()])?
+                .into_iter()
+                .take(NEWEST)
+                .map(|(id, _)| id),
+        ),
+        Err(_) => {
+            let prior = retained_updates(messages, bot, tag, current);
+            for id in prior
+                .iter()
+                .rev()
+                .take(NEWEST)
+                .filter_map(|message| message["id"].as_u64())
+            {
+                // A message the human replied after cannot be replaced, so asking to merge it only repeats.
+                if unread_by_human(settings, id)? && !answered(settings, id)? {
+                    ids.push(format!("zulip:{id}"));
+                }
+            }
         }
     }
     // 🧑 "We allow 2 messages, one from previous turn, one from this end message, right?"
@@ -248,23 +259,130 @@ pub fn fold_unread(
     let messages = result["messages"]
         .as_array()
         .ok_or("Zulip response has no messages")?;
+    Ok(fold(body, mergeable(settings, stream, tag, messages, bot, skip)?))
+}
+
+/// The task's updates newer than the human's last message in the topic and not yet read, newest first, as (ID, text without header).
+///
+/// Updates before the human's last message were answered and are never merged; the first read update ends the search, since reading a topic reads what came before.
+/// That keeps Zulip calls to one per unread update plus one, under the rate limit.
+fn mergeable(
+    settings: &Settings,
+    stream: u64,
+    tag: &str,
+    messages: &[Value],
+    bot: u64,
+    skip: &[String],
+) -> Result<Vec<(String, String)>, String> {
+    let human: u64 = settings::get(settings, "zulip.human_id")
+        .parse()
+        .map_err(|_| "invalid zulip.human_id")?;
+    let narrow = json!([
+        {"operator":"sender","operand":human},
+        {"operator":"stream","operand":stream},
+        {"operator":"topic","operand":tag}
+    ]);
+    let last_human = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "1".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?["messages"]
+        .as_array()
+        .and_then(|found| found.last())
+        .and_then(|message| message["id"].as_u64())
+        .unwrap_or(0);
     let mut earlier = Vec::new();
     for message in retained_updates(messages, bot, tag, "").iter().rev() {
         let Some(id) = message["id"].as_u64() else { continue };
+        if id < last_human {
+            break;
+        }
         let key = format!("zulip:{id}");
-        if skip.contains(&key) || !unread_by_human(settings, id)? || answered(settings, id)? {
+        if skip.contains(&key) {
             continue;
+        }
+        if !unread_by_human(settings, id)? {
+            break;
         }
         let text = message["content"].as_str().unwrap_or_default();
         earlier.push((key, folded_text(text, tag)));
     }
-    Ok(fold(body, earlier))
+    Ok(earlier)
+}
+
+/// Merge each task topic's unread updates into one message and remove the rest; returns one line per merged topic.
+///
+/// Topics come from the newest unread updates (`unread`); PB report topics are left alone.
+// 🧑 "have a one time fix that lets current agents compress their messages to me"
+pub fn compact(settings: &Settings, state: &Path, only: Option<&str>) -> Result<Vec<String>, String> {
+    let stream: u64 = settings::get(settings, "zulip.stream_id")
+        .parse()
+        .map_err(|_| "merging updates needs zulip.stream_id")?;
+    let bot = api(settings, "GET", "users/me", &[])?["user_id"]
+        .as_u64()
+        .ok_or("Zulip profile has no user ID")?;
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, topic, _, _) in unread(settings, state)? {
+        *counts.entry(topic).or_default() += 1;
+    }
+    let mut done = Vec::new();
+    for (tag, n) in counts {
+        if n < 2 || mail::REPORT_LABELS.contains(&tag.as_str()) || only.is_some_and(|only| only != tag) {
+            continue;
+        }
+        let narrow = json!([
+            {"operator":"sender","operand":bot},
+            {"operator":"stream","operand":stream},
+            {"operator":"topic","operand":tag}
+        ]);
+        let found = api(
+            settings,
+            "GET",
+            "messages",
+            &[
+                ("anchor", "newest".to_owned()),
+                ("num_before", "20".to_owned()),
+                ("num_after", "0".to_owned()),
+                ("apply_markdown", "false".to_owned()),
+                ("narrow", narrow.to_string()),
+            ],
+        )?;
+        let messages = found["messages"].as_array().ok_or("Zulip response has no messages")?;
+        let mut updates = mergeable(settings, stream, &tag, messages, bot, &[])?;
+        if updates.len() < 2 {
+            continue;
+        }
+        let (newest_id, newest) = updates.remove(0);
+        let (body, folded) = fold(&newest, updates);
+        if folded.is_empty() {
+            continue;
+        }
+        let sent = send(settings, state, &tag, "", &body, mail::WATCHER, &[])?;
+        let mut gone = folded.clone();
+        gone.push(newest_id);
+        replace(settings, &gone)?;
+        done.push(format!("{tag}: {} updates merged into {sent}", gone.len()));
+    }
+    Ok(done)
+}
+
+/// Whether `line` is the header amh puts on the task's updates: `[tag]` alone (no subject, since babe50f) or `[tag] title`.
+// 🧑 "I'm seeing agents failing to replace their multiple messages with a single one. Why is this happening again?" — matching only `[tag] ` missed every `[tag]` header, so nothing was ever merged.
+fn is_header(line: &str, tag: &str) -> bool {
+    let line = line.trim_end();
+    line == format!("[{tag}]") || line.starts_with(&format!("[{tag}] "))
 }
 
 /// The text of an earlier update without its `[tag] title` header line.
 fn folded_text(content: &str, tag: &str) -> String {
     match content.split_once("\n\n") {
-        Some((header, rest)) if header.starts_with(&format!("[{tag}] ")) => rest.trim().to_owned(),
+        Some((header, rest)) if is_header(header, tag) => rest.trim().to_owned(),
         _ => content.trim().to_owned(),
     }
 }
@@ -322,7 +440,7 @@ fn retained_updates(messages: &[Value], bot: u64, tag: &str, current: &str) -> V
                     .is_some_and(|id| format!("zulip:{id}") != current)
                 && message["content"]
                     .as_str()
-                    .is_some_and(|body| body.starts_with(&format!("[{tag}] ")))
+                    .is_some_and(|body| is_header(body.lines().next().unwrap_or_default(), tag))
                 && !is_report_update(message)
         })
         .cloned()
@@ -1105,6 +1223,21 @@ mod tests {
         Ok(())
     }
     use super::*;
+
+    #[test]
+    fn a_header_without_a_title_is_the_task_s_update() {
+        assert!(is_header("[t]", "t") && is_header("[t] Status", "t"));
+        assert!(!is_header("[t2]", "t") && !is_header("[tt] x", "t"));
+        assert_eq!(folded_text("[t]\n\nbody one", "t"), "body one");
+        let bot = 7;
+        let messages = [
+            json!({"id": 1, "sender_id": bot, "content": "[t]\n\nold"}),
+            json!({"id": 2, "sender_id": bot, "content": "[t] pb news\n\nreport"}),
+            json!({"id": 3, "sender_id": 8, "content": "[t]\n\nhuman"}),
+        ];
+        let kept: Vec<u64> = retained_updates(&messages, bot, "t", "").iter().filter_map(|m| m["id"].as_u64()).collect();
+        assert_eq!(kept, [1]);
+    }
 
     #[test]
     fn switch_lines_name_the_bare_task() {
