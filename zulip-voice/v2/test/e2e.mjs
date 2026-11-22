@@ -1045,6 +1045,33 @@ scenarios.voiceNavigation = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceSkipCountNoFlicker = async () => {
+  // 🧑 "Every time we skip backward, it starts playing the older playback multiple times ... It should recognize the command quickly. Play an acknowledgement sound ... and then start playing":
+  // "skip backward three" plays exactly one new chunk, the one three back, with no chunk started in between.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 14}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const a = await L.speechWav('Katana.'), b = await L.speechWav('Skip backward three.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const data = Buffer.concat([gap(24000), pcm(a), gap(1800), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__skip3.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__skip3.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('.msg.agent .s').first().tap();
+    await L.waitFor(p, 'navigated', () => /vc\s+navigate previous x\d/.test(window.__voice.log.text()), 70000);
+    await L.sleep(4000);
+    const lines = (await p.evaluate(() => window.__voice.log.text())).split('\n');
+    if (process.env.DUMP) console.log(lines.slice(lines.findIndex(l => /session opened by start word/.test(l))).slice(0, 40).join('\n'));
+    const keyOf = l => +l.match(/start \d+:(\d+)/)[1];
+    const open = lines.findIndex(l => /session opened by start word/.test(l));
+    const before = lines.slice(0, open).filter(l => /audio\s+start /.test(l)).map(keyOf).at(-1);
+    const after = lines.slice(open).filter(l => /audio\s+start /.test(l)).map(keyOf);
+    assert.equal(after[0], before - 3, `first chunk after "skip backward three" from ${before}: ${after}`);
+    assert.ok(after.every((k, j) => k === before - 3 + j), `no flicker: chunks started after the command ${after}`);
+  } finally { await c.close(); await srv2.close(); }
+};
+
 scenarios.voiceNoDuplicateSend = async () => {
   // A draft sent by hand while a voice reply is still open must not be sent again by the session's timer.
   await L.wipeTasks();

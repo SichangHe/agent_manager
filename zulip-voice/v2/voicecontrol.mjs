@@ -59,7 +59,7 @@ export function createVoiceControl(ctx) {
   const kwsHitMs = {};
   let lastHitAt = 0;   // when the latest local keyword fired, to log hit -> feedback
   let lastLocalCommandMs = 0, lastLocalTag = '', lastLocalTagMs = 0, localPhrases = new Map(), lastCommandWindowMs = 0, prebuildTimer = 0;
-  const SKIP_COUNT_WAIT_MS = 1000;   // 🧑 "I don't want the skip command to become slow. Maybe wait for one second"   // how long an on-device "skip" waits for the transcript's count
+  const SKIP_COUNT_WAIT_MS = 2500;   // 🧑 2026-11-22 "recognize the command quickly. Play an acknowledgement sound ... and then start playing. Instead of flickering around": the sound confirms at once, playback waits for the count (the transcript took ~1.9 s in the log) and moves once   // 🧑 "I don't want the skip command to become slow. Maybe wait for one second"   // how long an on-device "skip" waits for the transcript's count
   let lastLocalNav = null;   // {dir, ms}: a "skip forward/backward" heard on the device; the transcript may add a count
   let startWordUploads = [], emptyRun = 0, backoffUntil = 0;
 
@@ -148,7 +148,9 @@ export function createVoiceControl(ctx) {
       const dir = tag === 'SKIP_FORWARD' ? 1 : -1;
       clearTimeout(lastLocalNav?.timer);
       lastLocalNav = {dir, ms: Date.now(), timer: setTimeout(() => { if (lastLocalNav?.dir !== dir) return; lastLocalNav = {dir, ms: Date.now(), skipped: true}; log('vc', 'no count in time: skipping one'); runCommands(dir > 0 ? 'skip forward' : 'skip backward'); }, SKIP_COUNT_WAIT_MS)};
-      log('vc', 'skip heard on device: waiting for the count'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
+      if (['playing', 'loading'].includes(player.position().status)) player.pause();
+      recorder.beep('tick');   // the command-recognized tick, not the command-mode sound
+      log('vc', 'skip heard on device: acknowledged, waiting for the count'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
     }
     lastLocalCommandMs = Date.now();
     runCommands(localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' '));
@@ -235,7 +237,7 @@ export function createVoiceControl(ctx) {
       const skipped = lastLocalNav.skipped && Date.now() - lastLocalNav.ms < 10000;
       clearTimeout(lastLocalNav.timer); lastLocalNav = null;
       if (skipped) {   // the one step already happened: a late count adds the rest
-        if (nav && nav.dir === d && nav.count > 1) { log('vc', `late count from the transcript: ${nav.count - 1} more`); ctx.navigate({...nav, count: nav.count - 1}); vcIdle(); return; }
+        if (nav && nav.dir === d && nav.count > 1) log('vc', `late count from the transcript ignored: ${nav.count}`);   // a second move after playback started was the flicker
         if (nav && nav.dir === d) { vcIdle(); return; }
       } else if (nav && nav.dir === d) { log('vc', `skip count from the transcript: ${nav.count}`); runCommands(said); vcIdle(); return; }
       else runCommands(d > 0 ? 'skip forward' : 'skip backward');
@@ -385,7 +387,7 @@ export function createVoiceControl(ctx) {
   setInterval(() => showModeBanner(), 500);   // hides it after MODE_BANNER_MS or when the session ends
   setInterval(() => {   // the mode beat: only in an open session, only while nobody (neither the human nor the app) is making sound
     if (!vc || vc.ending || recorder.inUtterance() || Date.now() < sayingUntil || recorder.earconLeftMs() > 0) { if (recorder.inUtterance()) lastVoiceMs = Date.now(); return; }
-    if (['playing', 'loading'].includes(player.position().status)) return;
+    if (['playing', 'loading'].includes(player.position().status) || lastLocalNav) return;
     const quietSince = Math.max(lastVoiceMs, lastPulseMs, vc.openedAt ?? 0);
     if (Date.now() - quietSince < MODE_PULSE_MS) return;
     lastPulseMs = Date.now(); recorder.beep(vc.mode === 'command' ? 'pulseCommand' : 'pulseInput'); showModeBanner(true);

@@ -476,7 +476,7 @@ let burst = null;   // taps within SKIP_DEBOUNCE_MS of each other: `{msgId, idx,
  * Steps one spoken chunk (one whole message when `whole`). The first tap plays at once; further taps in quick succession move the
  * highlighted target instantly and only the final target is loaded after the debounce. Previous restarts the chunk if it played >2 s.
  */
-function jump(direction, whole = false, noRestart = false) {
+function jump(direction, whole = false, noRestart = false, defer = false) {
   const agents = model.agentMessages(current);
   const flat = agents.flatMap(m => itemsOf(m));
   if (!flat.length) return toast('No agent messages here');
@@ -499,7 +499,7 @@ function jump(direction, whole = false, noRestart = false) {
   if (!target) return toast('No earlier messages');
   const play = () => playFrom(agents.find(m => m.id === target.msgId), target.idx);
   if (burst) clearTimeout(burst.timer);
-  const pending = !!burst;
+  const pending = !!burst || defer;
   burst = {msgId: target.msgId, idx: target.idx, pending};
   if (pending) { nowMsgId = target.msgId; nowIdx = target.idx; highlight(); setFollow(true); scrollToNow(); } else play();
   burst.timer = setTimeout(() => { const b = burst; burst = null; if (b.pending) play(); }, SKIP_DEBOUNCE_MS);
@@ -705,7 +705,9 @@ function navigate({dir, whole, count, restart}) {
     if (target) playFrom(target.m, target.idx); else jump(-1);
     return;
   }
-  for (let i = 0; i < count; i++) jump(dir, whole, true);   // by voice, "back" always means the previous chunk
+  // 🧑 "Every time we skip backward, it starts playing the older playback multiple times": each step used to start playback; the steps now only move, then one play
+  for (let i = 0; i < count; i++) jump(dir, whole, true, true);   // by voice, "back" always means the previous chunk
+  if (burst) { clearTimeout(burst.timer); const b = burst; burst = null; const m = model.agentMessages(current).find(x => x.id === b.msgId); if (m) playFrom(m, b.idx); }
 }
 
 const vctl = createVoiceControl({
