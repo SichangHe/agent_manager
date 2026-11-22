@@ -62,7 +62,7 @@ function resampleToWav(frames, fromHz) {
 }
 
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
-export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], cancel: [1319, 1047, 784], command: [740, 0, 740], tick: [1568], updated: [988, 740, 988], interrupted: [1000, 850, 720, 620], empty: [1100, 0, 1100], error: [1400, 1000, 1400, 1000], limited: [1568, 0, 1568, 0, 1568]};   // every note is 600-1600 Hz: phone speakers play lower tones too quietly
+export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], cancel: [1319, 1047, 784], command: [740, 0, 740], tick: [1568], updated: [988, 740, 988], interrupted: [1000, 850, 720, 620], empty: [1100, 0, 1100], error: [1400, 1000, 1400, 1000], limited: [1568, 0, 1568, 0, 1568], pulseInput: [220, 0, 330], pulseCommand: [220, 0, 220]};   // every note is 600-1600 Hz: phone speakers play lower tones too quietly
 
 export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio, onSpeechOnset}) {
   /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
