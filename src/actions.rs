@@ -614,39 +614,22 @@ pub fn tell_human(
     report_label: Option<&str>,
 ) -> Result<(String, String), String> {
     let tag = report_label.unwrap_or_else(|| task.tag());
-    // 🧑 "Agents are not replacing their unread messages with a singular one. Why? Let the amh agent fix this permanently"
-    // amh folds the task's earlier unread updates into this one and deletes them, so the human has one unread message per task.
     let zulip = crate::zulip::enabled(settings);
-    let folded = match zulip && report_label.is_none() {
-        true => crate::zulip::fold_unread(settings, tag, body, replaces),
-        false => Ok((body.to_owned(), Vec::new())),
-    };
-    let (body, folded) = folded.unwrap_or_else(|error| {
-        eprintln!("amh: earlier unread updates were not merged: {error}");
-        (body.to_owned(), Vec::new())
-    });
     let sent = mail::send(
         settings,
         &settings::state_dir(),
         tag,
         subject,
-        &body,
+        body,
         task.address(),
         attachments,
     );
     let message_id = sent.map_err(|error| format!("amh: {error}"))?;
     if zulip {
-        let mut receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n{NO_REPEAT}");
-        if !folded.is_empty() {
-            receipt.push_str(&format!(
-                "\namh merged your {} earlier unread update(s) into it and removed them: {}\n",
-                folded.len(),
-                folded.join(", ")
-            ));
-        }
-        let all: Vec<String> = replaces.iter().cloned().chain(folded).collect();
-        // amh merged the earlier unread updates itself, so asking the agent to merge them would only cost Zulip calls.
-        let reminder = zulip_sent_followup(crate::zulip::replace(settings, &all), || Ok(String::new()))
+        let receipt = format!("Zulip message sent.\nMessage-ID: {message_id}\n{NO_REPEAT}");
+        let reminder = zulip_sent_followup(crate::zulip::replace(settings, replaces), || {
+            crate::zulip::consolidation_reminder(settings, tag, &message_id)
+        })
         .unwrap_or_else(|error| {
             eprintln!("amh: message {message_id} was sent; {error}");
             String::new()
@@ -1135,6 +1118,21 @@ pub fn run(values: &Value) -> Result<u8, String> {
             // 🧑 "fix the messages to come through pb new and pb urgent instead of this tag"
             if text("report_label").is_some() && task.tag() != "stock_news_watch" {
                 return Err("amh: --report-label requires stock_news_watch".to_owned());
+            }
+            // 🧑 "if agents send multiple messages, before the human read any of them, they would send a replacement message that would only include what is still current and necessary to be read"
+            // Nothing is sent and no item changes until the new message replaces every earlier unread one.
+            if crate::zulip::enabled(&settings) && !flag("email") && text("report_label").is_none() {
+                let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
+                match crate::zulip::unread_earlier(&settings, task.tag(), &replaces) {
+                    Ok(left) if !left.is_empty() => {
+                        return Err(format!(
+                            "amh: nothing sent, no item changed: the human has not read your earlier update(s) {}. Read them with `amh mail unread`, then send ONE message holding only what is still current and needed from them and from this one, with --replaces for each of those IDs. Drop what is outdated; do not copy old text verbatim.",
+                            left.join(", ")
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(error) => eprintln!("amh: checking earlier unread updates failed, sending anyway: {error}"),
+                }
             }
             let mut added = Vec::new();
             for item in many("add") {
@@ -1937,15 +1935,6 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 format!("nothing from the human in the last {hours} h\n")
             } else {
                 out
-            }
-        }
-        ("mail", "compact") => {
-            let settings = settings::load().map_err(|message| format!("amh: {message}"))?;
-            let tag = text("task").map(|t| t.trim_end_matches(".md"));
-            let lines = crate::zulip::compact(&settings, &settings::state_dir(), tag).map_err(failed)?;
-            match lines.is_empty() {
-                true => "no task has 2 or more unread updates to merge\n".to_owned(),
-                false => lines.join("\n") + "\n",
             }
         }
         ("mail", "unread") => {
