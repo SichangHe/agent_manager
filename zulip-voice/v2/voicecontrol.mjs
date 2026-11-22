@@ -270,7 +270,8 @@ export function createVoiceControl(ctx) {
     if (kwsOn && rest !== null && afterStartWord(heard) === null && !commandLike(heard) && !commandFirst) { log('vc', `ignored: "${heard}" (transcript is not the start word)`); standby(); return; }
     const followUp = Date.now() - lastReplyEndMs < FOLLOW_UP_GRACE_MS;
     if (rest === null && followUp && commandLike(heard)) rest = heard;   // a command right after a send is still a command, never reply text
-    if (rest === null && followUp) { log('vc', `follow-up right after a send: "${heard}"`); openSession(''); addToSession(heard); return; }
+    // 🧑 "The system picked up garbage": room talk 2 s after a send opened a reply with no start word and was sent after the silence. Speech after a send now needs the start word like any other.
+    if (rest === null && followUp) log('vc', `right after a send, but no start word: "${heard}"`);
     if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     noteStartResult(true);
     if (commandFirst && afterStartWord(heard) === null) { openSession('', true); enterCommandMode(heard.trim().split(/\s+/).slice(1).join(' ')); return; }   // "katana next two" from standby: command mode directly

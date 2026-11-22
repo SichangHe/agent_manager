@@ -930,7 +930,7 @@ scenarios.idlePrevNext = async ({srv}) => {
 };
 
 scenarios.voiceFollowUp = async () => {
-  // Speech right after a reply was sent (no start word) continues as a follow-up instead of being dropped.
+  // 🧑 "The system picked up garbage": speech right after a reply was sent, without the start word, is ignored like any other (it used to open a reply and send room talk).
   await L.wipeTasks();
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
   const a = await L.speechWav('Attention. Deploy it to staging now.'), b = await L.speechWav('And then run all of the tests afterwards.');
@@ -943,10 +943,10 @@ scenarios.voiceFollowUp = async () => {
   try {
     await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
     await p.locator('.msg.agent .s').first().tap();
-    await L.waitFor(p, 'follow-up handled', () => /vc\s+follow-up right after a send/.test(window.__voice.log.text()), 60000);
-    const sent = await (async () => { for (let i = 0; i < 25; i++) { const m = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(x => x.sender_id === L.account.humanId).map(x => x.content); if (m.length >= 2) return m; await L.sleep(1000); } return []; })();
-    assert.equal(sent.length, 2, JSON.stringify(sent));
-    assert.match(sent[1], /run all of the tests/i);
+    await L.waitFor(p, 'follow-up ignored', () => /vc\s+right after a send, but no start word/.test(window.__voice.log.text()), 60000);
+    await p.waitForTimeout(8000);   // past the long silence that used to send it
+    const sent = await (async () => { for (let i = 0; i < 25; i++) { const m = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(x => x.sender_id === L.account.humanId).map(x => x.content); if (m.length >= 1) return m; await L.sleep(1000); } return []; })();
+    assert.equal(sent.length, 1, JSON.stringify(sent));
   } finally { await c.close(); await srv2.close(); }
 };
 

@@ -231,7 +231,9 @@ export function soundsLikeWord(word, parts) {
 }
 
 /** The last word of a reply that the on-device spotter just confirmed as the end word: a clipped start of it ("Tomat" for "tomato") is within 2 edits of its sound key. */
-export function looksLikeClippedEndWord(word) { const k = soundKey(word); return k.length >= 5 && distance(k, CONTROL.tomato.key) <= 2; }
+// 🧑 "The system picked up garbage" (log 2026-11-22): "... by tomorrow." lost its real last word "tomorrow", which sounds close to the end word. Real words are never dropped.
+const NOT_CLIPPED = new Set(['tomorrow', 'tomorrows', 'tomatoes']);
+export function looksLikeClippedEndWord(word) { if (NOT_CLIPPED.has(word.toLowerCase().replace(/[^a-z]/g, ''))) return false; const k = soundKey(word); return k.length >= 5 && distance(k, CONTROL.tomato.key) <= 2; }
 
 /* ---- Reply assembly rules shared by the client and the relay's `send` ---- */
 const COMMAND_VOCAB = new Set('attention katana tomato macaroni bamboo cancel never mind skip jump forward backward back next previous message messages again stop play resume switch to agent agents number one two three four five six seven eight nine ten positive negative yes no over send pencil'.split(' '));
