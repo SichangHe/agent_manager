@@ -136,7 +136,10 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       // wait, skips slots mid-load, and labels the slot only if its own URL is still the one loaded there.
       const r = await clipFor(i).url;
       const idle = slots.filter(s => s !== active && !(s.loadingUrl && !s.ready)).sort((a, b) => (a.ready ? 1 : 0) - (b.ready ? 1 : 0) || a.used - b.used)[0];
-      if (r.ok && idle && await load(idle, r.url) && idle.loadingUrl === r.url && idle !== active) { idle.ready = true; idle.bundleId = variantId(bundle.part); idle.used = Date.now(); log('audio', `warmed ${bundle.part.id.slice(-18)}`); }
+      // 🧑 log 2026-11-22 21:14 (same complaint): clipFor(i) is cached, so r.url can be an older bundle (a local batch) while bundleOf(items[i]) is now the service's newer one; the slot was
+      // labelled with the newer bundle but held the older audio, so playback seeked with the wrong timeline. The label now always comes from the bundle whose URL was loaded.
+      if (!r.ok || slots.some(s => s.bundleId === variantId(r.bundle.part) && s.ready)) continue;
+      if (idle && await load(idle, r.url) && idle.loadingUrl === r.url && idle !== active) { idle.ready = true; idle.bundleId = variantId(r.bundle.part); idle.used = Date.now(); log('audio', `warmed ${r.bundle.part.id.slice(-18)}`); }
     }
     warming = false;
   }
