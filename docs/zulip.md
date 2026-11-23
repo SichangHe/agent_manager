@@ -36,13 +36,20 @@
   - retained messages do not establish whether the human read them
   - consolidate still-pending details and all open requests in the next useful update, then explicitly replace superseded IDs
   - never automatically summarizes or deletes messages; human messages are excluded
-- agents' channel: 🧑 "let them talk to each other using AMH. And tulip. We should have dedicated channels for them." 🧑 "I don't want it to go though SSH, but use Zulip"
-  - `zulip.agent_stream` names a channel (live: `amh-agents`, private to the human and the bot); unset = off
-  - anyone in it (an agent on another machine, using a bot login) posts with topic = the receiving task's tag
-  - the watcher (`take_in_agent_posts`) sends each post to that open task's agent, else the main manager, wrapped as an agent message from `SENDER in Zulip #CHANNEL > TOPIC`
-  - the other way: `amh tell agent zulip:TOPIC` posts the message there (`zulip::post`), for an agent elsewhere that reads that topic
-    - the watcher skips the bot's own posts, so a machine never hands itself what it sent; another machine uses its own bot
-  - cursor `amh-zulip-agents-cursor.txt` advances only after the send: at least once; a first run starts after the newest post
+- agents on several machines: `src/remote.rs`
+  - 🧑 "let them talk to each other using AMH. And tulip. We should have dedicated channels for them." 🧑 "I don't want it to go though SSH, but use Zulip"
+  - 🧑 "the agents would send messages just like they are on a same machine. But, AMH would figure out whether they go through Zulip or not."
+  - a machine is known by its bot: its own login file (`zulip.env_file` in its `env.toml`); the shared `config.toml` sets `zulip.agent_stream` (the channel, live `amh-agents`) and `zulip.main_bot` (the main machine's bot email)
+  - sending: same commands everywhere
+    - `amh tell agent NAME.md` for a task this machine lacks posts to topic `NAME` (`remote::topic_for`)
+    - any send to an address this machine's Omnigent answers 404 for (or, off the main machine, with no Omnigent) posts to topic = the address (`remote::elsewhere`, in `omnigent::send_checked`); so `amh tell manager` reaches a manager on another machine
+    - the post is the usual `<agent_message from=...>` envelope, so the receiver can answer with `amh tell agent ADDRESS`
+  - receiving: each watcher reads the channel (`take_in_agent_posts`), skips its own bot's posts, and sends a post to the open task of that tag or the agent of that address here; else the main machine's main manager; other machines leave it
+    - cursor `amh-zulip-agents-cursor.txt` advances only after the send: at least once; a first run starts after the newest post
+    - a post not from amh (no envelope) is wrapped as from `SENDER in Zulip #CHANNEL > TOPIC`
+  - only the main machine takes in the human's Zulip messages and email; its manager passes on what belongs to another machine's task
+  - a task started on a machine records `machine: NAME` (bot email without `-bot@SITE`) when the channel is on
+  - setting up another machine: `docs/machine-setup.md`
 - external Gmail intake continues
   - SMTP outbox flushing pauses while Zulip is selected
   - existing queued email remains available for deliberate migration

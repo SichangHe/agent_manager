@@ -1083,6 +1083,8 @@ fn poll_mail() {
     loop {
         let Some(_busy) = busy() else { park_forever() };
         match settings::load() {
+            // Only the main machine reads the mailboxes (`remote::is_main`).
+            Ok(settings) if !crate::remote::is_main(&settings) => park_forever(),
             Ok(settings) => {
                 let began = Instant::now();
                 intake.take_in(&settings, &Store::new(&settings));
@@ -1688,34 +1690,55 @@ fn take_in_agent_posts(settings: &Settings, store: &Store) -> Result<(), String>
     }
     const CURSOR: &str = "amh-zulip-agents-cursor.txt";
     let cursor = store.record(CURSOR)?.trim().parse::<u64>().ok();
-    let own = crate::zulip::bot_email(settings)?;
+    let own = crate::remote::me(settings)?;
     for post in crate::zulip::channel_posts(settings, stream, cursor)? {
         let id = post["id"].as_u64().ok_or("Zulip post has no ID")?;
-        // This machine's own posts (`amh tell agent zulip:TOPIC`) are for agents elsewhere.
+        // This machine's own posts are for agents elsewhere.
         if cursor.is_some() && post["sender_email"].as_str() != Some(&own) {
             let topic = post["subject"].as_str().unwrap_or_default();
-            let task = store.load(&format!("{topic}.md")).ok().filter(|task| {
-                task.status() != "done" && task.address().starts_with(omnigent::PREFIX)
-            });
-            let to = match &task {
-                Some(task) => task.address(),
-                None => settings::get(settings, "main_manager"),
-            };
-            let sender = post["sender_full_name"].as_str().unwrap_or("someone");
-            let text = post["content"].as_str().unwrap_or_default();
-            let from = format!("{sender} in Zulip #{stream} > {topic}");
-            omnigent::send(settings, to, &crate::work::envelope(&from, text))?;
-            log(&format!("Zulip agent post {id} -> {to}"));
+            match agent_post_target(settings, store, topic)? {
+                Some(to) => {
+                    let text = post["content"].as_str().unwrap_or_default();
+                    // amh's own posts already say who sent them; anything else is wrapped as from its Zulip sender.
+                    let text = match text.starts_with("<agent_message") {
+                        true => text.to_owned(),
+                        false => {
+                            let sender = post["sender_full_name"].as_str().unwrap_or("someone");
+                            crate::work::envelope(&format!("{sender} in Zulip #{stream} > {topic}"), text)
+                        }
+                    };
+                    omnigent::send(settings, &to, &text)?;
+                    log(&format!("Zulip agent post {id} -> {to}"));
+                }
+                None => log(&format!("Zulip agent post {id} for {topic}: not on this machine")),
+            }
         }
         store.set_record(CURSOR, &id.to_string())?;
     }
     Ok(())
 }
 
+/// The agent here that gets a post with `topic`: an open task's agent by tag, or an agent address this machine's Omnigent knows;
+/// on the main machine, else the main manager; elsewhere, else nobody.
+fn agent_post_target(settings: &Settings, store: &Store, topic: &str) -> Result<Option<String>, String> {
+    let task = match topic.starts_with(omnigent::PREFIX) {
+        true => store.active_mentioning(&[topic.to_owned()])?.into_iter().find(|task| task.address() == topic),
+        false => store.load(&format!("{topic}.md")).ok(),
+    };
+    let task = task.filter(|task| task.status() != "done" && task.address().starts_with(omnigent::PREFIX));
+    Ok(match task {
+        Some(task) => Some(task.address().to_owned()),
+        None if crate::remote::is_main(settings) => Some(settings::get(settings, "main_manager").to_owned()),
+        None => None,
+    })
+}
+
 /// Take in the human's Zulip messages.
 fn zulip_once(settings: &Settings, store: &Store) -> Duration {
     let phase = Instant::now();
+    // Only the main machine takes in the human's messages, so none is handled twice; its manager passes on what belongs elsewhere.
     if crate::zulip::enabled(settings)
+        && crate::remote::is_main(settings)
         && let Err(error) = take_in_zulip(settings, store)
     {
         log(&format!("Zulip intake failed: {error}"));
@@ -1893,7 +1916,12 @@ pub fn run() -> u8 {
             }
         }
         let phase = Instant::now();
-        for line in jobs.tick(&settings, &store) {
+        // Scheduled jobs and standing agents in the shared config run only on the main machine.
+        let ticked = match crate::remote::is_main(&settings) {
+            true => jobs.tick(&settings, &store),
+            false => Vec::new(),
+        };
+        for line in ticked {
             log(&line);
         }
         log_elapsed("scheduled jobs", phase);

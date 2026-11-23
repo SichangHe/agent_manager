@@ -421,7 +421,7 @@ fn send_checked(
     if let Some(why) = held(address) {
         return Err(format!("{address} is held ({why}); keep requests pending"));
     }
-    let current = api(
+    let current = match api(
         settings,
         "GET",
         &format!(
@@ -429,7 +429,13 @@ fn send_checked(
             session(address)?
         ),
         None,
-    )?;
+    ) {
+        // An agent this machine's Omnigent does not know is on another machine: the agents' Zulip channel carries the message there.
+        Err(error) if crate::remote::elsewhere(settings, &error) => {
+            return crate::remote::post(settings, address, text).map(|_| ());
+        }
+        current => current?,
+    };
     if quota_paused(address, &current, crate::quota::Attempt::Reserve)? {
         return Err(format!(
             "{address} is paused for its provider session quota; keep requests pending"

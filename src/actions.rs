@@ -1208,20 +1208,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     .map_err(|error| format!("amh: cannot read standard input: {error}"))?,
                 _ => return Err("amh: give the message as TEXT or as --file, not both".to_owned()),
             };
-            // 🧑 "let them talk to each other using AMH. And tulip. We should have dedicated channels for them."
-            // `zulip:TOPIC` is an agent on another machine that reads that topic of the agents' channel.
-            // The command line adds `.md` to a bare name; the topic is the name without it.
-            if let Some(topic) = need("who").strip_prefix("zulip:").map(|who| who.strip_suffix(".md").unwrap_or(who)) {
-                let stream = settings::get(&settings, "zulip.agent_stream");
-                if stream.is_empty() {
-                    return Err("amh: zulip.agent_stream is not set".to_owned());
-                }
+            // A task this machine does not have is on another machine: the message goes there through the agents' Zulip channel (`remote`).
+            if let Some(topic) = crate::remote::topic_for(&settings, &store, need("who"))? {
                 let from = omnigent::own_address()
                     .ok()
-                    .or_else(|| text("task_file").or(text("from")).map(str::to_owned))
-                    .unwrap_or_else(|| "an agent".to_owned());
-                let id = crate::zulip::post(&settings, stream, topic, &format!("from {from}:\n{message}")).map_err(failed)?;
-                say(&format!("posted in Zulip #{stream} > {topic} as zulip:{id}\n"));
+                    .or_else(|| text("from").or(text("task_file")).map(str::to_owned))
+                    .ok_or("amh: a script that is no agent passes --from NAME")?;
+                let id = crate::remote::post(&settings, &topic, &work::envelope(&from, &message)).map_err(failed)?;
+                say(&format!("{} is not on this machine: sent through Zulip as zulip:{id}\n", need("who")));
                 say(OTHERS_NO_REPEAT);
                 return Ok(0);
             }

@@ -236,6 +236,11 @@ pub fn start_agent(settings: &Settings, store: &Store, start: &Start) -> Result<
         };
         let old = task.address().to_owned();
         work::record_start(&mut task, start.fields, &address, start.tool, start.record);
+        // 🧑 "change the task metadata to include which machine it runs on"
+        if let Some(machine) = crate::remote::machine(settings) {
+            task.fields.retain(|(key, _)| key != "machine");
+            task.fields.push(("machine".to_owned(), machine));
+        }
         store.save(&task)?;
         store.place(&task)?;
         if !old.is_empty() && old != address {
