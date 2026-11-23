@@ -311,6 +311,19 @@ fn notify_systemd(state: &str) {
 /// An inotify watch for finished writes and renames into one folder.
 struct Inotify(fs::File);
 
+/// Off Linux there is no inotify: `import_loop` falls back to its periodic full scan.
+#[cfg(not(target_os = "linux"))]
+impl Inotify {
+    fn watch(_: &Path) -> std::io::Result<Self> {
+        Err(std::io::Error::other("inotify exists only on Linux"))
+    }
+
+    fn wait(&self, _: Duration) -> Vec<String> {
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "linux")]
 impl Inotify {
     fn watch(folder: &Path) -> std::io::Result<Self> {
         use std::os::fd::FromRawFd;

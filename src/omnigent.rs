@@ -56,16 +56,41 @@ pub fn start_backlog() -> usize {
     waiting + usize::from(full)
 }
 
+#[cfg(target_os = "linux")]
+fn thread_id() -> i64 {
+    // SAFETY: gettid has no preconditions.
+    i64::from(unsafe { libc::gettid() })
+}
+
+/// Off Linux: an ID unique among this process's threads; `thread_alive` then checks only the process.
+#[cfg(not(target_os = "linux"))]
+fn thread_id() -> i64 {
+    use std::hash::Hasher;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(format!("{:?}", std::thread::current().id()).as_bytes());
+    (hasher.finish() >> 1) as i64
+}
+
+#[cfg(target_os = "linux")]
+fn thread_alive(pid: &str, tid: &str) -> bool {
+    std::path::Path::new(&format!("/proc/{pid}/task/{tid}")).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn thread_alive(pid: &str, _: &str) -> bool {
+    // SAFETY: signal 0 only checks that the process exists.
+    pid.parse().is_ok_and(|pid: libc::pid_t| unsafe { libc::kill(pid, 0) } == 0)
+}
+
 fn start_slot() -> Result<(), String> {
     let path = crate::settings::state_dir().join("amh-starts.json");
     // 🤖 vl_catchup.md: a burst of wakes left `amh task start` waiting 5+ min; waiters are served in arrival order.
     let queue_path = path.with_extension("queue.json");
     // One waiter per thread: the daemon serves many starts in one process.
-    // SAFETY: gettid has no preconditions.
-    let me = format!("{}:{}", std::process::id(), unsafe { libc::gettid() });
+    let me = format!("{}:{}", std::process::id(), thread_id());
     let alive = |waiter: &String| {
         let (pid, tid) = waiter.split_once(':').unwrap_or((waiter, waiter));
-        std::path::Path::new(&format!("/proc/{pid}/task/{tid}")).exists()
+        thread_alive(pid, tid)
     };
     // The watcher does not wait for slots; a request it serves does.
     let wait = crate::request::serving() || !NO_WAIT.load(std::sync::atomic::Ordering::Relaxed);
