@@ -183,10 +183,12 @@ export function createVoiceControl(ctx) {
     if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
     setVcState('heard', 'hearing you');
   }
+  let clipsInFlight = 0;   // clips whose transcription is still running
   async function onCommandClip(blob, meta = {}) {
     if (ctx.dictating()) return;
     if (vc) { meta.part = {blob, text: vc.mode === 'command' ? '' : null, fromCommand: vc.mode === 'command'}; (vc.parts ??= []).push(meta.part); }   // kept so a spotted end word can send the audio itself; speech in command mode is never reply text
-    try { await handleCommandClip(blob, meta); } finally { if (vc && !vc.ending && !vc.timer && !vc.emptyTimer && !recorder.inUtterance()) armSessionTimer(); utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) ctx.maybeAutoplay(); }
+    clipsInFlight++;
+    try { await handleCommandClip(blob, meta); } finally { clipsInFlight--; if (vc && !vc.ending && !vc.timer && !vc.emptyTimer && !recorder.inUtterance()) armSessionTimer(); utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) ctx.maybeAutoplay(); }
   }
   /** Every start-word clip costs a Zulip upload plus messages: cap them, and back off in a noisy room instead of exhausting the rate limit. */
   function noteStartResult(useful) {
@@ -445,7 +447,9 @@ export function createVoiceControl(ctx) {
   /** A session with nothing said never hangs: close it and carry on. */
   function closeEmptySession() {
     if (!vc || vc.text.trim()) return;
-    if (utterancePending) { vc.emptyTimer = setTimeout(closeEmptySession, 2000); return; }   // still talking (the clip's transcript is not back yet): never close mid-speech
+    // 🧑 2026-11-23 "I was in input mode. Said something. And then, when I said the end word, everything got dropped": `utterancePending` lapses 6 s after speech starts, so a
+    // sentence over 8 s that began with the start word was cut off as an 'empty' session and its transcript then rejected. The microphone's own view of speech, and a clip still being transcribed, now also hold it open.
+    if (utterancePending || recorder.inUtterance() || clipsInFlight) { vc.emptyTimer = setTimeout(closeEmptySession, 2000); return; }   // still talking (the clip's transcript is not back yet): never close mid-speech
     if (untranscribed()) { sendVoiceReplyNow('clips could not be transcribed here'); return; }   // offline: the audio is sent and transcribed by the server later
     log('vc', 'empty session timed out: resuming');
     vc = null; recorder.setReplyMode(false); recorder.beep('empty');

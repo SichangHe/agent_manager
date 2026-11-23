@@ -1072,6 +1072,30 @@ scenarios.voiceSkipCountNoFlicker = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceLongFirstSentence = async () => {
+  // 🧑 "I was in input mode. Said something. And then, when I said the end word, everything got dropped": "Attention" and a sentence over 8 s in one breath, then the end word: it is sent.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message to open the topic.');
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const a = await L.speechWav('Attention. This sentence by itself seems pretty weird, and I do not know what it is supposed to say, so please rewrite the whole paragraph around it so that the reader can follow the argument from the start to the end without getting lost in the details.');
+  const b = await L.speechWav('Tomato.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const data = Buffer.concat([gap(14000), pcm(a), gap(1500), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__long.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__long.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('#feed').tap();
+    const deadline = Date.now() + 70000; let sent = [];
+    while (Date.now() < deadline && !sent.length) {
+      await L.sleep(3000);
+      sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => /rewrite the whole paragraph/i.test(m.content));
+    }
+    if (process.env.DUMP) console.log((await p.evaluate(() => window.__voice.log.text())).split('\n').filter(l => / vc /.test(l)).join('\n'));
+    assert.equal(sent.length, 1, 'the long first sentence was sent');
+  } finally { await c.close(); await srv2.close(); }
+};
+
 scenarios.voiceNoDuplicateSend = async () => {
   // A draft sent by hand while a voice reply is still open must not be sent again by the session's timer.
   await L.wipeTasks();
@@ -1182,7 +1206,7 @@ scenarios.voiceYesAfterPause = async () => {
     const log = await p.evaluate(() => window.__voice.log.text());
     if (process.env.DUMP) console.log(log.split('\n').filter(l => / vc /.test(l)).join('\n'));
     assert.doesNotMatch(log, /empty session timed out|command mode left/, 'no lingering session');
-    assert.equal(await p.evaluate(() => document.querySelector('#listen').dataset.state), 'on', 'back to idle state');
+    assert.equal(await p.evaluate(() => document.querySelector('#listen').dataset.state), 'on', 'back to idle state: ' + await p.evaluate(() => document.querySelector('#listen').dataset.state));
   } finally { await c.close(); await srv2.close(); }
 };
 
