@@ -1676,6 +1676,40 @@ fn commit_once(settings: &Settings, store: &Store) -> Duration {
     COMMIT_EVERY
 }
 
+/// Hand each post in the agents' Zulip channel (`zulip.agent_stream`) to the agent of the open task its topic names, else to the main manager.
+///
+/// Agents on other machines write there. The cursor (`amh-zulip-agents-cursor.txt`) moves past a post only once its agent took it, so a failed send is tried again: at least once.
+// 🧑 "I said I don't want it to go though SSH, but use Zulip"
+// 🧑 "we should synchronize agents. Or rather, let them talk to each other using AMH. And tulip. We should have dedicated channels for them."
+fn take_in_agent_posts(settings: &Settings, store: &Store) -> Result<(), String> {
+    let stream = settings::get(settings, "zulip.agent_stream");
+    if stream.is_empty() {
+        return Ok(());
+    }
+    const CURSOR: &str = "amh-zulip-agents-cursor.txt";
+    let cursor = store.record(CURSOR)?.trim().parse::<u64>().ok();
+    for post in crate::zulip::channel_posts(settings, stream, cursor)? {
+        let id = post["id"].as_u64().ok_or("Zulip post has no ID")?;
+        if cursor.is_some() {
+            let topic = post["subject"].as_str().unwrap_or_default();
+            let task = store.load(&format!("{topic}.md")).ok().filter(|task| {
+                task.status() != "done" && task.address().starts_with(omnigent::PREFIX)
+            });
+            let to = match &task {
+                Some(task) => task.address(),
+                None => settings::get(settings, "main_manager"),
+            };
+            let sender = post["sender_full_name"].as_str().unwrap_or("someone");
+            let text = post["content"].as_str().unwrap_or_default();
+            let from = format!("{sender} in Zulip #{stream} > {topic}");
+            omnigent::send(settings, to, &crate::work::envelope(&from, text))?;
+            log(&format!("Zulip agent post {id} -> {to}"));
+        }
+        store.set_record(CURSOR, &id.to_string())?;
+    }
+    Ok(())
+}
+
 /// Take in the human's Zulip messages.
 fn zulip_once(settings: &Settings, store: &Store) -> Duration {
     let phase = Instant::now();
@@ -1683,6 +1717,11 @@ fn zulip_once(settings: &Settings, store: &Store) -> Duration {
         && let Err(error) = take_in_zulip(settings, store)
     {
         log(&format!("Zulip intake failed: {error}"));
+    }
+    if crate::zulip::enabled(settings)
+        && let Err(error) = take_in_agent_posts(settings, store)
+    {
+        log(&format!("Zulip agent channel intake failed: {error}"));
     }
     log_elapsed("Zulip intake", phase);
     MAIL_POLL

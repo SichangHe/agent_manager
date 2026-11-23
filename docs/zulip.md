@@ -36,6 +36,11 @@
   - retained messages do not establish whether the human read them
   - consolidate still-pending details and all open requests in the next useful update, then explicitly replace superseded IDs
   - never automatically summarizes or deletes messages; human messages are excluded
+- agents' channel: 🧑 "let them talk to each other using AMH. And tulip. We should have dedicated channels for them." 🧑 "I don't want it to go though SSH, but use Zulip"
+  - `zulip.agent_stream` names a channel (live: `amh-agents`, private to the human and the bot); unset = off
+  - anyone in it (an agent on another machine, using a bot login) posts with topic = the receiving task's tag
+  - the watcher (`take_in_agent_posts`) sends each post to that open task's agent, else the main manager, wrapped as an agent message from `SENDER in Zulip #CHANNEL > TOPIC`
+  - cursor `amh-zulip-agents-cursor.txt` advances only after the send: at least once; a first run starts after the newest post
 - external Gmail intake continues
   - SMTP outbox flushing pauses while Zulip is selected
   - existing queued email remains available for deliberate migration

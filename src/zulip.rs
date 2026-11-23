@@ -854,6 +854,32 @@ fn answered(settings: &Settings, id: u64) -> Result<bool, String> {
 }
 
 /// The report channels from `[zulip.report_streams]`: (label, channel name).
+/// Posts in channel `stream` after message `cursor`, oldest first, up to 100; with no cursor, only the newest post, so a first run starts there.
+pub fn channel_posts(settings: &Settings, stream: &str, cursor: Option<u64>) -> Result<Vec<Value>, String> {
+    let narrow = json!([{"operator":"channel","operand":stream}]);
+    let (anchor, before, after) = match cursor {
+        Some(cursor) => (cursor.to_string(), "0", "100"),
+        None => ("newest".to_owned(), "1", "0"),
+    };
+    let result = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", anchor),
+            ("num_before", before.to_owned()),
+            ("num_after", after.to_owned()),
+            ("include_anchor", cursor.is_none().to_string()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    Ok(result["messages"]
+        .as_array()
+        .ok_or("Zulip response has no messages")?
+        .clone())
+}
+
 pub fn report_streams(settings: &Settings) -> Vec<(String, String)> {
     settings
         .iter()
