@@ -483,15 +483,20 @@ function jump(direction, whole = false, noRestart = false, defer = false) {
   const from = burst ?? (nowMsgId === null ? null : {msgId: nowMsgId, idx: nowIdx});
   const at = from ? flat.findIndex(it => it.msgId === from.msgId && it.idx === from.idx) : -1;
   let target;
+  // 🧑 "It wraps back when skipping next from the end ... Skipping forward at the end should just run out instead of wrapping to the beginning": when idle, forward used to fall back
+  // to the first chunk (or first message) whenever the last heard position was unknown; it now goes only to an unread chunk or past the last heard one, else reading ends.
+  const heard = store.get('voice2-last', null);
+  const hi = heard?.topic === current ? flat.findIndex(it => it.msgId === heard.msgId && it.idx === heard.idx) : -1;
+  const firstUnread = flat.find(it => !model.find(it.msgId)?.flags?.includes('read'));
   if (whole) {
     const mi = from ? agents.findIndex(m => m.id === from.msgId) : -1;
-    const m = agents[from ? mi + direction + (direction < 0 && from.idx > 0 && !burst ? 1 : 0) : (direction > 0 ? 0 : agents.length - 1)];
+    const m = from ? agents[mi + direction + (direction < 0 && from.idx > 0 && !burst ? 1 : 0)]
+      : direction < 0 ? agents.at(-1)
+      : firstUnread ? agents.find(a => a.id === firstUnread.msgId) : hi >= 0 ? agents[agents.findIndex(a => a.id === flat[hi].msgId) + 1] : null;
     target = m && itemsOf(m)[0];
   } else if (at < 0) {   // idle: previous replays the last heard chunk, next goes to the first unheard one
-    const heard = store.get('voice2-last', null);
-    const hi = heard?.topic === current ? flat.findIndex(it => it.msgId === heard.msgId && it.idx === heard.idx) : -1;
     if (direction < 0) target = hi >= 0 ? flat[hi] : flat.at(-1);
-    else target = flat.find(it => !model.find(it.msgId)?.flags?.includes('read')) ?? (hi >= 0 ? flat[hi + 1] : flat[0]);
+    else target = firstUnread ?? (hi >= 0 ? flat[hi + 1] : null);
   }
   else if (direction < 0 && !burst && !noRestart && player.currentTime() > RESTART_AFTER_S) target = flat[at];
   else target = flat[at + direction];

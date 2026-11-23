@@ -1536,6 +1536,14 @@ scenarios.skipPastEnd = async ({srv}) => {
     await L.sleep(2500);
     assert.equal(await p.evaluate(() => window.__voice.player.snapshot().status), 'idle', 'nothing plays after the end');
     assert.ok(await L.serverRead(id), 'marked read');
+    // 🧑 "It wraps back when skipping next from the end": next (tap, and whole-message via Shift+Right) at the end, also with the last-heard position forgotten, must not wrap to the start
+    for (const forget of [false, true]) {
+      if (forget) await p.evaluate(() => { for (const k of Object.keys(localStorage)) if (k.includes('voice2-last')) localStorage.removeItem(k); });
+      await p.evaluate(() => document.querySelector('#next').click());
+      await p.keyboard.press('Shift+ArrowRight');
+      await L.sleep(2500);
+      assert.equal(await p.evaluate(() => window.__voice.player.snapshot().status), 'idle', `next at the end wrapped (forgot last heard: ${forget})`);
+    }
   } finally { await c.close(); }
 };
 

@@ -64,19 +64,24 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     if (!items[i]) return null;
     let entry = clips.get(i);
     if (!entry) {
+      // 🧑 logs 2026-11-22 20:31/22:40 "null is not an object (evaluating 'bundle.part')": when the queue was replaced during ensureBundle's wait, no bundle existed and this threw;
+      // the rejected promise left playback 'loading' forever. The item is held from the start and a missing bundle is an ordinary failure (playIndex retries).
+      const item = items[i];
       entry = {url: (async () => {
         const fail = await ensureBundle(i);
         if (fail) return fail;
-        let bundle = bundleOf(items[i]);
+        let bundle = bundleOf(item);
+        if (!bundle) return {ok: false, error: 'no audio for this chunk yet'};
         let r = await voice.clipUrl(bundle.part, URL_FRESH_MS);
         if (!r.ok) {   // the upload is gone: the service bundle was dropped; render this message's chunks fresh
           const retry = await ensureBundle(i);
           if (retry) return retry;
-          bundle = bundleOf(items[i]);
+          bundle = bundleOf(item);
+          if (!bundle) return {ok: false, error: 'no audio for this chunk yet'};
           r = await voice.clipUrl(bundle.part, URL_FRESH_MS);
         }
         return r.ok ? {...r, bundle} : r;
-      })()};
+      })().catch(e => ({ok: false, error: String(e?.message ?? e)}))};
       clips.set(i, entry);
       entry.url.then(r => log('audio', `clip ${i} ${r.ok ? 'bundle ' + r.bundle.part.id.slice(-18) : 'failed ' + r.error}`));
     }
