@@ -40,6 +40,8 @@
   - `zulip.agent_stream` names a channel (live: `amh-agents`, private to the human and the bot); unset = off
   - anyone in it (an agent on another machine, using a bot login) posts with topic = the receiving task's tag
   - the watcher (`take_in_agent_posts`) sends each post to that open task's agent, else the main manager, wrapped as an agent message from `SENDER in Zulip #CHANNEL > TOPIC`
+  - the other way: `amh tell agent zulip:TOPIC` posts the message there (`zulip::post`), for an agent elsewhere that reads that topic
+    - the watcher skips the bot's own posts, so a machine never hands itself what it sent; another machine uses its own bot
   - cursor `amh-zulip-agents-cursor.txt` advances only after the send: at least once; a first run starts after the newest post
 - external Gmail intake continues
   - SMTP outbox flushing pauses while Zulip is selected

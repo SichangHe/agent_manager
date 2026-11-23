@@ -1688,9 +1688,11 @@ fn take_in_agent_posts(settings: &Settings, store: &Store) -> Result<(), String>
     }
     const CURSOR: &str = "amh-zulip-agents-cursor.txt";
     let cursor = store.record(CURSOR)?.trim().parse::<u64>().ok();
+    let own = crate::zulip::bot_email(settings)?;
     for post in crate::zulip::channel_posts(settings, stream, cursor)? {
         let id = post["id"].as_u64().ok_or("Zulip post has no ID")?;
-        if cursor.is_some() {
+        // This machine's own posts (`amh tell agent zulip:TOPIC`) are for agents elsewhere.
+        if cursor.is_some() && post["sender_email"].as_str() != Some(&own) {
             let topic = post["subject"].as_str().unwrap_or_default();
             let task = store.load(&format!("{topic}.md")).ok().filter(|task| {
                 task.status() != "done" && task.address().starts_with(omnigent::PREFIX)

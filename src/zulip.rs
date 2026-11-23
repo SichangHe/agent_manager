@@ -880,6 +880,24 @@ pub fn channel_posts(settings: &Settings, stream: &str, cursor: Option<u64>) -> 
         .clone())
 }
 
+/// Post `content` in channel `stream` under `topic`; returns the message ID.
+pub fn post(settings: &Settings, stream: &str, topic: &str, content: &str) -> Result<u64, String> {
+    let fields = [
+        ("type", "stream".to_owned()),
+        ("to", stream.to_owned()),
+        ("topic", topic.to_owned()),
+        ("content", content.to_owned()),
+    ];
+    api(settings, "POST", "messages", &fields)?["id"]
+        .as_u64()
+        .ok_or_else(|| "Zulip gave no message ID".to_owned())
+}
+
+/// The bot's own login email, to tell its posts from others'.
+pub fn bot_email(settings: &Settings) -> Result<String, String> {
+    Ok(settings::get(&credentials(settings)?, "ZULIP_BOT_EMAIL").to_owned())
+}
+
 pub fn report_streams(settings: &Settings) -> Vec<(String, String)> {
     settings
         .iter()

@@ -1208,6 +1208,22 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     .map_err(|error| format!("amh: cannot read standard input: {error}"))?,
                 _ => return Err("amh: give the message as TEXT or as --file, not both".to_owned()),
             };
+            // 🧑 "let them talk to each other using AMH. And tulip. We should have dedicated channels for them."
+            // `zulip:TOPIC` is an agent on another machine that reads that topic of the agents' channel.
+            if let Some(topic) = need("who").strip_prefix("zulip:") {
+                let stream = settings::get(&settings, "zulip.agent_stream");
+                if stream.is_empty() {
+                    return Err("amh: zulip.agent_stream is not set".to_owned());
+                }
+                let from = omnigent::own_address()
+                    .ok()
+                    .or_else(|| text("task_file").or(text("from")).map(str::to_owned))
+                    .unwrap_or_else(|| "an agent".to_owned());
+                let id = crate::zulip::post(&settings, stream, topic, &format!("from {from}:\n{message}")).map_err(failed)?;
+                say(&format!("posted in Zulip #{stream} > {topic} as zulip:{id}\n"));
+                say(OTHERS_NO_REPEAT);
+                return Ok(0);
+            }
             let to = agents::address_of(&store, need("who"))?;
             // 🧑 "allow some sort of scripts or commands that should be run like a cron job, but is tied to AMH server"
             // Until that exists, a script that is no agent names itself with --from.
