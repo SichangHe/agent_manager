@@ -1,0 +1,48 @@
+# Build amh for Mac and Linux on every push to main and publish them as the `latest` release, for `install.sh`.
+# 🧑 "Use GitHub Action to build binaries and provide a curl script to download those and set it up"
+name: binaries
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: binaries
+  cancel-in-progress: true
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin }
+          - { os: macos-14, target: x86_64-apple-darwin }
+          - { os: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --target ${{ matrix.target }} && rustup default stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - run: cp target/${{ matrix.target }}/release/amh amh-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amh-${{ matrix.target }}
+          path: amh-${{ matrix.target }}
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release view latest >/dev/null 2>&1 || gh release create latest --title "latest build of main" --notes "Built by .github/workflows/binaries.yml from each push to main. Install: see install.sh." --prerelease
+          gh release upload latest dist/* install.sh --clobber
+          gh release edit latest --notes "Built from ${GITHUB_SHA} by .github/workflows/binaries.yml. Install: curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/latest/install.sh | sh"

@@ -16,7 +16,9 @@
         env_file = "/ABSOLUTE/PATH/.local/state/amh/zulip.env"
         # to run agents here too: [omnigent] url, token; and main_manager
         ```
-- install: Rust toolchain, then `git clone https://github.com/SichangHe/agent_manager && cd agent_manager && cargo build --release`, and put `target/release/amh` on `PATH`
+- install: `curl -fsSL https://github.com/SichangHe/agent_manager/releases/download/latest/install.sh | ZULIP_BOT_EMAIL=... ZULIP_BOT_API_KEY=... sh`
+    - downloads the binary built from `main` (`.github/workflows/binaries.yml`: Mac Apple chip and Intel, Linux x86-64) to `~/.local/bin`, then writes `zulip.env` and `env.toml` if missing; rerunning updates only the binary
+    - other platforms: `cargo build --release`
 - check: `echo hello | amh tell agent main_manager.md --from NAME` prints `sent through Zulip`; the main machine's main manager gets it within ~10 s
 - sending from a script or an agent amh did not start: `--from NAME` names the sender; a reply to `NAME` is posted to topic `NAME` of the agents' channel
 - receiving here needs Omnigent and the watcher (`amh manager watch`); a task started here records `machine: BOT` and takes posts to its tag
