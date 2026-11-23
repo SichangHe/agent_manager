@@ -1210,7 +1210,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             };
             // 🧑 "let them talk to each other using AMH. And tulip. We should have dedicated channels for them."
             // `zulip:TOPIC` is an agent on another machine that reads that topic of the agents' channel.
-            if let Some(topic) = need("who").strip_prefix("zulip:") {
+            // The command line adds `.md` to a bare name; the topic is the name without it.
+            if let Some(topic) = need("who").strip_prefix("zulip:").map(|who| who.strip_suffix(".md").unwrap_or(who)) {
                 let stream = settings::get(&settings, "zulip.agent_stream");
                 if stream.is_empty() {
                     return Err("amh: zulip.agent_stream is not set".to_owned());
