@@ -193,8 +193,9 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     if (seekMs !== undefined && Math.abs(slot.el.currentTime * 1000 - seekMs) > 120) slot.el.currentTime = seekMs / 1000;
     slot.el.playbackRate = rate;
     const promise = slot.el.play();
-    lastProgressMs = performance.now(); lastTimeMs = 0;
+    lastProgressMs = performance.now(); lastTimeMs = 0; starting = myGen;
     promise.then(() => {
+      if (starting === myGen) starting = 0;
       if (myGen !== gen) return;
       setStatus('playing');
       onItemStart?.(items[index], index);
@@ -242,7 +243,14 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
     } else warmNext();
   }, 40);
 
+  // 🧑 "trying to skip to the previous message" (test replay): after a skip, play() on an element still waiting for data can hang; status stayed 'loading' and the stall check
+  // below only ran while 'playing', so nothing ever retried. A start that has not begun playing after STALL_MS is reloaded the same way.
+  let starting = 0;
   setInterval(() => {
+    if (status === 'loading' && active && starting === gen && performance.now() - lastProgressMs > STALL_MS) {
+      log('audio', `start hung ${STALL_MS}ms at item ${index} (rs=${active.el.readyState}); reloading`); starting = 0; onInterrupt?.('stall');
+      active.appPause = true; active.el.pause(); clips.delete(index); active.index = -1; active.ready = false; active.bundleId = null; playIndex(index); return;
+    }
     if (status !== 'playing' || !active) return;
     const t = active.el.currentTime;
     if (t !== lastTimeMs) { lastTimeMs = t; lastProgressMs = performance.now(); }

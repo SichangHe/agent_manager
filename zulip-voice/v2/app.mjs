@@ -490,7 +490,7 @@ function jump(direction, whole = false, noRestart = false, defer = false) {
   const firstUnread = flat.find(it => !model.find(it.msgId)?.flags?.includes('read'));
   if (whole) {
     const mi = from ? agents.findIndex(m => m.id === from.msgId) : -1;
-    const m = from ? agents[mi + direction + (direction < 0 && from.idx > 0 && !burst ? 1 : 0)]
+    const m = from ? agents[mi + direction + (direction < 0 && from.idx > 0 && !burst && !noRestart ? 1 : 0)]
       : direction < 0 ? agents.at(-1)
       : firstUnread ? agents.find(a => a.id === firstUnread.msgId) : hi >= 0 ? agents[agents.findIndex(a => a.id === flat[hi].msgId) + 1] : null;
     target = m && itemsOf(m)[0];

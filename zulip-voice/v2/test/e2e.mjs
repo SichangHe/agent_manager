@@ -1096,6 +1096,31 @@ scenarios.voiceLongFirstSentence = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.voiceSkipPreviousMessage = async () => {
+  // 🧑 "trying to skip to the previous message skipped to the first message": while message 3 plays, "Katana. Skip previous message." plays message 2 from its start, nothing else first.
+  await L.wipeTasks();
+  const ids = [];
+  for (const n of [1, 2, 3]) ids.push(await L.agentSays('alpha', `[alpha] M${n}\n\n` + Array.from({length: 8}, (_, i) => `Message ${n} paragraph ${i} is long enough to take a few seconds to read.`).join('\n\n')));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
+  const a = await L.speechWav('Katana.'), b = await L.speechWav('Skip previous message.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const data = Buffer.concat([gap(20000), pcm(a), gap(1800), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__prevmsg.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__prevmsg.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'messages', () => document.querySelectorAll('.msg.agent').length >= 3);
+    await p.locator(`.msg[data-id="${ids[2]}"] .s`).first().tap();
+    await L.waitFor(p, 'navigated', () => /vc\s+navigate previous message/.test(window.__voice.log.text()), 70000);
+    await L.waitFor(p, 'played after the command', () => { const t = window.__voice.log.text(); return /audio\s+start \d/.test(t.slice(t.search(/vc\s+commands:/))); }, 40000);
+    const lines = (await p.evaluate(() => window.__voice.log.text())).split('\n');
+    if (process.env.DUMP) console.log(lines.filter(l => / vc |audio|relay/.test(l)).slice(-60).join('\n'));
+    const nav = lines.findIndex(l => /vc\s+commands:/.test(l));
+    assert.match(lines[nav], /commands: navigate$/, 'one command: ' + lines[nav]);
+    const first = lines.slice(nav).find(l => /audio\s+start \d/.test(l));
+    assert.ok(first?.includes(`start ${ids[1]}:0`), `first start after the command is message 2 (${ids}) from its start: ${first}`);
+  } finally { await c.close(); await srv2.close(); }
+};
+
 scenarios.voiceNoDuplicateSend = async () => {
   // A draft sent by hand while a voice reply is still open must not be sent again by the session's timer.
   await L.wipeTasks();

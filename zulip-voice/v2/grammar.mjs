@@ -120,7 +120,8 @@ export function navCommand(words) {
   const tokens = words.split(' ').filter(Boolean);
   const whole = tokens.includes('message') || tokens.includes('messages');
   const rest = tokens.filter(t => t !== 'message' && t !== 'messages');
-  const dirWord = {forward: 1, forwards: 1, ahead: 1, backward: -1, backwards: -1}[rest[1]];
+  // 🧑 2026-11-23 "trying to skip to the previous message skipped to the first message": "skip previous message" was split into "skip" (next) and "previous message"; skip + any direction word is one command
+  const dirWord = {forward: 1, forwards: 1, ahead: 1, next: 1, backward: -1, backwards: -1, back: -1, previous: -1, last: -1}[rest[1]];
   if (rest[0] === 'skip' && dirWord && rest.length <= 3) { const c = rest.length === 3 ? NUMBERS[rest[2]] : 1; if (c) return {dir: dirWord, whole, count: c}; }
   // 🧑 "I need a voice command that. Can skip back to each message's start": "restart", "start", "beginning", "top" (also "from the start", "message start") replay the current message from its first sentence.
   if (rest.length && rest.length <= 3 && rest.every(t => ['restart', 'start', 'beginning', 'top', 'from', 'the', 'go', 'to'].includes(t)) && rest.some(t => ['restart', 'start', 'beginning', 'top'].includes(t))) return {dir: -1, whole: true, count: 1, restart: true};
