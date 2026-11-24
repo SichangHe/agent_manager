@@ -70,7 +70,7 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done (handsfree.lua `ends_with_cancel`, commands.lua)
 - Command mode, entered with the command word "katana" (alone or "katana next two").
   - web: done (voicecontrol.mjs `enterCommandMode`, `commandFirst`)
-  - nvim: done (handsfree.lua `command_words`, `run_commands`; commands.lua `parse`); feedback is an earcon and a notification, not speech
+  - nvim: done (handsfree.lua `command_words`, `run_commands`; commands.lua `parse`); confirmed aloud before acting (voice.lua `say`)
 - Skip forward and backward with a count ("skip forward three", "next three", "back two").
   - web: done (grammar.mjs `navCommand`)
   - nvim: done (commands.lua `nav`, a port of `navCommand`)
@@ -91,10 +91,10 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done (handsfree.lua `switch_to`, `ORDINALS`; uses switch.lua `matches`). No yes/no confirm.
 - Switch back to the previous agent (voice, and a back-arrow button).
   - web: done (app.mjs `switchBack`, `SWITCH_BACK_RE`)
-  - nvim: done by voice (conversation.lua `previous`); no key
+  - nvim: done by voice and `gvT` (handsfree.lua `switch_back`)
 - Next agent with unread messages (voice, and a button with a count).
   - web: done (app.mjs `switchNextUnread`, `NEXT_AGENT_RE`)
-  - nvim: done by voice (handsfree.lua `run_commands` next_agent); no key
+  - nvim: done by voice and `gvn` (handsfree.lua `next_unread`)
 - Send log by voice ("send log").
   - web: done (grammar.mjs `SEND_LOG_RE`, app.mjs `sendLog`)
   - nvim: done by voice (commands.lua) and by key (`gvL`, `:ZulipVoiceLog`, voice.lua `send_log`)
@@ -219,9 +219,7 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 ## Gaps
 
 Neovim is missing, most important first:
-- Spoken command feedback ("back three"): nvim plays an earcon and shows a notification instead.
 - On-device keyword spotting: every word costs an upload and a server round trip.
-- Keys for switch back and next unread agent (voice works).
 - Uploads.
 - Offline outbox, unsent-recording retry, offline cache.
 - Local speech-to-text (mac_stt), missing in both.
