@@ -18,12 +18,13 @@ const call = (method, params = {}) => new Promise((ok) => { const id = next++; p
 const run = async (expression) => (await call('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true })).result?.result?.value;
 try {
   await call('Page.navigate', { url: `${site}/` });
+  await new Promise((ok) => setTimeout(ok, 3000));
   for (let i = 0; i < 60; i++) {
     await new Promise((ok) => setTimeout(ok, 500));
     if ((await run('document.readyState')) === 'complete' && String(await run('location.href')).startsWith(site)) break;
   }
   const bot = await run(`(async () => {
-    const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+    const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || document.querySelector('input[name=csrfmiddlewaretoken]')?.value || window.page_params?.csrf_token || '';
     const body = new URLSearchParams({ full_name: ${JSON.stringify(fullName)}, short_name: ${JSON.stringify(shortName)}, bot_type: '1' });
     return await (await fetch('/json/bots', { method: 'POST', body, headers: { 'X-CSRFToken': csrf }, credentials: 'same-origin' })).json();
   })()`);
