@@ -857,6 +857,17 @@ impl Store {
         Ok(())
     }
 
+    /// `refresh_exports` for the daemon, which imports typed edits itself (`daemon::edits`, not by this stamp): also moves the stamp up, so the next pass skips files untouched since this one.
+    // 🧑 "amh uses 100% of a core constantly": the daemon never moved the stamp (only `sync_files` did), so every pass re-read each task file written since the daemon started, ~740 MB/s.
+    pub fn refresh_exports_advancing(&self) -> Result<(), String> {
+        if let Some(database) = self.database()? {
+            let next_stamp = since_next();
+            self.export(&database, stamp(&database)?, false)?;
+            database.set_record("export:stamp", &next_stamp.to_string())?;
+        }
+        Ok(())
+    }
+
     /// Bring the Markdown and the database together, outside the lock: take in lines typed into changed task files (each under a brief lock), then export the tasks that changed.
     ///
     /// The watcher calls this every poll and after each commit wakeup; a file whose mtime did not change since the last pass costs one stat.

@@ -258,7 +258,7 @@ fn export_loop(store: &Store, commits: &mpsc::Receiver<()>) {
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
             _ => while commits.try_recv().is_ok() {},
         }
-        if let Err(error) = store.refresh_exports() {
+        if let Err(error) = store.refresh_exports_advancing() {
             eprintln!("amhd: {error}");
         }
     }
