@@ -91,6 +91,13 @@ assert.ok(ms > 1000 && ms < 8000, 'wav duration ' + ms);
   assert.ok(G.commandPhrases(['alpha', 'alpha_beta']).every(p => p.text !== 'switch to alpha'));
   assert.ok(G.similarText('The build finished with two warnings today', 'The build finished with two warnings today!'));
 }
+{ // 🧑 "I'm still seeing old threads ... agent switching also gives them as options": closed tasks' topics are hidden unless unread or open
+  const m = createModel({botId: 2, humanId: 1});
+  m.setTopics([{name: 'live', max_id: 3}, {name: 'done_task', max_id: 2}, {name: 'done_unread', max_id: 1}, {name: 'done_open', max_id: 4}], new Map([['done_unread', 1]]));
+  m.setClosed(['done_task', 'done_unread', 'done_open'], n => n === 'done_open');
+  assert.deepEqual(m.topics().map(t => t.name).sort(), ['done_open', 'done_unread', 'live']);
+  assert.equal(m.allTopics().length, 4);
+}
 console.log('unit ok');
 {
   const {parseBlocks, messageChunks} = await import('../text.mjs');

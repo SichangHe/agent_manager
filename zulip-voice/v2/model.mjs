@@ -23,7 +23,7 @@ export function itemsOf(message, fromIdx = 0) {
 export function createModel({botId, humanId}) {
   const authoritativeSkip = false;
   const byTopic = new Map();
-  const topics = new Map(); let priorities = {};
+  const topics = new Map(); let priorities = {}, closed = new Set(), keep = () => false;
   const loaded = new Set();
   const isAgent = m => m.sender_id === botId;
   const topicInfo = name => { let t = topics.get(name); if (!t) { t = {name, maxId: 0, unread: 0}; topics.set(name, t); } return t; };
@@ -67,8 +67,14 @@ export function createModel({botId, humanId}) {
     },
     /** Human-manager priorities (topic -> number or null; lower = first, unset last). */
     setPriorities(map) { priorities = map ?? {}; },
+    /** 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": closed tasks' topics are hidden unless they have unread messages or `keepFn(name)` (the open topic). */
+    setClosed(names, keepFn) { closed = new Set(names ?? []); if (keepFn) keep = keepFn; },
     topics() {
       for (const t of topics.values()) if (loaded.has(t.name)) t.unread = this.unreadAgentMessages(t.name).length;
+      return this.allTopics().filter(t => !closed.has(t.name) || t.unread > 0 || keep(t.name));
+    },
+    /** Every topic, closed ones too. */
+    allTopics() {
       const rank = n => priorities[n] ?? Infinity;   // Infinity - Infinity is NaN: compare explicitly
       return [...topics.values()].sort((a, b) => (rank(a.name) === rank(b.name) ? 0 : rank(a.name) < rank(b.name) ? -1 : 1) || b.maxId - a.maxId);
     },
@@ -84,7 +90,7 @@ export function createModel({botId, humanId}) {
         msgs[name] = this.messages(name).filter(m => !m.local).slice(-Math.min(name === current ? 50 : 20, budget)).map(({id, sender_id, subject, content, timestamp, flags, stream_id, t0}) => ({id, sender_id, subject, content, timestamp, flags, ...(t0 !== undefined ? {stream_id, t0} : {})}));
         budget -= msgs[name].length;
       }
-      return {topics: this.topics().slice(0, 150), msgs, current};
+      return {topics: this.allTopics().slice(0, 150), msgs, current};
     },
     restore(snapshot) {
       for (const t of snapshot.topics ?? []) topics.set(t.name, t);

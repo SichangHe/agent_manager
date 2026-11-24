@@ -2,7 +2,7 @@
  * Voice service: speech (STT, TTS) for any Zulip client of the human, passed through a private muted channel.
  * Protocol: `protocol.md`. Importing this module never starts the worker.
  */
-import {mkdir, readFile, writeFile, rename, appendFile, stat} from 'node:fs/promises';
+import {mkdir, readFile, writeFile, rename, appendFile, stat, readdir} from 'node:fs/promises';
 import {resolve} from 'node:path';
 import {spawn, execFile} from 'node:child_process';
 import {tmpdir} from 'node:os';
@@ -367,11 +367,22 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     const value = await new Promise(res => execFile(globalThis.process.env.AMH_BIN || '/home/sichangheagent/.config/bin/amh', ['task', 'priorities', '--json'], {timeout: 3000}, (e, out) => { try { res(e ? {} : JSON.parse(out)); } catch { res({}); } }));
     prioCache = {at: now(), value}; return value;
   }
+  /** 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": task names whose file exists in the work-log folder
+   * but which `amh task priorities` no longer lists as active, i.e. closed tasks. Clients hide those topics. Cached 30 s; [] when unknown (nothing is hidden then). */
+  let closedCache = {at: 0, value: []};
+  async function closedTasks() {
+    if (now() - closedCache.at < 30000) return closedCache.value;
+    const active = await priorities();
+    if (!Object.keys(active).length) return [];
+    const names = await readdir(globalThis.process.env.AMH_WORK_LOGS || '/shagent/work_logs').catch(() => []);
+    const value = names.filter(n => n.endsWith('.md')).map(n => n.slice(0, -3)).filter(n => !(n in active));
+    closedCache = {at: now(), value}; return value;
+  }
 
   async function ping(request) {
     const health = {};
     for (const [kind, base] of Object.entries(workers)) health[kind] = await fetchImpl(base + '/health', {signal: AbortSignal.timeout(2000)}).then(r => r.ok ? 'ok' : 'http ' + r.status, () => 'down');
-    const result = {voice: 1, id: request.id, op: 'result', of: 'ping', t: request.t, relayMs: now(), uptimeS: Math.round((now() - startedMs) / 1000), workers: health, queue: {stt: pools.stt.stats(), tts: pools.tts.stats()}, active: Object.values(records).filter(r => r.status !== 'done').length, priorities: await priorities()};
+    const result = {voice: 1, id: request.id, op: 'result', of: 'ping', t: request.t, relayMs: now(), uptimeS: Math.round((now() - startedMs) / 1000), workers: health, queue: {stt: pools.stt.stats(), tts: pools.tts.stats()}, active: Object.values(records).filter(r => r.status !== 'done').length, priorities: await priorities(), closed: await closedTasks()};
     const sent = await api.call('POST', 'messages', {type: 'stream', to: streamId, topic: 'ping', content: JSON.stringify(result)});
     records[request.id] = {created: now(), status: 'sent', responseId: sent.id};
     await save();

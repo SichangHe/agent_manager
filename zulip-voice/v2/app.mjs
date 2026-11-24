@@ -966,7 +966,7 @@ $('dbg-ping').onclick = async () => { const r = await checkVoice(); toast(r.text
 async function checkVoice() {
   const r = await voice.ping();
   voiceState = r.ok ? {ok: true, text: `ok rtt=${r.totalMs}ms stt=${r.workers?.stt} tts=${r.workers?.tts} active=${r.active} up=${r.uptimeS}s`} : {ok: false, text: `NOT responding: ${r.error}`};
-  if (r.ok && r.priorities) { model.setPriorities(r.priorities); renderUnread(); }   // human-manager order of the agent list
+  if (r.ok && r.priorities) { model.setPriorities(r.priorities); model.setClosed(r.closed, name => name === current); renderUnread(); }   // human-manager order of the agent list
   log('voice', voiceState.text);
   return voiceState;
 }
