@@ -1121,6 +1121,17 @@ scenarios.voiceSkipPreviousMessage = async () => {
   } finally { await c.close(); await srv2.close(); }
 };
 
+scenarios.closedHidden = async ({srv}) => {
+  // 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": the service names closed tasks; their read topics leave the list.
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-autoplay': false}});
+  try {
+    const r = await c.page.evaluate(() => window.__voice.voice.ping());
+    if (process.env.DUMP) { console.log(JSON.stringify(r).slice(0, 600)); console.log((await c.page.evaluate(() => window.__voice.log.text())).split('\n').filter(l => /voice|relay|err/.test(l)).slice(-15).join('\n')); }
+    assert.ok(Array.isArray(r.closed) && r.closed.length > 10, 'ping lists closed tasks: ' + JSON.stringify(r.closed)?.slice(0, 200));
+    assert.ok(!r.closed.includes('terminal_viz'), 'an active task is not closed');
+  } finally { await c.close(); }
+};
+
 scenarios.voiceNoDuplicateSend = async () => {
   // A draft sent by hand while a voice reply is still open must not be sent again by the session's timer.
   await L.wipeTasks();

@@ -367,22 +367,27 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     const value = await new Promise(res => execFile(globalThis.process.env.AMH_BIN || '/home/sichangheagent/.config/bin/amh', ['task', 'priorities', '--json'], {timeout: 3000}, (e, out) => { try { res(e ? {} : JSON.parse(out)); } catch { res({}); } }));
     prioCache = {at: now(), value}; return value;
   }
-  /** 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": task names whose file exists in the work-log folder
-   * but which `amh task priorities` no longer lists as active, i.e. closed tasks. Clients hide those topics. Cached 30 s; [] when unknown (nothing is hidden then). */
+  /** 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": topics of the task channel whose task was closed, i.e. its file
+   * was archived into a month folder (`WORK_LOGS/YYYYMM/NAME.md`) and `amh task priorities` no longer lists it. Only topics that exist are named, so the reply stays small
+   * (a ping is one Zulip message, at most 10000 characters). Clients hide those topics. Cached 60 s; [] when unknown (nothing is hidden then). */
   let closedCache = {at: 0, value: []};
   async function closedTasks() {
-    if (now() - closedCache.at < 30000) return closedCache.value;
+    if (now() - closedCache.at < 60000) return closedCache.value;
     const active = await priorities();
-    if (!Object.keys(active).length) return [];
-    const names = await readdir(globalThis.process.env.AMH_WORK_LOGS || '/shagent/work_logs').catch(() => []);
-    const value = names.filter(n => n.endsWith('.md')).map(n => n.slice(0, -3)).filter(n => !(n in active));
+    if (!Object.keys(active).length || !taskStreamId) return [];
+    const root = globalThis.process.env.AMH_WORK_LOGS || '/shagent/work_logs', archived = new Set();
+    for (const month of (await readdir(root).catch(() => [])).filter(n => /^20\d{4}$/.test(n)))
+      for (const n of await readdir(resolve(root, month)).catch(() => [])) if (n.endsWith('.md')) archived.add(n.slice(0, -3));
+    const topics = await api.call('GET', `users/me/${taskStreamId}/topics`).then(r => r.topics.map(t => t.name), () => null);
+    if (!topics) return closedCache.value;
+    const value = topics.filter(n => archived.has(n) && !(n in active));
     closedCache = {at: now(), value}; return value;
   }
 
   async function ping(request) {
     const health = {};
     for (const [kind, base] of Object.entries(workers)) health[kind] = await fetchImpl(base + '/health', {signal: AbortSignal.timeout(2000)}).then(r => r.ok ? 'ok' : 'http ' + r.status, () => 'down');
-    const result = {voice: 1, id: request.id, op: 'result', of: 'ping', t: request.t, relayMs: now(), uptimeS: Math.round((now() - startedMs) / 1000), workers: health, queue: {stt: pools.stt.stats(), tts: pools.tts.stats()}, active: Object.values(records).filter(r => r.status !== 'done').length, priorities: await priorities(), closed: await closedTasks()};
+    const result = {voice: 1, id: request.id, op: 'result', of: 'ping', t: request.t, relayMs: now(), uptimeS: Math.round((now() - startedMs) / 1000), workers: health, queue: {stt: pools.stt.stats(), tts: pools.tts.stats()}, active: Object.values(records).filter(r => r.status !== 'done').length, priorities: Object.fromEntries(Object.entries(await priorities()).filter(([, n]) => typeof n === "number")), closed: await closedTasks()};   // unset priorities are left out: with every active task named, the reply passed Zulip's 10000-character message limit and pings went unanswered
     const sent = await api.call('POST', 'messages', {type: 'stream', to: streamId, topic: 'ping', content: JSON.stringify(result)});
     records[request.id] = {created: now(), status: 'sent', responseId: sent.id};
     await save();
