@@ -130,7 +130,7 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done (`:ZulipVoiceDevice`, `gvm`, `voice.device = "auto"`)
 - Local speech-to-text on the user's machine (mac_stt).
   - web: missing (no mac_stt reference anywhere; STT goes through relay `stt`, voice.mjs `stt`)
-  - nvim: missing (voice.lua `M.stt` calls the relay; no local option)
+  - nvim: done (voice.lua `stt` with `voice.local_stt = { "mac-stt" }`); untested on a Mac
 - Unsent recordings survive reloads and are retried.
   - web: done (recorder.mjs queue, per using.html)
   - nvim: missing
@@ -219,12 +219,11 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 ## Gaps
 
 Neovim is missing, most important first:
-- On-device keyword spotting: every word costs an upload and a server round trip.
+- On-device keyword spotting: without `voice.local_stt`, every phrase costs an upload and a server round trip; with mac_stt it is transcribed on the laptop instead.
 - Offline outbox, unsent-recording retry, offline cache.
-- Local speech-to-text (mac_stt), missing in both.
 
 Web is missing, most important first:
 - Local speech (mac_tts), which nvim has.
-- Local speech-to-text (mac_stt), missing in both.
+- Local speech-to-text (mac_stt), which nvim has.
 - Microphone chooser: unsure.
 - New topic, edit, reactions: missing in both.
