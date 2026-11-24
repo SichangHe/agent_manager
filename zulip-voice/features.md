@@ -34,10 +34,10 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done for the cursor, within the session (conversation.lua line ~70). unsure whether it survives a restart: no code writes it to disk.
 - Earcons: ready, done, error tones.
   - web: done (recorder.mjs `EARCON_NOTES`, player.mjs `earcon`)
-  - nvim: done, fewer kinds (voice.lua `earcon`: ready, done, error). No cancel, command, tick, send-failed, interrupted or updated tones.
+  - nvim: done, same notes as the web (voice.lua `EARCON_NOTES`: ready, done, cancel, command, tick, empty, error, beats); no send-failed, interrupted or updated tones
 - Mode beats: a quiet double beat every 5 s while a session is silent, plus an on-screen "still listening" bar.
   - web: done (voicecontrol.mjs `MODE_PULSE_MS`, `MODE_BANNER_MS`)
-  - nvim: missing (no periodic beat in handsfree.lua)
+  - nvim: done, beat only, no bar (handsfree.lua `pulse_tick`)
 - Message edited or deleted while reading: stop, tone, re-read from start.
   - web: done (app.mjs `onMessageEdited`, `onMessageDeleted`)
   - nvim: unsure. Events reload the buffer (events.lua) and player re-highlights (`player.lua` line ~142), but no code re-reads edited text.
@@ -222,7 +222,6 @@ Neovim is missing, most important first:
 - Spoken command feedback ("back three"): nvim plays an earcon and shows a notification instead.
 - On-device keyword spotting: every word costs an upload and a server round trip.
 - Keys for switch back and next unread agent (voice works).
-- Mode beats and the extra earcons.
 - Uploads.
 - Offline outbox, unsent-recording retry, offline cache.
 - Local speech-to-text (mac_stt), missing in both.
