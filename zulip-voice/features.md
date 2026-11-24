@@ -67,13 +67,13 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done (handsfree.lua `strip_end_word`; long silence default 6 s, `voice.long_silence_s`)
 - Cancel word ("macaroni", plus "cancel", "never mind", "scratch that", "forget it"): discards the reply or command anywhere.
   - web: done (grammar.mjs `isCancel`, `hasCancelWord`, `endsWithCancel`)
-  - nvim: missing (no cancel handling in handsfree.lua; only the compose-buffer `<Esc>` cancels typed dictation)
+  - nvim: done (handsfree.lua `ends_with_cancel`, commands.lua)
 - Command mode, entered with the command word "katana" (alone or "katana next two").
   - web: done (voicecontrol.mjs `enterCommandMode`, `commandFirst`)
-  - nvim: missing (no command word; navigation works only as "attention, next")
+  - nvim: done (handsfree.lua `command_words`, `run_commands`; commands.lua `parse`); feedback is an earcon and a notification, not speech
 - Skip forward and backward with a count ("skip forward three", "next three", "back two").
   - web: done (grammar.mjs `navCommand`)
-  - nvim: missing (handsfree.lua `M.navigation` takes only fixed phrases, no counts)
+  - nvim: done (commands.lua `nav`, a port of `navCommand`)
 - Previous and next message ("previous message", "next message").
   - web: done (grammar.mjs `navCommand` `whole`)
   - nvim: done (handsfree.lua `M.navigation`)
@@ -82,22 +82,22 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done ("back", "next", "again", "repeat" in handsfree.lua)
 - Restart: replay the current message from its first sentence.
   - web: done (grammar.mjs `navCommand` `restart`)
-  - nvim: missing
+  - nvim: done (player.lua `restart_message`)
 - Pause and resume by voice ("stop", "pause", "play", "resume").
   - web: done (voicecontrol.mjs lines ~326-327)
-  - nvim: missing (no such phrase in handsfree.lua)
+  - nvim: done (commands.lua `parse` pause/play)
 - Switch to agent by fuzzy name, top three offered, pick "first/second/third" or "number one".
   - web: done (grammar.mjs `rankTopics`, `choiceAnswer`; optional "Switch to X?" confirm)
   - nvim: done (handsfree.lua `switch_to`, `ORDINALS`; uses switch.lua `matches`). No yes/no confirm.
 - Switch back to the previous agent (voice, and a back-arrow button).
   - web: done (app.mjs `switchBack`, `SWITCH_BACK_RE`)
-  - nvim: missing (no previous-thread memory found in switch.lua or conversation.lua)
+  - nvim: done by voice (conversation.lua `previous`); no key
 - Next agent with unread messages (voice, and a button with a count).
   - web: done (app.mjs `switchNextUnread`, `NEXT_AGENT_RE`)
-  - nvim: missing (no command or key for it)
+  - nvim: done by voice (handsfree.lua `run_commands` next_agent); no key
 - Send log by voice ("send log").
   - web: done (grammar.mjs `SEND_LOG_RE`, app.mjs `sendLog`)
-  - nvim: missing by voice; done by key (`gvL`, `:ZulipVoiceLog`, voice.lua `send_log`)
+  - nvim: done by voice (commands.lua) and by key (`gvL`, `:ZulipVoiceLog`, voice.lua `send_log`)
 - On-device keyword spotting (words detected without uploading audio, so no round trip).
   - web: done (kws.mjs, voicecontrol.mjs `onKwsHit`; setting `set-kws`, about 300 MB)
   - nvim: missing (no spotter; words are found in server transcripts, so each costs an upload and a wait)
@@ -219,10 +219,9 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 ## Gaps
 
 Neovim is missing, most important first:
-- Command mode: command word, counted skips, restart, pause and resume, spoken feedback (handsfree.lua has only "attention, next/back").
-- Cancel word.
+- Spoken command feedback ("back three"): nvim plays an earcon and shows a notification instead.
 - On-device keyword spotting: every word costs an upload and a server round trip.
-- Switch back; next unread agent (and by voice).
+- Keys for switch back and next unread agent (voice works).
 - Sentence-level highlight (blocks now).
 - Mode beats and the extra earcons.
 - Uploads.
