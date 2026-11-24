@@ -65,10 +65,10 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 - End word ("tomato"): ends and sends; also ends after silence.
   - web: done (grammar.mjs `stripResumePhrase`, voicecontrol.mjs; long silence default 20 s)
   - nvim: done (handsfree.lua `strip_end_word`; long silence default 6 s, `voice.long_silence_s`)
-- Cancel word ("macaroni", plus "cancel", "never mind", "scratch that", "forget it"): discards the reply or command anywhere.
+- Cancel word ("tornado", plus "cancel", "never mind", "scratch that", "forget it"): discards the reply or command anywhere.
   - web: done (grammar.mjs `isCancel`, `hasCancelWord`, `endsWithCancel`)
   - nvim: done (handsfree.lua `ends_with_cancel`, commands.lua)
-- Command mode, entered with the command word "katana" (alone or "katana next two").
+- Command mode, entered with the command word "potato" (alone or "potato next two").
   - web: done (voicecontrol.mjs `enterCommandMode`, `commandFirst`)
   - nvim: done (handsfree.lua `command_words`, `run_commands`; commands.lua `parse`); confirmed aloud before acting (voice.lua `say`)
 - Skip forward and backward with a count ("skip forward three", "next three", "back two").
