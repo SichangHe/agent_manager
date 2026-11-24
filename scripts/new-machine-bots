@@ -1,0 +1,25 @@
+#!/bin/sh
+# On the main machine: give each named machine its own Zulip bot, in the agents' channel; logins go to ~/.local/share/amh-machines/NAME.env.
+#   scripts/new-machine-bots NAME...     (NAME: a host's short name, e.g. ruby for ruby.local)
+# A NAME that already has a login file is skipped. Then run `setup-machines` where SSH reaches the hosts.
+set -eu
+here=$(cd "$(dirname "$0")" && pwd)
+state=${AMH_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/amh}
+config=${AMH_CFG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/amh}/config.toml
+main_env=$(sed -n 's/^env_file *= *"\(.*\)"/\1/p' "$state/env.toml" | tail -1)
+stream=$(sed -n 's/^agent_stream *= *"\(.*\)"/\1/p' "$config" | head -1)
+[ -n "$main_env" ] && [ -n "$stream" ] || { echo "need zulip.env_file in $state/env.toml and zulip.agent_stream in $config" >&2; exit 1; }
+set -a; . "$main_env"; set +a
+out=$HOME/.local/share/amh-machines
+mkdir -p "$out"; chmod 700 "$out"
+for name in "$@"; do
+    [ -f "$out/$name.env" ] && { echo "$name: has a bot already"; continue; }
+    umask 077
+    ZULIP_SITE=$ZULIP_SITE node "$here/zulip-new-bot.mjs" "$name (amh)" "$name-amh" > "$out/$name.env.new"
+    bot=$(sed -n 's/^ZULIP_BOT_EMAIL=//p' "$out/$name.env.new")
+    id=$(curl -fsS -u "$ZULIP_BOT_EMAIL:$ZULIP_BOT_API_KEY" -G "$ZULIP_SITE/api/v1/users/$bot" | sed -n 's/.*"user_id":\([0-9]*\).*/\1/p')
+    curl -fsS -u "$ZULIP_BOT_EMAIL:$ZULIP_BOT_API_KEY" -X POST "$ZULIP_SITE/api/v1/users/me/subscriptions" \
+        --data-urlencode "subscriptions=[{\"name\":\"$stream\"}]" --data-urlencode "principals=[$id]" > /dev/null
+    mv "$out/$name.env.new" "$out/$name.env"
+    echo "$name: bot $bot in #$stream"
+done

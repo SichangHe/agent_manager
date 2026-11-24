@@ -1,0 +1,20 @@
+#!/bin/sh
+# Set up amh on many hosts in one command, from any machine whose SSH reaches them.
+#   setup-machines KEYDIR HOST...
+# KEYDIR holds NAME.env (a Zulip bot login) for each host, NAME being the host's short name (ruby for ruby.local); `new-machine-bots` makes them.
+# Each host gets its bot login (kept if present) and runs install.sh; nothing needs root. Rerunning updates amh.
+set -u
+keys=$1; shift
+url=https://github.com/SichangHe/agent_manager/releases/download/latest/install.sh
+failed=
+for host in "$@"; do
+    name=${host#*@}; name=${name%%.*}
+    if [ ! -f "$keys/$name.env" ]; then echo "$host: no $keys/$name.env" >&2; failed="$failed $host"; continue; fi
+    if ssh -o BatchMode=yes "$host" 'umask 077; d=${XDG_STATE_HOME:-$HOME/.local/state}/amh; mkdir -p "$d"; [ -f "$d/zulip.env" ] || cat > "$d/zulip.env"' < "$keys/$name.env" \
+        && ssh -o BatchMode=yes "$host" "curl -fsSL $url | sh" < /dev/null; then
+        echo "$host: done"
+    else
+        echo "$host: failed" >&2; failed="$failed $host"
+    fi
+done
+[ -z "$failed" ] || { echo "failed:$failed" >&2; exit 1; }

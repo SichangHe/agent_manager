@@ -44,5 +44,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release view latest >/dev/null 2>&1 || gh release create latest --title "latest build of main" --notes "Built by .github/workflows/binaries.yml from each push to main. Install: see install.sh." --prerelease
-          gh release upload latest dist/* install.sh --clobber
+          gh release upload latest dist/* install.sh scripts/setup-machines --clobber
           gh release edit latest --notes "Built from ${GITHUB_SHA} by .github/workflows/binaries.yml. Install: curl -fsSL https://github.com/${GITHUB_REPOSITORY}/releases/download/latest/install.sh | sh"
