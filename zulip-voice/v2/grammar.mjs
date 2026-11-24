@@ -3,8 +3,8 @@ import {soundsLikeWord, stripTrailingControl, leadingControlCount} from './text.
 
 export const RESUME_DEFAULT = 'tomato';   // the human's pick from the end-word study: 99% on-device detection, 0 false accepts in 4.9 h of speech
 export const START_DEFAULT = 'attention';   // chosen from the trigger-word study: long, no clipped final consonant, 98-100% detection, 0 false accepts
-export const CMD_DEFAULT = 'katana';
-export const CANCEL_WORD_DEFAULT = 'macaroni';   // the human picked it (round-2 study: 96% hit, 0 false accepts in 4.9 h; "bamboo" 88%, replaced); "cancel" and friends keep working as server-path aliases
+export const CMD_DEFAULT = 'potato';   // 🧑 "use potato as command word, and tornado as cancellation" (no K sound: K fails in noise; research-kws/no-k-words.md)
+export const CANCEL_WORD_DEFAULT = 'tornado';   // was 'macaroni';   // the human picked it (round-2 study: 96% hit, 0 false accepts in 4.9 h; "bamboo" 88%, replaced); "cancel" and friends keep working as server-path aliases
 export const LONG_SILENCE_DEFAULT_S = 20;   // the end word is the main end signal; a short silence cut replies off while the user was still thinking
 export const SWITCH_MIN_SCORE = 0.8;
 

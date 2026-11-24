@@ -667,7 +667,7 @@ scenarios.voiceControl = async () => {
     '/__reply.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first. Tomato.', gap(20000)),
     '/__phrase.wav': await seq(gap(9000), 'Attention.', gap(6000), 'Tomato.', gap(20000)),
     '/__split.wav': await seq(gap(9000), 'Attention. Yes, deploy it to staging first and tell me when it is done.', gap(4000), 'Tomato.', gap(20000)),
-    '/__next.wav': await seq(gap(9000), 'Katana. Next.', gap(8000)),
+    '/__next.wav': await seq(gap(9000), 'Potato. Next.', gap(8000)),
     '/__noise.wav': await seq(gap(9000), 'The weather is quite nice today, I think we should go outside.', gap(12000)),
   };
   const srv2 = await L.serve(undefined, files);
@@ -880,7 +880,7 @@ scenarios.agentSearch = async () => {
   await L.agentSays('vl_meeting_work', '[vl] V\n\nMeeting agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\nAlpha agent is here. It has a long enough message to play for a few seconds while we talk to it.');
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const sp = await L.speechWav('Katana. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const sp = await L.speechWav('Potato. Switch to terminal viz.'), yes = await L.speechWav('Yes.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(2000), sp.subarray(at + 8), gap(16000), yes.subarray(yes.indexOf('data') + 8), gap(20000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sw.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sw.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-switch-confirm': true}});
@@ -957,7 +957,7 @@ scenarios.voiceSwitchInSession = async () => {
   await L.agentSays('vl_meeting_work', '[vl] V\n\nMeeting agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const ws = await Promise.all(['Katana.', 'Switch agent to UI client.', 'Yes.'].map(t => L.speechWav(t))), pcm = w => w.subarray(w.indexOf('data') + 8), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Switch agent to UI client.', 'Yes.'].map(t => L.speechWav(t))), pcm = w => w.subarray(w.indexOf('data') + 8), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(2000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(10000), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ss.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ss.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false}});
@@ -1023,7 +1023,7 @@ scenarios.voiceNavigation = async () => {
   await L.wipeTasks();
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 14}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const a = await L.speechWav('Katana.'), b = await L.speechWav('Back back.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const a = await L.speechWav('Potato.'), b = await L.speechWav('Back back.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
   const data = Buffer.concat([gap(24000), pcm(a), gap(1800), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__nav.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__nav.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1051,7 +1051,7 @@ scenarios.voiceSkipCountNoFlicker = async () => {
   await L.wipeTasks();
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 14}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const a = await L.speechWav('Katana.'), b = await L.speechWav('Skip backward three.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const a = await L.speechWav('Potato.'), b = await L.speechWav('Skip backward three.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
   const data = Buffer.concat([gap(24000), pcm(a), gap(1800), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__skip3.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__skip3.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1097,12 +1097,12 @@ scenarios.voiceLongFirstSentence = async () => {
 };
 
 scenarios.voiceSkipPreviousMessage = async () => {
-  // 🧑 "trying to skip to the previous message skipped to the first message": while message 3 plays, "Katana. Skip previous message." plays message 2 from its start, nothing else first.
+  // 🧑 "trying to skip to the previous message skipped to the first message": while message 3 plays, "Potato. Skip previous message." plays message 2 from its start, nothing else first.
   await L.wipeTasks();
   const ids = [];
   for (const n of [1, 2, 3]) ids.push(await L.agentSays('alpha', `[alpha] M${n}\n\n` + Array.from({length: 8}, (_, i) => `Message ${n} paragraph ${i} is long enough to take a few seconds to read.`).join('\n\n')));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const a = await L.speechWav('Katana.'), b = await L.speechWav('Skip previous message.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
+  const a = await L.speechWav('Potato.'), b = await L.speechWav('Skip previous message.'), pcm = w => w.subarray(w.indexOf('data') + 8), at = a.indexOf('data'), head = Buffer.from(a.subarray(0, at + 8));
   const data = Buffer.concat([gap(20000), pcm(a), gap(1800), pcm(b), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__prevmsg.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__prevmsg.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1132,6 +1132,27 @@ scenarios.closedHidden = async ({srv}) => {
   } finally { await c.close(); }
 };
 
+scenarios.tornadoCancelsOnDevice = async () => {
+  // 🧑 "use potato as command word, and tornado as cancellation": the on-device spotter hears "tornado" in a reply and discards it; nothing is sent.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Seed\n\nSeed message to open the topic.');
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
+  const ws = await Promise.all(['Attention.', 'Remember to buy the oat milk.', 'Tornado.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const data = Buffer.concat([gap(14000), pcm(ws[0]), gap(1500), pcm(ws[1]), gap(1500), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
+  const srv2 = await L.serve(undefined, {'/__tornado.wav': Buffer.concat([head, data])});
+  const c = await L.openClient({url: srv2.url, mic: '/__tornado.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true}});
+  const p = c.page;
+  try {
+    await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
+    await p.locator('#feed').tap();
+    await L.waitFor(p, 'tornado heard on the device', () => /on-device keyword: TORNADO/.test(window.__voice.log.text()), 60000);
+    await L.sleep(12000);
+    const sent = (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => /oat milk/i.test(m.content));
+    assert.equal(sent.length, 0, 'cancelled reply was not sent');
+    assert.doesNotMatch(await p.locator('#draft').inputValue(), /oat milk/i, 'draft emptied');
+  } finally { await c.close(); await srv2.close(); }
+};
+
 scenarios.voiceNoDuplicateSend = async () => {
   // A draft sent by hand while a voice reply is still open must not be sent again by the session's timer.
   await L.wipeTasks();
@@ -1159,7 +1180,7 @@ scenarios.noPlaybackWhileConfirming = async () => {
   await L.agentSays('uiclient_steer', '[uiclient_steer] U\n\nUI client agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 6}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const sp = await L.speechWav('Katana. Switch to UI client.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const sp = await L.speechWav('Potato. Switch to UI client.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), sp.subarray(at + 8), gap(40000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__cf.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__cf.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': true, 'voice2-vc': true}});
@@ -1186,7 +1207,7 @@ scenarios.voiceSwitchRules = async ({srv}) => {
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
   const wavOf = async (...parts) => { const ws = await Promise.all(parts.filter(x => typeof x === 'string').map(t => L.speechWav(t))); let k = 0; const bufs = parts.map(x => typeof x === 'string' ? pcm(ws[k++]) : x), first = ws[0], at = first.indexOf('data'), head = Buffer.from(first.subarray(0, at + 8)), data = Buffer.concat(bufs); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
   const files = {
-    '/__plain.wav': await wavOf(gap(9000), 'Katana. Switch to the store and buy some milk.', gap(30000)),
+    '/__plain.wav': await wavOf(gap(9000), 'Potato. Switch to the store and buy some milk.', gap(30000)),
     '/__cancel.wav': await wavOf(gap(9000), 'Attention. Deploy it to staging now.', gap(2500), 'Cancel.', gap(30000)),
   };
   const srv2 = await L.serve(undefined, files);
@@ -1229,7 +1250,7 @@ scenarios.voiceYesAfterPause = async () => {
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana. Switch to terminal.', 'Attention.', 'Yes.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato. Switch to terminal.', 'Attention.', 'Yes.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(10000), pcm(ws[0]), gap(7000), pcm(ws[1]), gap(2500), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ya.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ya.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1293,7 +1314,7 @@ scenarios.voiceSwitchBack = async () => {
   await L.wipeTasks();
   await L.agentSays('beta', '[beta] T\n\nThis is the beta agent.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
-  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), sp = await L.speechWav('Katana. Switch back.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
+  const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), sp = await L.speechWav('Potato. Switch back.'), at = sp.indexOf('data'), head = Buffer.from(sp.subarray(0, at + 8));
   const data = Buffer.concat([gap(9000), sp.subarray(at + 8), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sb.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sb.wav', prefs: {'voice2-topic': 'alpha', 'voice2-prev': 'beta', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1332,7 +1353,7 @@ scenarios.voiceSwitchAbbrev = async () => {
   for (const t of ['human_mgr', 'terminal_viz', 'uiclient_steer', 'main_manager_agy']) await L.agentSays(t, `[${t}] T\n\nThis is ${t}.`);
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana. Switch to Human Manager.', 'Yes.', 'Katana. Switch to zebra quokka.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato. Switch to Human Manager.', 'Yes.', 'Potato. Switch to zebra quokka.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(9000), pcm(ws[0]), gap(14000), pcm(ws[1]), gap(12000), pcm(ws[2]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ab.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ab.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
@@ -1634,7 +1655,7 @@ scenarios.commandModes = async ({srv}) => {
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 10}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
   const mk = async (texts, gaps) => { const ws = await Promise.all(texts.map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8)); const parts = [gap(14000)]; ws.forEach((w, i) => { parts.push(pcm(w), gap(gaps[i])); }); const data = Buffer.concat(parts); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
-  const srv2 = await L.serve(undefined, {'/__modes.wav': await mk(['Katana.', 'Next two. Back one.'], [2000, 30000]), '/__input.wav': await mk(['Attention.', 'Remember the milk.', 'Katana.', 'Next two.'], [2500, 2000, 2000, 25000])});
+  const srv2 = await L.serve(undefined, {'/__modes.wav': await mk(['Potato.', 'Next two. Back one.'], [2000, 30000]), '/__input.wav': await mk(['Attention.', 'Remember the milk.', 'Potato.', 'Next two.'], [2500, 2000, 2000, 25000])});
   try {
     let c = await L.openClient({url: srv2.url, mic: '/__modes.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true}});
     let p = c.page;
@@ -1694,7 +1715,7 @@ const attentionCommand = onDevice => async ({srv}) => {
   await L.wipeTasks();
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 10}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1);
-  const w = await L.speechWav('Katana. Next two.'), at = w.indexOf('data'), head = Buffer.from(w.subarray(0, at + 8));
+  const w = await L.speechWav('Potato. Next two.'), at = w.indexOf('data'), head = Buffer.from(w.subarray(0, at + 8));
   const data = Buffer.concat([gap(14000), w.subarray(at + 8), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ak.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ak.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, ...(onDevice ? {'voice2-kws': true} : {})}});
@@ -1720,7 +1741,7 @@ scenarios.localCommand = async ({srv}) => {
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana.', 'Switch to terminal viz.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Switch to terminal viz.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__lc.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__lc.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true}});
@@ -1827,7 +1848,7 @@ scenarios.positiveAnswer = async ({srv}) => {
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__pa.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__pa.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true, 'voice2-switch-confirm': true}});
@@ -1850,7 +1871,7 @@ scenarios.commandSpeechNeverPosted = async ({srv}) => {
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
   const mk = async (name, texts, gaps) => { const ws = await Promise.all(texts.map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8)); const parts = [gap(12000)]; ws.forEach((w, i) => { parts.push(pcm(w), gap(gaps[i])); }); const data = Buffer.concat(parts); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
   const files = {
-    '/__leak.wav': await mk('leak', ['Katana.', 'Pencil.'], [1800, 40000]),
+    '/__leak.wav': await mk('leak', ['Potato.', 'Pencil.'], [1800, 40000]),
     '/__rambo.wav': await mk('rambo', ['Attention.', 'Remember the milk.', 'Pencil. Rambo. Cancel.'], [2500, 2000, 40000]),
   };
   const srv2 = await L.serve(undefined, files);
@@ -1877,7 +1898,7 @@ scenarios.switchEarcons = async ({srv}) => {
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Switch to terminal viz.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__se.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__se.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-switch-confirm': true}});
@@ -1972,7 +1993,7 @@ scenarios.katanaAlone = async ({srv}) => {
   await L.wipeTasks();
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 10}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const cases = {alone: [['Katana.', 'Next two.'], [1500]]};
+  const cases = {alone: [['Potato.', 'Next two.'], [1500]]};
   const files = {}, wavs = {};
   for (const [name, [texts, gaps]] of Object.entries(cases)) {
     const ws = await Promise.all(texts.map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
@@ -1992,7 +2013,7 @@ scenarios.katanaAlone = async ({srv}) => {
         await L.waitFor(p, 'navigated', () => /navigate next x2/.test(window.__voice.log.text()), 70000);
         const log = await p.evaluate(() => window.__voice.log.text());
         assert.equal((log.match(/vc +command mode\n|vc +command mode$/gm) || []).length, 1, name + ': one command-mode entry');
-        assert.match(log, /on-device keyword: KATANA/, name + ': katana heard on the device');
+        assert.match(log, /on-device keyword: POTATO/, name + ': katana heard on the device');
         
         assert.equal((await p.locator('#draft').inputValue()).trim(), '', name + ': no draft text');
         out[name] = 'ok';
@@ -2009,7 +2030,7 @@ scenarios.switchNoOverlap = async ({srv}) => {
   await L.agentSays('quiet_agent', '[quiet_agent] Q\n\nNothing new here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const mk = async (name, target) => { const ws = await Promise.all(['Katana.', 'Switch to ' + target + '.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8)); const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
+  const mk = async (name, target) => { const ws = await Promise.all(['Potato.', 'Switch to ' + target + '.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8)); const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4); return Buffer.concat([head, data]); };
   const files = {'/__sn_unread.wav': await mk('u', 'terminal viz'), '/__sn_quiet.wav': await mk('q', 'quiet agent')};
   const srv2 = await L.serve(undefined, files);
   try {
@@ -2049,7 +2070,7 @@ scenarios.noiseNeverPosted = async ({srv}) => {
   const posted = async () => (await L.human('GET', 'messages', {narrow: [{operator: 'stream', operand: L.TASKS}, {operator: 'topic', operand: 'alpha'}], anchor: 'newest', num_before: 10, num_after: 0, apply_markdown: false})).messages.filter(m => m.sender_id === L.account.humanId).map(m => m.content);
   try {
     await L.waitFor(p, 'message', () => document.querySelector('.msg.agent'));
-    const cases = [['Katana. Jump backward five. Skip backward five. Pencil. Rambo. Cancel.'], ['Say that again, but slower. Cangaroo. Canguro.'], ['Remember the milk.', 'Katana.', 'Pencil. Rambo. Cancel.'], ['Remember the milk. Rambo.']];
+    const cases = [['Potato. Jump backward five. Skip backward five. Pencil. Rambo. Cancel.'], ['Say that again, but slower. Cangaroo. Canguro.'], ['Remember the milk.', 'Potato.', 'Pencil. Rambo. Cancel.'], ['Remember the milk. Rambo.']];
     for (const [i, texts] of cases.entries()) await p.evaluate(async ([texts, i]) => { await window.__voice.voice.sendVoice({sendId: 'noise' + i + Date.now(), topic: 'alpha', items: texts.map(text => ({text})), cancelWord: 'bamboo', commandWord: 'katana'}); }, [texts, i]);
     await L.sleep(4000);
     assert.deepEqual(await posted(), [], 'nothing was posted');
@@ -2086,7 +2107,7 @@ scenarios.commandCancelSound = async ({srv}) => {
   await L.wipeTasks();
   await L.agentSays('alpha', '[alpha] Long\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} is a chunk of its own, long enough to take a few seconds.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana.', 'Bamboo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Bamboo.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(14000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(25000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__cc.wav': Buffer.concat([head, data])});
   try {
@@ -2115,7 +2136,7 @@ scenarios.switchNameAfterList = async ({srv}) => {
   await L.agentSays('terminal_viz', '[terminal_viz] T\n\nTerminal agent is here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana.', 'Switch to.', 'Human manager.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Switch to.', 'Human manager.', 'Positive.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(6000), pcm(ws[2]), gap(7000), pcm(ws[3]), gap(30000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__sn.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__sn.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-switch-confirm': true}});
@@ -2133,7 +2154,7 @@ scenarios.interruptAnnouncement = async ({srv}) => {
   await L.agentSays('quiet_agent', '[quiet_agent] Q\n\nNothing new here.');
   await L.agentSays('alpha', '[alpha] A\n\n' + Array.from({length: 8}, (_, i) => `Paragraph ${i} keeps the message playing for a while.`).join('\n\n'));
   const gap = ms => Buffer.alloc(Math.round(48000 * ms / 1000) & ~1), pcm = w => w.subarray(w.indexOf('data') + 8);
-  const ws = await Promise.all(['Katana.', 'Switch to quiet agent.', 'Positive.', 'Attention.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
+  const ws = await Promise.all(['Potato.', 'Switch to quiet agent.', 'Positive.', 'Attention.'].map(t => L.speechWav(t))), at = ws[0].indexOf('data'), head = Buffer.from(ws[0].subarray(0, at + 8));
   const data = Buffer.concat([gap(12000), pcm(ws[0]), gap(1800), pcm(ws[1]), gap(7000), pcm(ws[2]), gap(1800), pcm(ws[3]), gap(15000)]); head.writeUInt32LE(data.length, at + 4); head.writeUInt32LE(head.length - 8 + data.length, 4);
   const srv2 = await L.serve(undefined, {'/__ia.wav': Buffer.concat([head, data])});
   const c = await L.openClient({url: srv2.url, mic: '/__ia.wav', prefs: {'voice2-topic': 'alpha', 'voice2-autoplay': false, 'voice2-vc': true, 'voice2-kws': true}});

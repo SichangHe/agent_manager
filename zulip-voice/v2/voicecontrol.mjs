@@ -41,8 +41,8 @@ export function createVoiceControl(ctx) {
   const kwsEnabled = () => store.get('voice2-kws', null) ?? true;   // on-device recognition is the default; the toggle in Settings turns it off
   const startWord = () => normalize(store.get('voice2-start-word', START_DEFAULT));
   const resumePhrase = () => store.get('voice2-resume-phrase', RESUME_DEFAULT);
-  const commandWord = () => normalize(store.get('voice2-cmd-word', CMD_DEFAULT)) || CMD_DEFAULT;
-  const cancelWord = () => { const w = normalize(store.get('voice2-cancel-word', CANCEL_WORD_DEFAULT)); return !w || w === 'bamboo' ? CANCEL_WORD_DEFAULT : w; };   // a saved "bamboo" is the old default: migrate it
+  const commandWord = () => { const w = normalize(store.get('voice2-cmd-word', CMD_DEFAULT)); return !w || w === 'katana' ? CMD_DEFAULT : w; };   // a saved "katana" is the old default: migrate it
+  const cancelWord = () => { const w = normalize(store.get('voice2-cancel-word', CANCEL_WORD_DEFAULT)); return !w || w === 'bamboo' || w === 'macaroni' ? CANCEL_WORD_DEFAULT : w; };   // a saved "bamboo" or "macaroni" is an old default: migrate it
   const afterStartWord = text => afterStart(text, startWord());
   const stripResumePhrase = text => stripResume(text, resumePhrase());
   const isCommandWord = w => isCmd(w, commandWord());
@@ -100,9 +100,9 @@ export function createVoiceControl(ctx) {
   function interruptPrompt(by) { player.stopSay(); sayingUntil = 0; announcingUntil = 0; recorder.unmute(); log('vc', `prompt interrupted by ${by}`); }
 
   // ---- on-device keywords ----
-  /** "attention" opens a session at once (pausing playback, no upload); "katana" from standby enters command mode; "macaroni" cancels; "tomato" ends command mode or sends. */
+  /** "attention" opens a session at once (pausing playback, no upload); "potato" from standby enters command mode; "tornado" cancels; "tomato" ends command mode or sends. */
   function onKwsHit(word) {
-    if (!voiceControl || !kwsEnabled() || ctx.dictating() || Date.now() - (kwsHitMs[word] ?? 0) < 1500) return;   // the same word twice in a row is one hit; a different word may follow at once ("attention katana")
+    if (!voiceControl || !kwsEnabled() || ctx.dictating() || Date.now() - (kwsHitMs[word] ?? 0) < 1500) return;   // the same word twice in a row is one hit; a different word may follow at once ("attention potato")
     kwsHitMs[word] = lastHitAt = Date.now();
     if (Date.now() < sayingUntil && word !== 'TOMATO') interruptPrompt(word);   // "attention" right after a switch cuts "Now on X" short
     log('vc', `on-device keyword: ${word}`);
@@ -110,9 +110,9 @@ export function createVoiceControl(ctx) {
       if (!lat.has('sw')) lat.begin('sw', 'startword');
       lat.stage('sw', 'kws-local');
       openSession('');
-    } else if (word === 'MACARONI' && cancelWord() === 'macaroni') {
+    } else if (word === 'TORNADO' && cancelWord() === 'tornado') {
       if (vc) cancelSession(); else if (pendingChoice) cancelChoice();
-    } else if (word === 'KATANA' && commandWord() === 'katana' && !vc && !choiceOpen()) {   // the command word alone enters command mode: no start word first, one sound
+    } else if (word === 'POTATO' && commandWord() === 'potato' && !vc && !choiceOpen()) {   // the command word alone enters command mode: no start word first, one sound
       openSession('', true);
       enterCommandMode('');
     } else if (word === 'TOMATO' && vc?.mode === 'command') {
@@ -235,7 +235,7 @@ export function createVoiceControl(ctx) {
     }
     if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
     if (lastLocalNav) {   // "skip forward three": the device heard the skip and waits for this transcript's count
-      const said = normalize(afterStartWord(heard) ?? heard).replace(/^katana\s+/, ''), nav = navCommand(said), d = lastLocalNav.dir;
+      const said = normalize(afterStartWord(heard) ?? heard).replace(new RegExp(`^${commandWord()}\\s+`), ''), nav = navCommand(said), d = lastLocalNav.dir;
       const skipped = lastLocalNav.skipped && Date.now() - lastLocalNav.ms < 10000;
       clearTimeout(lastLocalNav.timer); lastLocalNav = null;
       if (skipped) {   // the one step already happened: a late count adds the rest
@@ -264,7 +264,7 @@ export function createVoiceControl(ctx) {
   function onStandbyTranscript(heard, r) {
     // With server keyword spotting on (r.kws is a list): it must have heard ATTENTION, and Whisper must confirm the standalone word.
     const kwsOn = Array.isArray(r.kws) && startWord() === 'attention' && Date.now() - lastReplyEndMs >= FOLLOW_UP_GRACE_MS;   // the server spots "attention" only; a follow-up right after a send needs no start word
-    const commandFirst = isCommandWord(normalize(heard).split(' ')[0] ?? '');   // "katana next two": the command word alone starts command mode
+    const commandFirst = isCommandWord(normalize(heard).split(' ')[0] ?? '');   // "potato next two": the command word alone starts command mode
     if (kwsOn && !commandFirst && !r.kws.includes('ATTENTION')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear the start word)`); standby(); return; }
     let rest = afterStartWord(heard);
     // Whisper sometimes drops the leading start word but keeps the command after it: with a spotter hit, a bare command still counts.
@@ -278,7 +278,7 @@ export function createVoiceControl(ctx) {
     if (rest === null && followUp) log('vc', `right after a send, but no start word: "${heard}"`);
     if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
     noteStartResult(true);
-    if (commandFirst && afterStartWord(heard) === null) { openSession('', true); enterCommandMode(heard.trim().split(/\s+/).slice(1).join(' ')); return; }   // "katana next two" from standby: command mode directly
+    if (commandFirst && afterStartWord(heard) === null) { openSession('', true); enterCommandMode(heard.trim().split(/\s+/).slice(1).join(' ')); return; }   // "potato next two" from standby: command mode directly
     openSession(rest);
   }
 

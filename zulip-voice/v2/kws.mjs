@@ -5,7 +5,7 @@
  */
 import {parseBpe, encodeBpe} from './bpe.mjs';
 const KWS_BASE = './kws/';   // build.mjs rewrites this to the hashed asset directory
-const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁K AT AN A #0.15 :2.0 @KATANA\n▁MA C AR ON I @MACARONI';   // KATANA: the command-mode keyword (a placeholder until the human picks one from the study)
+const KEYWORDS = '▁AT T ENT ION @ATTENTION\n▁TO MA T O @TOMATO\n▁PO T AT O #0.15 :2.0 @POTATO\n▁TO R N AD O @TORNADO';   // POTATO: the command word, TORNADO: the cancel word (🧑 picked 2026-11-23)
 const THRESHOLD = 0.25;   // tuned in research-kws: 41/42 clips, no false hit in 35 minutes of agent speech
 
 // 🧑 "I did not get any indicators": loading the spotter again after unload re-ran these scripts, which threw "Can't create duplicate variable: 'Stream'" and left the on-device words off. Each script now loads once per page.

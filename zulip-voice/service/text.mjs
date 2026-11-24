@@ -236,12 +236,12 @@ const NOT_CLIPPED = new Set(['tomorrow', 'tomorrows', 'tomatoes']);
 export function looksLikeClippedEndWord(word) { if (NOT_CLIPPED.has(word.toLowerCase().replace(/[^a-z]/g, ''))) return false; const k = soundKey(word); return k.length >= 5 && distance(k, CONTROL.tomato.key) <= 2; }
 
 /* ---- Reply assembly rules shared by the client and the relay's `send` ---- */
-const COMMAND_VOCAB = new Set('attention katana tomato macaroni bamboo cancel never mind skip jump forward backward back next previous message messages again stop play resume switch to agent agents number one two three four five six seven eight nine ten positive negative yes no over send pencil'.split(' '));
+const COMMAND_VOCAB = new Set('attention potato tornado katana tomato macaroni bamboo cancel never mind skip jump forward backward back next previous message messages again stop play resume switch to agent agents number one two three four five six seven eight nine ten positive negative yes no over send pencil'.split(' '));
 /**
  * `texts` (one transcript per clip, in order) -> `{text, discard}`. Rules: a transcript containing the cancel word ("bamboo", phonetic: "Rambo") discards everything; "cancel"/"never mind"
  * as the last utterance discards everything; in each clip the command word and all that follows it is dropped; stray end words go; a reply made only of control words is empty.
  */
-export function assembleReply(texts, {cancelWord = 'macaroni', commandWord = 'katana'} = {}) {
+export function assembleReply(texts, {cancelWord = 'tornado', commandWord = 'potato'} = {}) {
   const tokens = t => t.split(/\s+/).filter(Boolean), flat = w => w.toLowerCase().replace(/[^a-z]/g, '');
   const parts = [];
   for (const raw of texts) {
