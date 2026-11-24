@@ -5,9 +5,9 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 
 ## Reading and playback
 
-- Highlight only the sentence being spoken. Web highlights the one sentence (`.s.now`). Neovim highlights the whole block (paragraph, list item, ...) holding the chunk, not the sentence.
+- Highlight only the sentence being spoken. Web highlights the one sentence (`.s.now`). Neovim highlights the sentence too; its position inside a chunk is estimated from elapsed audio.
   - web: done (app.mjs `highlight`)
-  - nvim: missing (player.lua `highlight` marks `block.first..block.last` with `ZulipReading`; block, not sentence)
+  - nvim: done (player.lua `chunk_range`, `sentence_at`)
 - Follow: keep the spoken part in view, stop following when the user scrolls or moves the cursor.
   - web: done (app.mjs `scrollToNow`, `follow`, `updateJump` shows a jump button)
   - nvim: done (player.lua `highlight(run, true)`, `run.following`; `I` toggles)
@@ -222,7 +222,6 @@ Neovim is missing, most important first:
 - Spoken command feedback ("back three"): nvim plays an earcon and shows a notification instead.
 - On-device keyword spotting: every word costs an upload and a server round trip.
 - Keys for switch back and next unread agent (voice works).
-- Sentence-level highlight (blocks now).
 - Mode beats and the extra earcons.
 - Uploads.
 - Offline outbox, unsent-recording retry, offline cache.
