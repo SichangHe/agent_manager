@@ -184,7 +184,7 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done in the compose buffer while open; unsure across restarts
 - Offline outbox: unsent messages retried.
   - web: done (app.mjs `saveOutbox`, `deliver`)
-  - nvim: missing
+  - nvim: done (conversation.lua `outbox_add`, `outbox_flush`; kept on disk)
 - New topic or direct message, editing, reactions.
   - web: missing (none found)
   - nvim: missing (README Limits)
@@ -220,7 +220,7 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 
 Neovim is missing, most important first:
 - On-device keyword spotting: without `voice.local_stt`, every phrase costs an upload and a server round trip; with mac_stt it is transcribed on the laptop instead.
-- Offline outbox, unsent-recording retry, offline cache.
+- Unsent-recording retry and offline cache of conversations (the outbox is done).
 
 Web is missing, most important first:
 - Local speech (mac_tts), which nvim has.
