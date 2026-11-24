@@ -165,8 +165,8 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - web: done (app.mjs `onEvent`)
   - nvim: done (events.lua, long polling)
 - Muted channels hidden.
-  - web: unsure
-  - nvim: missing (README: listed like the others)
+  - web: done (app.mjs `defaultChannels` leaves out muted subscriptions)
+  - nvim: done (sidebar.lua `refresh_muted`)
 
 ## Messages and compose
 
@@ -175,7 +175,7 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
   - nvim: done (compose buffer, `<CR>`, `:w`)
 - Upload files and photos.
   - web: done (app.mjs `attach-input`, line ~672)
-  - nvim: missing (README: "no uploading"; api.lua can upload a file but nothing calls it)
+  - nvim: done (`:ZulipUpload PATH` in a compose buffer, conversation.lua `upload`); no photo picker
 - Quote a selection.
   - web: unsure, not found
   - nvim: done (visual `<CR>`)
@@ -220,10 +220,8 @@ Web = `zulip-voice/v2/` (W). Neovim = `/ssd1/sichangheagent/nvim_zulip/lua/zulip
 
 Neovim is missing, most important first:
 - On-device keyword spotting: every word costs an upload and a server round trip.
-- Uploads.
 - Offline outbox, unsent-recording retry, offline cache.
 - Local speech-to-text (mac_stt), missing in both.
-- Muted-channel hiding.
 
 Web is missing, most important first:
 - Local speech (mac_tts), which nvim has.
