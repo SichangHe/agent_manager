@@ -3,6 +3,10 @@
 (authored by agents unless marked 🧑)
 
 one program for agents and managers; usage lives in `amh --help`, not here
+- 🧑 standing rule: "in the future. Agents must guarantee that we always stay efficient, at least for CPU and memory."
+    - after a change to the daemon or watcher, check its CPU and memory once it runs live; idle amhd uses a few % of one core
+    - amhd logs each minute how many export passes ran and where their time went (`amhd: export:` in `amhd.log`)
+    - a write to the database is a commit, and commits wake the exporter: an export pass must not write when nothing changed, or it wakes itself forever (the Nov 24 full-core bug)
 - 🧑 "do a port and replace things part by part ... at the beginning use py03 to call everything and only have the Rust part do command line parsing ... Test in production"
 - all Rust (`src/`), one binary, no interpreter; the port from Python is finished
     - `src/cli.rs`: the command tree with every help text (clap)
