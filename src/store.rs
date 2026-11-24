@@ -576,7 +576,10 @@ impl Store {
         }
         export_phase("tasks", t);
         let t = std::time::Instant::now();
-        database.set_record("export:through", &through.to_string())?;
+        // Written only on change: an unchanged write still commits and wakes the exporter again.
+        if hot_after(database, false)? != Some(through) {
+            database.set_record("export:through", &through.to_string())?;
+        }
         // Files left alone for typing are imported by the watcher's next pass whatever their mtime.
         if !untaken_names.is_empty() {
             let mut pending: Vec<String> = database
@@ -892,11 +895,16 @@ impl Store {
 
     /// `refresh_exports` for the daemon, which imports typed edits itself (`daemon::edits`, not by this stamp): also moves the stamp up, so the next pass skips files untouched since this one.
     // 🧑 "amh uses 100% of a core constantly": the daemon never moved the stamp (only `sync_files` did), so every pass re-read each task file written since the daemon started, ~740 MB/s.
-    pub fn refresh_exports_advancing(&self) -> Result<(), String> {
+    /// The stamp is kept in `since` (starting from the stored one), not written: each write is a commit, and commits wake the exporter, which then ran ~100 passes a second.
+    pub fn refresh_exports_advancing(&self, since: &mut Option<Option<i128>>) -> Result<(), String> {
         if let Some(database) = self.database()? {
             let next_stamp = since_next();
-            self.export(&database, stamp(&database)?, false)?;
-            database.set_record("export:stamp", &next_stamp.to_string())?;
+            let current = match since {
+                Some(stamp) => *stamp,
+                None => stamp(&database)?,
+            };
+            self.export(&database, current, false)?;
+            *since = Some(Some(next_stamp));
         }
         Ok(())
     }

@@ -255,6 +255,7 @@ fn single_instance(state_dir: &Path) -> Result<fs::File, String> {
 fn export_loop(store: &Store, commits: &mpsc::Receiver<()>) {
     // 🧑 "Agents must guarantee that we always stay efficient, at least for CPU and memory": passes and their time are logged each minute.
     let (mut passes, mut wakes, mut busy, mut since) = (0u64, 0u64, Duration::ZERO, Instant::now());
+    let mut stamp = None;
     loop {
         match commits.recv_timeout(EXPORT_TICK) {
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
@@ -265,7 +266,7 @@ fn export_loop(store: &Store, commits: &mpsc::Receiver<()>) {
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
         let began = Instant::now();
-        if let Err(error) = store.refresh_exports_advancing() {
+        if let Err(error) = store.refresh_exports_advancing(&mut stamp) {
             eprintln!("amhd: {error}");
         }
         busy += began.elapsed();
