@@ -275,7 +275,7 @@ fn send(settings: &Settings, store: &Store, address: &str, text: &str) -> Result
         .find(|task| task.address() == address)
         .ok_or("no active task has this agent")?;
     if actions::writes_to_human(settings, &task)? {
-        let (receipt, reminder) = actions::tell_human(settings, &task, "", text, &[], &[], None)?;
+        let (receipt, reminder) = actions::tell_human(settings, &task, "", text, &[], &[], None, false)?;
         if !reminder.is_empty() {
             let note = format!(
                 "amh sent the text you ended your turn with to the human.\n{receipt}{reminder}"

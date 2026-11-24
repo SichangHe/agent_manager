@@ -543,7 +543,15 @@ pub fn send(
         settings,
         &format!("zulip.report_streams.{}", mail::bare(subject).trim()),
     );
-    if !report_stream.is_empty() {
+    // 🧑 "There should be an. or emergency channel or or urgent channel in A M H. That's pretty much always on top if it has anything in it, and. Should produce push notifications"
+    let urgent = urgent_stream(settings).filter(|_| settings::get(settings, URGENT_NOW) == "true");
+    if let Some(channel) = urgent {
+        fields.extend([
+            ("type", "stream".to_owned()),
+            ("to", channel.to_owned()),
+            ("topic", tag.to_owned()),
+        ]);
+    } else if !report_stream.is_empty() {
         fields.extend([
             ("type", "stream".to_owned()),
             ("to", report_stream.to_owned()),
@@ -898,6 +906,21 @@ pub fn bot_email(settings: &Settings) -> Result<String, String> {
     Ok(settings::get(&credentials(settings)?, "ZULIP_BOT_EMAIL").to_owned())
 }
 
+/// The urgent channel (`zulip.urgent_stream`), where `amh tell human --urgent` posts under the task's topic, if set.
+pub fn urgent_stream(settings: &Settings) -> Option<&str> {
+    Some(settings::get(settings, "zulip.urgent_stream")).filter(|name| !name.is_empty())
+}
+
+/// Set to "true" in the settings of one send to post it in the urgent channel.
+pub const URGENT_NOW: &str = "zulip.urgent_now";
+
+/// The channels besides the main one whose topics name the task that gets the human's replies: report channels and the urgent channel.
+pub fn side_streams(settings: &Settings) -> Vec<String> {
+    let mut names: Vec<String> = report_streams(settings).into_iter().map(|(_, name)| name).collect();
+    names.extend(urgent_stream(settings).map(str::to_owned));
+    names
+}
+
 pub fn report_streams(settings: &Settings) -> Vec<(String, String)> {
     settings
         .iter()
@@ -929,9 +952,9 @@ pub fn incoming(settings: &Settings, cursor: u64) -> Result<Vec<Value>, String> 
         json!({"operator":"stream","operand":stream.parse::<u64>().map_err(|_| "invalid zulip.stream_id")?})
     }];
     conversations.extend(
-        report_streams(settings)
+        side_streams(settings)
             .into_iter()
-            .map(|(_, channel)| json!({"operator":"stream","operand":channel})),
+            .map(|channel| json!({"operator":"stream","operand":channel})),
     );
     let mut all: Vec<Value> = Vec::new();
     for conversation in conversations {

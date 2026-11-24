@@ -77,7 +77,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
                 .arg(Arg::new("subject").long("subject").hide(true).help("ignored: the thread is your task"))
                 .arg(Arg::new("report_label").long("report-label").value_parser(crate::mail::REPORT_LABELS).help("stock_news_watch only: display label/topic; replies retain the actual task owner"))
-                .arg(Arg::new("urgent").long("urgent").action(ArgAction::SetTrue).help("a real emergency only (something breaks or is lost unless the human acts now): your task is listed first in the human's clients until they read this message. PB urgent reports and sign-in/CAPTCHA notices count as urgent by themselves"))
+                .arg(Arg::new("urgent").long("urgent").action(ArgAction::SetTrue).help("a real emergency only (something breaks or is lost unless the human acts now): your task is listed first in the human's clients until they read this message, and under Zulip it goes to the urgent channel (zulip.urgent_stream), the only one that pushes to the human's phone; amh never refuses it for earlier unread updates. PB urgent reports and sign-in/CAPTCHA notices count as urgent by themselves"))
                 .arg(Arg::new("email").long("email").action(ArgAction::SetTrue).help("send this one message by email even when human.transport=zulip; Markdown links `[label](url)` show as the label"))
                 .arg(Arg::new("text").value_name("TEXT").conflicts_with("file").help("message body; omit to read standard input"))
                 .arg(Arg::new("file").long("file").help("file holding the message body"))

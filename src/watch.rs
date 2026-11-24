@@ -496,9 +496,7 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
             .as_str()
             .ok_or("Zulip message has no content")?;
         let channel = message["display_recipient"].as_str().unwrap_or_default();
-        let report = crate::zulip::report_streams(settings)
-            .into_iter()
-            .any(|(_, name)| name == channel);
+        let report = crate::zulip::side_streams(settings).iter().any(|name| name == channel);
         let subject = if report || !settings::get(settings, "zulip.stream_id").is_empty() {
             let topic = message["subject"]
                 .as_str()

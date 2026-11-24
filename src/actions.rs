@@ -612,9 +612,15 @@ pub fn tell_human(
     replaces: &[String],
     attachments: &[PathBuf],
     report_label: Option<&str>,
+    urgent: bool,
 ) -> Result<(String, String), String> {
     let tag = report_label.unwrap_or_else(|| task.tag());
     let zulip = crate::zulip::enabled(settings);
+    let mut in_urgent = settings.clone();
+    if urgent && report_label.is_none() {
+        in_urgent.insert(crate::zulip::URGENT_NOW.to_owned(), "true".to_owned());
+    }
+    let settings = &in_urgent;
     let sent = mail::send(
         settings,
         &settings::state_dir(),
@@ -1121,7 +1127,8 @@ pub fn run(values: &Value) -> Result<u8, String> {
             }
             // 🧑 "if agents send multiple messages, before the human read any of them, they would send a replacement message that would only include what is still current and necessary to be read"
             // Nothing is sent and no item changes until the new message replaces every earlier unread one.
-            if crate::zulip::enabled(&settings) && !flag("email") && text("report_label").is_none() {
+            // An emergency is never held back.
+            if crate::zulip::enabled(&settings) && !flag("email") && !flag("urgent") && text("report_label").is_none() {
                 let replaces: Vec<String> = many("replaces").into_iter().map(str::to_owned).collect();
                 match crate::zulip::unread_earlier(&settings, task.tag(), &replaces) {
                     Ok(left) if !left.is_empty() => {
@@ -1179,6 +1186,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 &replaces,
                 &attach,
                 text("report_label"),
+                crate::urgent::is_urgent(flag("urgent"), given, text("report_label")),
             )?;
             say(&receipt);
             say(&reminder);
