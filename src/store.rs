@@ -23,6 +23,27 @@ fn now_ns() -> i128 {
         .map_or(0, |d| d.as_nanos() as i128)
 }
 
+/// Microseconds spent per export phase since the last `export_phases` call.
+static EXPORT_PHASES: std::sync::Mutex<Vec<(&'static str, u128)>> = std::sync::Mutex::new(Vec::new());
+
+fn export_phase(name: &'static str, began: std::time::Instant) {
+    let us = began.elapsed().as_micros();
+    if let Ok(mut all) = EXPORT_PHASES.lock() {
+        match all.iter_mut().find(|(n, _)| *n == name) {
+            Some(entry) => entry.1 += us,
+            None => all.push((name, us)),
+        }
+    }
+}
+
+/// The export phase times since the last call, in ms, and resets them.
+pub fn export_phases() -> String {
+    let Ok(mut all) = EXPORT_PHASES.lock() else { return String::new() };
+    let out = all.iter().map(|(n, us)| format!("{n} {} ms", us / 1000)).collect::<Vec<_>>().join(", ");
+    all.clear();
+    out
+}
+
 /// The stamp the next lock compares against: now, less 2 s for clock and mtime coarseness.
 fn since_next() -> i128 {
     now_ns() - 2_000_000_000
@@ -475,18 +496,24 @@ impl Store {
         exporting
             .lock()
             .map_err(|error| format!("amh: cannot take the export lock: {error}"))?;
+        let t = std::time::Instant::now();
         // Task-list moves queued by `place` go into TODO.md here, outside the store lock.
         if let Err(error) = Database::open(&self.state_dir.join("amh.sqlite3"))
             .and_then(|mut database| database.fold_todo(false))
         {
             eprintln!("amh: folding task-list moves failed: {error}");
         }
+        export_phase("fold_todo", t);
+        let t = std::time::Instant::now();
         let mut git = None;
         let mut untaken_names = Vec::new();
         let through = database.latest_event_id()?;
         // A task the daemon is still importing typed lines into keeps its file until the import finishes.
         let importing = database.open_imports()?;
-        for (name, month, exported) in database.export_states(true, hot_after(database, full)?)? {
+        let states = database.export_states(true, hot_after(database, full)?)?;
+        export_phase("states", t);
+        let t = std::time::Instant::now();
+        for (name, month, exported) in states {
             if importing.contains(&name) {
                 continue;
             }
@@ -547,6 +574,8 @@ impl Store {
                 _ => database.delete_record(&key)?,
             }
         }
+        export_phase("tasks", t);
+        let t = std::time::Instant::now();
         database.set_record("export:through", &through.to_string())?;
         // Files left alone for typing are imported by the watcher's next pass whatever their mtime.
         if !untaken_names.is_empty() {
@@ -563,7 +592,11 @@ impl Store {
             }
             database.set_record("export:untaken", &pending.join("\n"))?;
         }
-        self.export_events(database)
+        export_phase("records", t);
+        let t = std::time::Instant::now();
+        let events = self.export_events(database);
+        export_phase("events", t);
+        events
     }
 
     /// Keep `amh_views/events.md` current by appending only new events; rewrite it whole when it is not the file the last export left.

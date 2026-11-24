@@ -253,13 +253,26 @@ fn single_instance(state_dir: &Path) -> Result<fs::File, String> {
 
 /// Re-export after each batch of commits, and at least every `EXPORT_TICK` for writes made outside the daemon.
 fn export_loop(store: &Store, commits: &mpsc::Receiver<()>) {
+    // 🧑 "Agents must guarantee that we always stay efficient, at least for CPU and memory": passes and their time are logged each minute.
+    let (mut passes, mut wakes, mut busy, mut since) = (0u64, 0u64, Duration::ZERO, Instant::now());
     loop {
         match commits.recv_timeout(EXPORT_TICK) {
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
-            _ => while commits.try_recv().is_ok() {},
+            Ok(()) => {
+                wakes += 1;
+                while commits.try_recv().is_ok() {}
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+        let began = Instant::now();
         if let Err(error) = store.refresh_exports_advancing() {
             eprintln!("amhd: {error}");
+        }
+        busy += began.elapsed();
+        passes += 1;
+        if since.elapsed() >= Duration::from_secs(60) {
+            eprintln!("amhd: export: {passes} passes ({wakes} from commits) in {} s, {} ms busy; {}", since.elapsed().as_secs(), busy.as_millis(), crate::store::export_phases());
+            (passes, wakes, busy, since) = (0, 0, Duration::ZERO, Instant::now());
         }
     }
 }
