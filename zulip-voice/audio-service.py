@@ -45,8 +45,14 @@ class Speech:
         self.kind = os.environ.get("VOICE_AUDIO_KIND", "tts")
         if self.kind not in {"tts", "stt"}:
             raise ValueError("VOICE_AUDIO_KIND must be tts or stt")
-        if not torch.cuda.is_available():
-            raise RuntimeError("CUDA is required for speech")
+        # 🧑 "Is the voice thing that is AMH broken?" (2026-11-25): GPU 0 failed ("GPU requires reset") and no new process could start CUDA, so the service
+        # refused to start. Without CUDA it now runs on the CPU, slower, instead of not at all; VOICE_REQUIRE_CUDA=1 restores the old refusal.
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.device == "cpu":
+            if os.environ.get("VOICE_REQUIRE_CUDA") == "1":
+                raise RuntimeError("CUDA is required for speech")
+            torch.set_num_threads(int(os.environ.get("VOICE_CPU_THREADS", "8")))
+            print("CUDA unavailable: running on the CPU", flush=True)
         self.model = os.environ.get("VOICE_STT_MODEL", "small.en")
         # 🧑 "I think Whisper is garbage. It hallucinates a lot. Try to find other better... Open source."
         self.engine = os.environ.get("VOICE_STT_ENGINE", "whisper")
@@ -54,12 +60,12 @@ class Speech:
             raise ValueError("VOICE_STT_ENGINE must be whisper or qwen3")
         if self.kind == "tts":
             self.tts = KPipeline(
-                lang_code="a", repo_id="hexgrad/Kokoro-82M", device="cuda"
+                lang_code="a", repo_id="hexgrad/Kokoro-82M", device=self.device
             )
             # 🧑 "The voice does not handle Chinese at all. It pronounces every single character as Chinese character."
             # The English pipeline reads each Han character as "Chinese letter"; Chinese runs go to the Mandarin pipeline, which shares the model.
             self.tts_zh = KPipeline(
-                lang_code="z", repo_id="hexgrad/Kokoro-82M", device="cuda", model=self.tts.model
+                lang_code="z", repo_id="hexgrad/Kokoro-82M", device=self.device, model=self.tts.model
             )
             self.speak("中文已就绪。")
             self.speak("Speech is ready. Please choose your conversation.")
@@ -67,7 +73,7 @@ class Speech:
             self.load_qwen3()
         else:
             self.stt = WhisperModel(
-                self.model, device="cuda", compute_type="float16", cpu_threads=4
+                self.model, device=self.device, compute_type="float16" if self.device == "cuda" else "int8", cpu_threads=4
             )
             list(
                 self.stt.transcribe(
@@ -75,7 +81,8 @@ class Speech:
                 )[0]
             )
         self.load_kws()
-        torch.cuda.synchronize()
+        if self.device == "cuda":
+            torch.cuda.synchronize()
 
     def speak(self, text: str) -> bytes | str:
         """Return a mono WAV or an error, without retaining conversation text."""
@@ -104,7 +111,7 @@ class Speech:
         from transformers import AutoModelForMultimodalLM, AutoProcessor
 
         self.processor = AutoProcessor.from_pretrained(self.model)
-        self.qwen = AutoModelForMultimodalLM.from_pretrained(self.model, dtype=torch.bfloat16, device_map="cuda")
+        self.qwen = AutoModelForMultimodalLM.from_pretrained(self.model, dtype=torch.bfloat16 if self.device == "cuda" else torch.float32, device_map=self.device)
         self.transcribe_qwen3(np.zeros(16000, dtype=np.float32) + 1e-3, force=True)
 
     def transcribe_qwen3(self, samples: np.ndarray, force: bool = False, prompt: str = "") -> tuple[str, float]:
@@ -271,7 +278,7 @@ def handler(speech: Speech, port: int) -> type[BaseHTTPRequestHandler]:
                     {
                         "ready": True,
                         "kind": speech.kind,
-                        "device": "cuda",
+                        "device": speech.device,
                         "model": speech.model if speech.kind == "stt" else "Kokoro-82M",
                     },
                 )
