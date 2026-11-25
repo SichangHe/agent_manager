@@ -1098,6 +1098,17 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 _ => return Err("amh: give TEXT or --file, not both".to_owned()),
             };
             let (manager, message) = work::manager_message(&task, &body, state)?;
+            // A manager recorded by task name that this machine lacks is on another machine (e.g. a machine's own
+            // manager reporting to `main_manager.md`, whose session address changes on rotation): go through Zulip.
+            if let Some(topic) = crate::remote::topic_for(&settings, &store, manager)? {
+                // `message` already carries the envelope naming this agent.
+                let id = crate::remote::post(&settings, &topic, &message).map_err(failed)?;
+                say(&format!(
+                    "{manager} is not on this machine: sent to your manager through Zulip as zulip:{id}; do not send it again\n"
+                ));
+                say(OTHERS_NO_REPEAT);
+                return Ok(0);
+            }
             match agents::report(&settings, &store, manager, &message, !state.is_empty())
                 .map_err(failed)?
             {
