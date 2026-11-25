@@ -850,6 +850,10 @@ fn short(values: &Value) -> Result<u8, String> {
                     requests::finish(&mut human, item, "the human resolved it")?;
                     store.save(&human)?;
                     request_effects(&store)?;
+                    drop(_lock);
+                    if let Err(error) = crate::watch::tell_human_items(&settings, &store) {
+                        eprintln!("amh: the human-items watcher was not told yet (the next scan will): {error}");
+                    }
                 }
                 (Some(item), true) => store.list_remove(item)?,
                 (Some(item), false) => store.list_add(item, "human pending")?,
@@ -1478,9 +1482,14 @@ pub fn run(values: &Value) -> Result<u8, String> {
             said
         }
         ("todo", "ask-human") => {
-            let _lock = store.lock()?;
+            let lock = store.lock()?;
             let task = store.own(text("task_file"))?;
             let item = ask_human(&store, &task.name, need("text"))?;
+            drop(lock);
+            // The human-items watcher hears of it now, not at the next minute's scan.
+            if let Err(error) = crate::watch::tell_human_items(&settings, &store) {
+                eprintln!("amh: the human-items watcher was not told yet (the next scan will): {error}");
+            }
             format!(
                 "{item}\nWait for it with `amh todo wait YOUR_ID --for {item}` or `amh task status {} blocked --on {item}`. It does not message the human; tell them with `amh tell human`.\n",
                 task.name

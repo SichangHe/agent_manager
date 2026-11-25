@@ -1448,7 +1448,8 @@ fn scan_agents() {
             }
             let scanned = answer_prompts(&settings, &store)
                 .and_then(|()| scanner.nudge(&settings, &store))
-                .and_then(|()| chase_answers(&settings, &store));
+                .and_then(|()| chase_answers(&settings, &store))
+                .and_then(|()| tell_human_items(&settings, &store));
             omnigent::end_scan();
             scanned
         });
@@ -1458,6 +1459,55 @@ fn scan_agents() {
         drop(_busy);
         thread::sleep(NUDGE_EVERY.saturating_sub(began.elapsed()));
     }
+}
+
+/// Record of the human's open item IDs and texts the human-items watcher was last told about, one `ID\tTEXT` per line.
+const HUMAN_ITEMS: &str = "amh-human-items.txt";
+
+/// Tell the task in `human_items.watcher` (default human_mgr.md) which of the human's items (`human.md`) were added or resolved since it was last told.
+// 🧑 "You need a way to know immediately what the human needs to do. I think agents should make \"urgent\" human pending items? Or just human pending items that agents tasks are blocked on? And you watch for those?"
+pub fn tell_human_items(settings: &Settings, store: &Store) -> Result<(), String> {
+    let watcher = match settings::get(settings, "human_items.watcher") {
+        "" => "human_mgr.md",
+        name => name,
+    };
+    if !store.contains(crate::tasks::HUMAN_TASK)? || !store.contains(watcher)? {
+        return Ok(());
+    }
+    let open: BTreeMap<String, String> = crate::requests::read(&store.load(crate::tasks::HUMAN_TASK)?)?
+        .into_iter()
+        .filter(|r| r.stage != crate::requests::Stage::Resolved)
+        .map(|r| (r.id, r.text.replace(['\t', '\n'], " ")))
+        .collect();
+    let rows: String = open.iter().map(|(id, text)| format!("{id}\t{text}\n")).collect();
+    let previous = store.record(HUMAN_ITEMS)?;
+    if previous == rows {
+        return Ok(());
+    }
+    let known: BTreeMap<&str, &str> = previous.lines().filter_map(|line| line.split_once('\t')).collect();
+    let mut lines = Vec::new();
+    // A first run only remembers what is open; the watcher sees those with `amh human`.
+    if !previous.is_empty() {
+        for (id, text) in &open {
+            if !known.contains_key(id.as_str()) {
+                lines.push(format!("- new {id}: {text}"));
+            }
+        }
+        for (id, text) in &known {
+            if !open.contains_key(*id) {
+                lines.push(format!("- resolved {id}: {text}"));
+            }
+        }
+    }
+    if !lines.is_empty() {
+        let address = crate::agents::address_of(store, watcher)?;
+        let text = format!(
+            "The human's items changed (amh tells you each change at once; all open ones: `amh human`):\n{}",
+            lines.join("\n")
+        );
+        omnigent::send(settings, &address, &text)?;
+    }
+    store.set_record(HUMAN_ITEMS, &rows)
 }
 
 /// Tell the main manager `notice` once per `token`, remembered under the record `key`; an empty token clears it so the next problem is told again.
