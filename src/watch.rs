@@ -1687,6 +1687,30 @@ fn take_in_agent_posts(settings: &Settings, store: &Store) -> Result<(), String>
         return Ok(());
     }
     const CURSOR: &str = "amh-zulip-agents-cursor.txt";
+    // A post its agent refuses for now (e.g. held by the quota controller) waits here, so it does not block later posts
+    // for other agents; it is retried on every poll, in order, before newer posts to the same agent. Each entry: [id, to, text].
+    const WAITING: &str = "amh-zulip-agents-waiting.json";
+    let mut waiting: Vec<(u64, String, String)> = serde_json::from_str(&store.record(WAITING)?).unwrap_or_default();
+    let before = waiting.len();
+    let mut blocked = std::collections::BTreeSet::new();
+    waiting.retain(|(id, to, text)| {
+        if blocked.contains(to) {
+            return true;
+        }
+        match omnigent::send(settings, to, text) {
+            Ok(()) => {
+                log(&format!("Zulip agent post {id} -> {to} (after waiting)"));
+                false
+            }
+            Err(_) => {
+                blocked.insert(to.clone());
+                true
+            }
+        }
+    });
+    if waiting.len() != before {
+        store.set_record(WAITING, &serde_json::to_string(&waiting).map_err(|error| error.to_string())?)?;
+    }
     let cursor = store.record(CURSOR)?.trim().parse::<u64>().ok();
     let own = crate::remote::me(settings)?;
     for post in crate::zulip::channel_posts(settings, stream, cursor)? {
@@ -1705,8 +1729,22 @@ fn take_in_agent_posts(settings: &Settings, store: &Store) -> Result<(), String>
                             crate::work::envelope(&format!("{sender} in Zulip #{stream} > {topic}"), text)
                         }
                     };
-                    omnigent::send(settings, &to, &text)?;
-                    log(&format!("Zulip agent post {id} -> {to}"));
+                    let sent = match blocked.contains(&to) {
+                        true => Err("earlier posts to it are still waiting".to_owned()),
+                        false => omnigent::send(settings, &to, &text),
+                    };
+                    match sent {
+                        Ok(()) => log(&format!("Zulip agent post {id} -> {to}")),
+                        Err(error) => {
+                            log(&format!("Zulip agent post {id} -> {to} waits: {error}"));
+                            blocked.insert(to.clone());
+                            waiting.push((id, to, text));
+                            store.set_record(
+                                WAITING,
+                                &serde_json::to_string(&waiting).map_err(|error| error.to_string())?,
+                            )?;
+                        }
+                    }
                 }
                 None => log(&format!("Zulip agent post {id} for {topic}: not on this machine")),
             }
