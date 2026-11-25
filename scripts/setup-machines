@@ -10,8 +10,8 @@ failed=
 for host in "$@"; do
     name=${host#*@}; name=${name%%.*}
     if [ ! -f "$keys/$name.env" ]; then echo "$host: no $keys/$name.env" >&2; failed="$failed $host"; continue; fi
-    if ssh -o BatchMode=yes "$host" 'umask 077; d=${XDG_STATE_HOME:-$HOME/.local/state}/amh; mkdir -p "$d"; [ -f "$d/zulip.env" ] || cat > "$d/zulip.env"' < "$keys/$name.env" \
-        && ssh -o BatchMode=yes "$host" "curl -fsSL $url | sh" < /dev/null; then
+    if ssh -o BatchMode=yes -o ConnectTimeout=15 "$host" 'umask 077; d=${XDG_STATE_HOME:-$HOME/.local/state}/amh; mkdir -p "$d"; [ -f "$d/zulip.env" ] || cat > "$d/zulip.env"' < "$keys/$name.env" \
+        && ssh -o BatchMode=yes -o ConnectTimeout=15 "$host" "curl -fsSL $url | sh" < /dev/null; then
         echo "$host: done"
     else
         echo "$host: failed" >&2; failed="$failed $host"
