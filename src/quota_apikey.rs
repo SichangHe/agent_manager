@@ -17,6 +17,67 @@ const LATE_DAYS: f64 = 3.0;
 /// Burn is measured over this long.
 const BURN_H: i64 = 6;
 
+/// USD per million tokens `(model, input, output, cache read)`, from the `claude-api` skill's model tables (`shared/models.md`, `shared/prompt-caching.md`), checked 2026-11-26. Cache writes cost `CACHE_WRITE_5M`/`CACHE_WRITE_1H` times the input price. Read prices of Fable 5 / Mythos 5 (a quarter of the 5.1 price), Opus 5 and earlier, Sonnet 5 / 4.6 and Haiku are the skill's ~0.1x input rule, not a listed price.
+const PRICES: &[(&str, f64, f64, f64)] = &[
+    ("claude-fable-5-2", 8.0, 40.0, 0.2),
+    ("claude-mythos-5-2", 8.0, 40.0, 0.2),
+    ("claude-fable-5-1", 10.0, 50.0, 0.25),
+    ("claude-mythos-5-1", 10.0, 50.0, 0.25),
+    ("claude-fable-5", 10.0, 50.0, 1.0),
+    ("claude-mythos-5", 10.0, 50.0, 1.0),
+    ("claude-opus-5-5", 4.0, 20.0, 0.2),
+    ("claude-opus-5", 5.0, 25.0, 0.5),
+    ("claude-opus-4-8", 5.0, 25.0, 0.5),
+    ("claude-opus-4-7", 5.0, 25.0, 0.5),
+    ("claude-opus-4-6", 5.0, 25.0, 0.5),
+    ("claude-sonnet-5-5", 2.0, 10.0, 0.1),
+    ("claude-sonnet-5", 2.0, 10.0, 0.2),
+    ("claude-sonnet-4-6", 3.0, 15.0, 0.3),
+    ("claude-haiku-5-5", 0.1, 0.5, 0.01),
+    ("claude-haiku-4-5", 1.0, 5.0, 0.1),
+];
+const CACHE_WRITE_5M: f64 = 1.25;
+const CACHE_WRITE_1H: f64 = 2.0;
+/// Fast mode (`speed: "fast"`) is 2x on every model that has it.
+const FAST_FACTOR: f64 = 2.0;
+/// `claude-haiku-5-5` prompts above this many tokens use a 5x rate card.
+const HAIKU_55_LONG_PROMPT: i64 = 100_000;
+const HAIKU_55_LONG_FACTOR: f64 = 5.0;
+
+/// One usage row, as far as the store records it: tokens by kind (`output` includes reasoning), cache writes with the 1h part split out of `cache_write`, and `speed`.
+struct Req {
+    model: String,
+    uncached: i64,
+    cache_read: i64,
+    cache_write: i64,
+    cache_write_1h: i64,
+    output: i64,
+    fast: bool,
+}
+
+/// USD of one request, or `None` if the model is not in `PRICES` (a trailing `-YYYYMMDD` is ignored).
+fn cost_usd(r: &Req) -> Option<f64> {
+    let model = r.model.rsplit_once('-').map_or(&*r.model, |(head, tail)| {
+        if tail.len() == 8 && tail.bytes().all(|b| b.is_ascii_digit()) {
+            head
+        } else {
+            &r.model
+        }
+    });
+    let &(_, input, output, read) = PRICES.iter().find(|p| p.0 == model)?;
+    let long = model == "claude-haiku-5-5"
+        && r.uncached + r.cache_read + r.cache_write > HAIKU_55_LONG_PROMPT;
+    let factor =
+        if long { HAIKU_55_LONG_FACTOR } else { 1.0 } * if r.fast { FAST_FACTOR } else { 1.0 };
+    let write_5m = r.cache_write - r.cache_write_1h;
+    let usd_micro = r.uncached as f64 * input
+        + r.cache_read as f64 * read
+        + write_5m as f64 * input * CACHE_WRITE_5M
+        + r.cache_write_1h as f64 * input * CACHE_WRITE_1H
+        + r.output as f64 * output;
+    Some(usd_micro * factor / 1e6)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyUse {
     pub name: String,
@@ -24,10 +85,14 @@ pub struct KeyUse {
     pub index: usize,
     pub auth_index: String,
     pub priority: i64,
-    /// Tokens used this UTC month (`total` of the usage store); the unit of `limit`.
+    /// Used this UTC month, in the unit of `limit`: USD when `usd`, else tokens (`total` of the usage store).
     pub used: f64,
+    /// `limit` and `used` are USD (`monthly_usd` is set), not tokens.
+    pub usd: bool,
+    /// Models seen this month that `PRICES` lacks, with request counts; their spend is missing from `used`.
+    pub unpriced: Vec<String>,
     pub burn_per_h: f64,
-    /// The monthly limit, from `quota.apikey.<name>.monthly_tokens`: neither the proxy nor the Anthropic API exposes it.
+    /// The monthly limit, from `quota.apikey.<name>.monthly_usd` (preferred) or `.monthly_tokens`: neither the proxy nor the Anthropic API exposes it.
     pub limit: Option<f64>,
     pub resets_at: i64,
 }
@@ -61,7 +126,7 @@ impl KeyUse {
         (self.resets_at - now) as f64 / 3600.0
     }
 
-    /// Tokens per hour that use the key up exactly at the month end.
+    /// Units (USD or tokens) per hour that use the key up exactly at the month end.
     pub fn need_per_h(&self, now: i64) -> Option<f64> {
         self.left().map(|left| left / self.hours_left(now).max(1.0))
     }
@@ -78,7 +143,7 @@ impl KeyUse {
 
     pub fn to_json(&self) -> Value {
         json!({"name": self.name, "index": self.index, "auth_index": self.auth_index, "priority": self.priority,
-            "used": self.used, "burn_per_h": self.burn_per_h, "limit": self.limit, "resets_at": self.resets_at})
+            "used": self.used, "usd": self.usd, "unpriced": self.unpriced, "burn_per_h": self.burn_per_h, "limit": self.limit, "resets_at": self.resets_at})
     }
 
     pub fn from_json(v: &Value) -> Option<Self> {
@@ -88,6 +153,15 @@ impl KeyUse {
             auth_index: v["auth_index"].as_str().unwrap_or_default().to_owned(),
             priority: v["priority"].as_i64()?,
             used: v["used"].as_f64()?,
+            usd: v["usd"].as_bool().unwrap_or_default(),
+            unpriced: v["unpriced"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|m| m.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
             burn_per_h: v["burn_per_h"].as_f64().unwrap_or_default(),
             limit: v["limit"].as_f64(),
             resets_at: v["resets_at"].as_i64()?,
@@ -111,16 +185,58 @@ fn usage_db_path(settings: &Settings) -> PathBuf {
     }
 }
 
-/// Tokens each `auth_index` used in `[since, now]`. The store holds RFC 3339 `ts` with a local offset, so the index on `ts` narrows by day and `strftime` decides.
-fn tokens_since(db: &Connection, auth_index: &str, since: i64) -> Result<f64, String> {
-    db.query_row(
-        "SELECT COALESCE(SUM(total), 0) FROM req
-         WHERE ts >= date(?1, 'unixepoch', '-1 day') AND CAST(strftime('%s', ts) AS INTEGER) >= ?1
-           AND json_extract(raw, '$.auth_index') = ?2",
-        params![since, auth_index],
-        |row| row.get(0),
-    )
-    .map_err(|e| format!("proxy usage store: {e}"))
+/// What `auth_index` used in `[since, now]`: USD if `usd` (requests of models missing from `PRICES` count as 0 and are listed in the second value), else tokens. The store holds RFC 3339 `ts` with a local offset, so the index on `ts` narrows by day and `strftime` decides.
+fn usage_since(
+    db: &Connection,
+    auth_index: &str,
+    since: i64,
+    usd: bool,
+) -> Result<(f64, Vec<String>), String> {
+    let mut stmt = db
+        .prepare(
+            "SELECT model, input_uncached, cache_read, cache_write, output, total,
+                    COALESCE(json_extract(raw, '$.tokens.cache_creation_1h_tokens'), 0),
+                    json_extract(raw, '$.speed') = 'fast'
+             FROM req
+             WHERE ts >= date(?1, 'unixepoch', '-1 day') AND CAST(strftime('%s', ts) AS INTEGER) >= ?1
+               AND json_extract(raw, '$.auth_index') = ?2",
+        )
+        .map_err(|e| format!("proxy usage store: {e}"))?;
+    let rows = stmt
+        .query_map(params![since, auth_index], |row| {
+            let get = |i| row.get::<_, Option<i64>>(i).map(Option::unwrap_or_default);
+            Ok((
+                Req {
+                    model: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
+                    uncached: get(1)?,
+                    cache_read: get(2)?,
+                    cache_write: get(3)?,
+                    output: get(4)?,
+                    cache_write_1h: get(6)?,
+                    fast: get(7)? != 0,
+                },
+                get(5)?,
+            ))
+        })
+        .map_err(|e| format!("proxy usage store: {e}"))?;
+    let (mut sum, mut missing) = (0.0, std::collections::BTreeMap::<String, u64>::new());
+    for row in rows {
+        let (req, total) = row.map_err(|e| format!("proxy usage store: {e}"))?;
+        if !usd {
+            sum += total as f64;
+        } else if let Some(c) = cost_usd(&req) {
+            sum += c;
+        } else if total > 0 {
+            *missing.entry(req.model).or_default() += 1;
+        }
+    }
+    Ok((
+        sum,
+        missing
+            .into_iter()
+            .map(|(m, n)| format!("{m} ({n} requests)"))
+            .collect(),
+    ))
 }
 
 /// The keys as the proxy lists them (`(auth_index, priority)` in config order, from `GET claude-api-key`), named by `quota.apikeys` in the same order, with their usage this month.
@@ -152,15 +268,25 @@ pub fn read(
         .zip(listed)
         .enumerate()
         .map(|(index, (name, (auth_index, priority)))| {
-            let limit = settings::get(settings, &format!("quota.apikey.{name}.monthly_tokens"));
+            let get = |unit| {
+                settings::get(settings, &format!("quota.apikey.{name}.{unit}"))
+                    .parse::<f64>()
+                    .ok()
+            };
+            let usd_limit = get("monthly_usd");
+            let usd = usd_limit.is_some();
+            let (used, unpriced) = usage_since(&db, auth_index, month_start(now), usd)?;
             Ok(KeyUse {
                 name: (*name).to_owned(),
                 index,
                 auth_index: auth_index.clone(),
                 priority: *priority,
-                used: tokens_since(&db, auth_index, month_start(now))?,
-                burn_per_h: tokens_since(&db, auth_index, now - BURN_H * 3600)? / BURN_H as f64,
-                limit: limit.parse().ok(),
+                used,
+                usd,
+                unpriced,
+                burn_per_h: usage_since(&db, auth_index, now - BURN_H * 3600, usd)?.0
+                    / BURN_H as f64,
+                limit: usd_limit.or_else(|| get("monthly_tokens")),
                 resets_at: month_end(now),
             })
         })
@@ -188,21 +314,27 @@ fn span_h(h: f64) -> String {
 pub fn lines(keys: &[KeyUse], now: i64) -> String {
     keys.iter()
         .map(|k| {
+            let (unit, per_h, n) = if k.usd { ("USD", "USD/h", 2) } else { ("tokens", "tokens/h", 0) };
             let quota = match (k.limit, k.need_per_h(now)) {
                 (Some(limit), Some(need)) => format!(
-                    "{:.0} of {limit:.0} tokens used ({:.0}%), need {need:.0} tokens/h to use it up, burning {:.0}/h ({} pace)",
+                    "{:.n$} of {limit:.n$} {unit} used ({:.0}%), need {need:.n$} {per_h} to use it up, burning {:.n$}/h ({} pace)",
                     k.used,
                     100.0 * k.used / limit,
                     k.burn_per_h,
                     if k.burn_per_h < need { "under" } else { "on" }
                 ),
                 _ => format!(
-                    "{:.0} tokens used, limit unknown (set `quota.apikey.{}.monthly_tokens`), burning {:.0}/h",
-                    k.used, k.name, k.burn_per_h
+                    "{used:.n$} {unit} used, limit unknown (set `quota.apikey.{name}.monthly_usd` or `.monthly_tokens`), burning {burn:.n$}/h",
+                    used = k.used, name = k.name, burn = k.burn_per_h
                 ),
             };
+            let unpriced = if k.unpriced.is_empty() {
+                String::new()
+            } else {
+                format!("; UNPRICED, missing from spend: {}", k.unpriced.join(", "))
+            };
             format!(
-                "api key {}: {quota}; monthly, resets in {}; priority {}\n",
+                "api key {}: {quota}; monthly, resets in {}; priority {}{unpriced}\n",
                 k.name,
                 span_h(k.hours_left(now)),
                 k.priority
@@ -222,6 +354,8 @@ mod tests {
             auth_index: "a".into(),
             priority,
             used,
+            usd: false,
+            unpriced: Vec::new(),
             burn_per_h: 0.0,
             limit,
             resets_at: month_end(
@@ -269,13 +403,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_tokens_per_auth_index_this_month() -> Result<(), Box<dyn std::error::Error>> {
+    fn reads_use_per_auth_index_this_month() -> Result<(), Box<dyn std::error::Error>> {
         let path =
             std::env::temp_dir().join(format!("amh-apikey-test-{}.sqlite", std::process::id()));
         let _ = std::fs::remove_file(&path);
         let db = Connection::open(&path)?;
         db.execute_batch(
-            "CREATE TABLE req(ts TEXT, total INT, raw TEXT); CREATE INDEX req_ts ON req(ts);",
+            "CREATE TABLE req(ts TEXT, model TEXT, input_uncached INT, cache_read INT, cache_write INT, output INT, total INT, raw TEXT); CREATE INDEX req_ts ON req(ts);",
         )?;
         for (ts, total, auth) in [
             ("2026-11-20T23:30:00.5-08:00", 10, "k1"), // 07:30 UTC on the 21st: this month
@@ -284,7 +418,7 @@ mod tests {
             ("2026-11-20T23:30:00-08:00", 5, "k2"),
         ] {
             db.execute(
-                "INSERT INTO req VALUES (?1, ?2, ?3)",
+                "INSERT INTO req (ts, total, raw) VALUES (?1, ?2, ?3)",
                 params![ts, total, json!({"auth_index": auth}).to_string()],
             )?;
         }
@@ -292,7 +426,19 @@ mod tests {
             .with_ymd_and_hms(2026, 11, 1, 0, 0, 0)
             .unwrap()
             .timestamp();
-        assert_eq!(tokens_since(&db, "k1", start)?, 109.0);
+        assert_eq!(usage_since(&db, "k1", start, false)?.0, 109.0);
+        // sonnet-5-5: 1M uncached $2 + 1M read $0.1 + 1M 5m write $2.5 + 1M 1h write $4 + 1M output $10.
+        db.execute(
+            "INSERT INTO req VALUES ('2026-11-20T23:30:00-08:00', 'claude-sonnet-5-5-20261101', 1000000, 1000000, 2000000, 1000000, 4000000, ?1)",
+            params![json!({"auth_index": "k3", "tokens": {"cache_creation_1h_tokens": 1000000}}).to_string()],
+        )?;
+        db.execute(
+            "INSERT INTO req VALUES ('2026-11-20T23:30:00-08:00', 'mystery-1', 1, 1, 1, 1, 4, ?1)",
+            params![json!({"auth_index": "k3"}).to_string()],
+        )?;
+        let (usd, unpriced) = usage_since(&db, "k3", start, true)?;
+        assert!((usd - 18.6).abs() < 1e-9, "{usd}");
+        assert_eq!(unpriced, ["mystery-1 (1 requests)"]);
         std::fs::remove_file(&path)?;
         Ok(())
     }

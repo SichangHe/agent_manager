@@ -34,11 +34,16 @@ settings (dotted keys, `env.toml` or `config.toml`)
 - `quota.redeem`: `"true"`
 - `quota.notify_task`
 - `quota.apikeys`: comma list naming the proxy's `claude-api-key` entries in config order (the management API shows no names)
+- `quota.apikey.<name>.monthly_usd`: monthly limit in USD; wins over `monthly_tokens`; used, pace, used-up check and late priority are all in USD
+    - spend per request from the usage store columns `model`, `input_uncached`, `cache_read`, `cache_write`, `output` (includes reasoning) and `raw` (`tokens.cache_creation_1h_tokens`, `speed`)
+    - prices: `PRICES` in `quota_apikey.rs` (claude-api skill, dated); cache write 1.25x (5m) / 2x (1h) input; fast 2x; haiku-5-5 prompts over 100K tokens 5x
+    - a model missing from `PRICES` counts as 0 but is printed as `UNPRICED`; add it to the table
+    - the store has no batch, web-search or long-context-tier flags for other models, so those are not priced
 - `quota.apikey.<name>.monthly_tokens`: monthly limit in `total` tokens of the proxy usage store; no source exposes it, so unset means unknown
 - `quota.apikey_late_days` (default 3), `quota.usage_db` (default `~/.local/state/proxy-usage/usage.sqlite`)
 
 api keys (`quota_apikey`)
-- usage: sum of `total` per `auth_index` (in each row's `raw`) of the usage store since the UTC month start; burn over the last 6 h
+- usage: sum of `total` (or USD, see `monthly_usd`) per `auth_index` (in each row's `raw`) of the usage store since the UTC month start; burn over the last 6 h
 - reset: next UTC month start; need = quota left / hours left
 - priority: held at -1 (below subscriptions) until `quota.apikey_late_days` before the month end, then one above the top subscription rank while quota is left, via `PATCH claude-api-key` by index
 - `proxy_actions` never touches them; only this step writes their priority
