@@ -61,7 +61,7 @@ export function createVoiceControl(ctx) {
   const kwsHitMs = {};
   let lastHitAt = 0;   // when the latest local keyword fired, to log hit -> feedback
   let lastLocalCommandMs = 0, lastLocalTag = '', lastLocalTagMs = 0, localPhrases = new Map(), lastCommandWindowMs = 0, prebuildTimer = 0;
-  const SKIP_COUNT_WAIT_MS = 2500;   // 🧑 2026-11-22 "recognize the command quickly. Play an acknowledgement sound ... and then start playing. Instead of flickering around": the sound confirms at once, playback waits for the count (the transcript took ~1.9 s in the log) and moves once   // 🧑 "I don't want the skip command to become slow. Maybe wait for one second"   // how long an on-device "skip" waits for the transcript's count
+  const SKIP_COUNT_WAIT_MS = 6000, SKIP_IDLE_MS = 1200;   // 🧑 2026-11-22 "recognize the command quickly. Play an acknowledgement sound ... and then start playing. Instead of flickering around": the sound confirms at once, playback waits for the count (the transcript took ~1.9 s in the log) and moves once   // 🧑 "I don't want the skip command to become slow. Maybe wait for one second"   // how long an on-device "skip" waits for the transcript's count
   let lastLocalNav = null;   // {dir, ms}: a "skip forward/backward" heard on the device; the transcript may add a count
   let startWordUploads = [], emptyRun = 0, backoffUntil = 0;
   let emptyClosedAt = 0;   // when an empty session last timed out: speech that began within EMPTY_GRACE_MS after it was meant for that session
@@ -151,10 +151,15 @@ export function createVoiceControl(ctx) {
       // 🧑 "skip backward, and with a number. It tries to skip too quickly, and sometimes doesn't register that number": the skip now waits for the transcript's count; one step if none comes.
       const dir = tag === 'SKIP_FORWARD' ? 1 : -1;
       clearTimeout(lastLocalNav?.timer);
-      lastLocalNav = {dir, ms: Date.now(), timer: setTimeout(() => { if (lastLocalNav?.dir !== dir) return; lastLocalNav = {dir, ms: Date.now(), skipped: true}; log('vc', 'no count in time: skipping one'); runCommands(dir > 0 ? 'skip forward' : 'skip backward'); }, SKIP_COUNT_WAIT_MS)};
+      // Root cause of "two beeps, jumps back one block": a fixed 2.5 s wait raced the transcript (1.9-2.6 s), so a late count lost; and a tick sounded here plus another in runCommands. Now: silent here (playback paused), wait while the clip is still being spoken or transcribed (cap 6 s), one "Back N" acknowledgement from runCommands.
+      const t0 = Date.now(), fire = () => {
+        if (lastLocalNav?.dir !== dir) return;
+        if ((recorder.inUtterance() || clipsInFlight || Date.now() - t0 < SKIP_IDLE_MS) && Date.now() - t0 < SKIP_COUNT_WAIT_MS) { lastLocalNav.timer = setTimeout(fire, 150); return; }
+        lastLocalNav = {dir, ms: Date.now(), skipped: true}; log('vc', 'no count in time: skipping one'); runCommands(dir > 0 ? 'skip forward' : 'skip backward');
+      };
+      lastLocalNav = {dir, ms: t0, timer: setTimeout(fire, 150)};
       if (['playing', 'loading'].includes(player.position().status)) player.pause();
-      recorder.beep('tick');   // the command-recognized tick, not the command-mode sound
-      log('vc', 'skip heard on device: acknowledged, waiting for the count'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
+      log('vc', 'skip heard on device: acknowledged, waiting for the count (silent)'); return;   // does not set lastLocalCommandMs: the clip still goes to the server for the count
     }
     lastLocalCommandMs = Date.now();
     runCommands(localPhrases.get(tag) ?? tag.toLowerCase().replace(/_/g, ' '));
@@ -325,7 +330,7 @@ export function createVoiceControl(ctx) {
     const tokens = normalize(text).split(' ').filter(Boolean).filter(t => !isCommandWord(t));
     const done = [];
     const said = [];   // what was done, in words: a bare sound never says which command it was
-    const tick = (name, words = name) => { done.push(name); said.push(words); recorder.beep('tick'); };
+    const tick = (name, words = name) => { done.push(name); said.push(words); if (name !== 'navigate') recorder.beep('tick'); };   // a navigation is acknowledged by its spoken "Back N" alone: no extra beep
     let navigated = false, left = false; const ignored = [], navs = [];
     const finishSession = (discard = false) => { if (!vc) return; clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); setDraft(discard ? vc.base : vc.base + (vc.text ? (vc.base ? ' ' : '') + vc.text : '')); ctx.saveDraft(); vc = null; recorder.setReplyMode(false); };
     while (tokens.length && vc) {
