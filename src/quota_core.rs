@@ -12,8 +12,6 @@ pub const TTL_S: i64 = 900;
 /// Readings must be below this on `OK_STREAK` consecutive polls before a bucket turns available.
 const OK_BELOW_PCT: f64 = 99.0;
 const OK_STREAK: u32 = 2;
-/// A 5h window above this ranks its bucket below the others until it resets.
-const HOT_5H_PCT: f64 = 90.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -455,25 +453,21 @@ pub fn pools(buckets: &[Bucket], now: i64) -> BTreeMap<String, Pool> {
 
 /// Proxy priority per credential of each available bucket: higher is preferred.
 // 🧑 "Let the proxy agent make the proxy automatically prioritize accounts that would reset first"
-/// Among available buckets the soonest weekly reset ranks first, because that is the quota that expires first; a bucket whose 5h window is above `HOT_5H_PCT` ranks below the rest, since it cannot absorb work now.
+// 🧑 "The proxy should use the account that expires the first unless it starts to rate limit"
+/// Among buckets not known to be exhausted, the soonest weekly reset ranks first, because that is the quota that expires first. A bucket whose last reading is stale (unknown) is ranked by that reading too: leaving its old priority in place let it tie with, or outrank, an account that resets days later. A rate-limited account needs no demotion here: the proxy sets it aside after its 429.
 pub fn priorities(buckets: &[Bucket]) -> BTreeMap<String, i64> {
     let key = |b: &Bucket| {
-        let hot = b
-            .windows
-            .iter()
-            .any(|w| w.kind == Kind::H5 && w.state == WinState::Active && w.used_pct > HOT_5H_PCT);
-        let reset = b
-            .windows
+        b.windows
             .iter()
             .find(|w| w.kind == Kind::D7 && w.state == WinState::Active)
-            .and_then(|w| w.resets_at);
-        (hot, reset.unwrap_or(i64::MAX))
+            .and_then(|w| w.resets_at)
+            .unwrap_or(i64::MAX)
     };
     let mut result = BTreeMap::new();
     for pool in POOLS {
         let mine: Vec<&Bucket> = buckets
             .iter()
-            .filter(|b| b.pool == pool && b.status == Status::Available)
+            .filter(|b| b.pool == pool && b.status != Status::Exhausted)
             .collect();
         let ranks: BTreeSet<_> = mine.iter().map(|b| key(b)).collect();
         let n = ranks.len() as i64;
@@ -524,7 +518,7 @@ pub fn proxy_actions(
             }
         }
         let rank = match status {
-            Some(Status::Available) => ranks.get(&r.name).copied(),
+            Some(Status::Available | Status::Unknown) => ranks.get(&r.name).copied(),
             Some(Status::Exhausted) => Some(0),
             _ => None,
         };
@@ -1185,22 +1179,19 @@ mod tests {
             bucket("soon", "claude", Status::Available, 10.0, Some(NOW + 1000)),
             bucket("tie", "claude", Status::Available, 10.0, Some(NOW + 1000)),
             bucket("hot", "claude", Status::Available, 95.0, Some(NOW + 10)),
+            bucket("stale", "claude", Status::Unknown, 10.0, Some(NOW + 5000)),
             bucket("no7d", "claude", Status::Available, 10.0, None),
             bucket("gone", "claude", Status::Exhausted, 10.0, Some(NOW + 1)),
             bucket("other", "codex", Status::Available, 10.0, Some(NOW + 5000)),
         ]);
         assert_eq!(p["soon"], p["tie"]);
         assert!(
-            p["soon"] > p["late"] && p["late"] > p["no7d"],
-            "soonest 7d first, unknown 7d last"
-        );
-        assert!(
-            p["no7d"] > p["hot"],
-            "a hot 5h window ranks below even an unknown weekly reset"
+            p["hot"] > p["soon"] && p["soon"] > p["stale"] && p["stale"] > p["late"] && p["late"] > p["no7d"],
+            "soonest 7d first even when its 5h window is high or its reading is stale; unknown 7d last"
         );
         assert!(!p.contains_key("gone"), "exhausted buckets get no priority");
         assert_eq!(p["other"], 1, "pools rank separately");
-        assert_eq!(p["hot"], 1);
+        assert_eq!(p["no7d"], 1);
     }
 
     fn reading(name: &str, principal: &str, disabled: bool, priority: Option<i64>) -> Reading {
@@ -1251,7 +1242,7 @@ mod tests {
             bucket("unk", "claude", Status::Unknown, 10.0, None),
         ];
         let readings = [
-            reading("ok", "claude:ok", false, Some(3)),
+            reading("ok", "claude:ok", false, Some(4)),
             reading("out", "claude:out", false, None),
             reading("back", "claude:back", true, None),
             reading("human", "claude:human", true, None),
@@ -1276,7 +1267,11 @@ mod tests {
                 .any(|a| matches!(a, Act::Priority(n, _) if n == "ok")),
             "already at its rank"
         );
-        assert!(acts.contains(&Act::Priority("back".into(), 2)));
+        assert!(acts.contains(&Act::Priority("back".into(), 3)));
+        assert!(
+            acts.contains(&Act::Priority("unk".into(), 1)),
+            "a stale reading is ranked too, not left at its old priority"
+        );
         assert!(
             !acts
                 .iter()
