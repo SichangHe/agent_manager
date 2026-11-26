@@ -152,6 +152,25 @@ fn owe_first_reply(store: &Store, address: &str, since_s: i64) {
 // 🧑 "Let's disallow blocking on someone. First they need to create a task and let that someone own it, and block on this task"
 const WAIT_HOW: &str = "amh: wait only on a task file (OTHER.md), an item ID (NAME.md#N), or a date (--until 2026-11-20). To wait on the human, give them an item with `amh todo ask-human 'WHAT YOU NEED'` and wait for the ID it prints; to wait on another agent, add an item to its task with `amh task give OTHER.md 'WHAT YOU NEED'` and wait for that item. Without a dependency, do not block: keep the item open.";
 
+/// Post the human's new item `item` in the urgent Zulip channel under the asking task's topic: an item is something the human must do before an agent can go on.
+// 🧑 "the uiclient experiments that needed my attention was [urgent]"; and (via human_mgr.md) "I think agents should make \"urgent\" human pending items? Or just human pending items that agents tasks are blocked on?"
+fn post_human_item(settings: &Settings, task: &Task, item: &str, what: &str) {
+    if !crate::zulip::enabled(settings) || crate::zulip::urgent_stream(settings).is_none() {
+        return;
+    }
+    let mut urgent = settings.clone();
+    urgent.insert(crate::zulip::URGENT_NOW.to_owned(), "true".to_owned());
+    let body = format!(
+        "{} needs you: {}\n({item}; your reply here goes to {})",
+        task.name,
+        what.trim(),
+        task.name
+    );
+    if let Err(error) = mail::send(&urgent, &settings::state_dir(), task.tag(), "", &body, task.address(), &[]) {
+        eprintln!("amh: the human's item was not posted in the urgent channel: {error}");
+    }
+}
+
 /// Add an item the human owns, asked by `asker`, to the human's task (made on first use); returns its ID.
 fn ask_human(store: &Store, asker: &str, what: &str) -> Result<String, String> {
     let mut human = match store.contains(tasks::HUMAN_TASK)? {
@@ -1201,7 +1220,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                 &replaces,
                 &attach,
                 text("report_label"),
-                crate::urgent::is_urgent(flag("urgent"), given, text("report_label")),
+                crate::urgent::for_channel(flag("urgent"), given),
             )?;
             say(&receipt);
             say(&reminder);
@@ -1483,6 +1502,7 @@ pub fn run(values: &Value) -> Result<u8, String> {
                     })
                     .ok_or("amh: that request waits on nothing in words; give the human an item with `amh todo ask-human`")?;
                 let item = ask_human(&store, &task.name, &reason)?;
+                post_human_item(&settings, &task, &item, &reason);
                 requests::wait_to_item(&mut task, need("id"), &item)?;
                 said = format!(
                     "{} now waits for the human's item {item}: {reason}\n",
@@ -1497,12 +1517,13 @@ pub fn run(values: &Value) -> Result<u8, String> {
             let task = store.own(text("task_file"))?;
             let item = ask_human(&store, &task.name, need("text"))?;
             drop(lock);
+            post_human_item(&settings, &task, &item, need("text"));
             // The human-items watcher hears of it now, not at the next minute's scan.
             if let Err(error) = crate::watch::tell_human_items(&settings, &store) {
                 eprintln!("amh: the human-items watcher was not told yet (the next scan will): {error}");
             }
             format!(
-                "{item}\nWait for it with `amh todo wait YOUR_ID --for {item}` or `amh task status {} blocked --on {item}`. It does not message the human; tell them with `amh tell human`.\n",
+                "{item}\nWait for it with `amh todo wait YOUR_ID --for {item}` or `amh task status {} blocked --on {item}`. It is posted to the human in the urgent channel.\n",
                 task.name
             )
         }

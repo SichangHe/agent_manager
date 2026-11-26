@@ -545,7 +545,8 @@ pub fn send(
     );
     // 🧑 "There should be an. or emergency channel or or urgent channel in A M H. That's pretty much always on top if it has anything in it, and. Should produce push notifications"
     let urgent = urgent_stream(settings).filter(|_| settings::get(settings, URGENT_NOW) == "true");
-    if let Some(channel) = urgent {
+    // A PB report keeps its own channel even when called urgent.
+    if let Some(channel) = urgent.filter(|_| report_stream.is_empty()) {
         fields.extend([
             ("type", "stream".to_owned()),
             ("to", channel.to_owned()),

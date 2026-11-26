@@ -38,6 +38,13 @@ pub fn is_urgent(flag: bool, subject: &str, report_label: Option<&str>) -> bool 
         || subject.contains("captcha")
 }
 
+/// Whether a message goes to the urgent Zulip channel: an explicit --urgent, or a sign-in/CAPTCHA notice. PB reports never do; they have their own channels.
+// 🧑 "Agents are not using the \"urgent\" channel correctly. stock news watch is not really urgent, while the uiclient experiments that needed my attention was. This needs complete rework by amh agents"
+pub fn for_channel(flag: bool, subject: &str) -> bool {
+    let subject = subject.trim().to_lowercase();
+    flag || subject.starts_with("sign-in needed") || subject.contains("captcha")
+}
+
 /// Mark `tag`'s task urgent until the human reads message `message` (the Message-ID `tell human` printed).
 pub fn mark(store: &Store, tag: &str, message: &str) -> Result<(), String> {
     let mut marks = load(store);
@@ -126,5 +133,7 @@ mod tests {
         assert!(super::is_urgent(false, "", Some("pb urgent")));
         assert!(super::is_urgent(false, "Sign-in needed: gmail", None));
         assert!(!super::is_urgent(false, "pb news", Some("pb news")));
+        assert!(!super::for_channel(false, "pb urgent"));
+        assert!(super::for_channel(false, "Sign-in needed: gmail") && super::for_channel(true, ""));
     }
 }

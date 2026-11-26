@@ -23,7 +23,7 @@ const OVERVIEW: &str = "What managers need to know:
 What every agent needs to know:
 - When the human messages you, or started you with this prompt, the text you end that turn with is sent to them, unless you ran `amh tell human` in that turn: then your final text is not sent, so anything more for the human needs another `amh tell human`. Answer other agents only with `amh tell`; your final text never goes to them.
 - Any task from the human that you do not finish in your reply is an open item: add it at once with `amh tell human --add 'ITEM'`.
-- `amh tell human --urgent` lifts your task to the top of the human's list until they read the message: only for a real emergency (something breaks or is lost unless the human acts now), never for ordinary news.
+- the urgent Zulip channel (the only one that pushes to the human's phone) is for what the human must do now: `amh todo ask-human` posts each new human item there by itself, so ask for what you are blocked on that way; `amh tell human --urgent` is for a real emergency (something breaks or is lost unless the human acts now), never for news or results.
 - Work logs change only through amh; never edit them directly.";
 
 /// Build the whole command tree.
@@ -77,7 +77,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when `amh` cannot tell who you are"))
                 .arg(Arg::new("subject").long("subject").hide(true).help("ignored: the thread is your task"))
                 .arg(Arg::new("report_label").long("report-label").value_parser(crate::mail::REPORT_LABELS).help("stock_news_watch only: display label/topic; replies retain the actual task owner"))
-                .arg(Arg::new("urgent").long("urgent").action(ArgAction::SetTrue).help("a real emergency only (something breaks or is lost unless the human acts now): your task is listed first in the human's clients until they read this message, and under Zulip it goes to the urgent channel (zulip.urgent_stream), the only one that pushes to the human's phone; amh never refuses it for earlier unread updates. PB urgent reports and sign-in/CAPTCHA notices count as urgent by themselves"))
+                .arg(Arg::new("urgent").long("urgent").action(ArgAction::SetTrue).help("a real emergency only (something breaks or is lost unless the human acts now): your task is listed first in the human's clients until they read this message, and under Zulip it goes to the urgent channel (zulip.urgent_stream), the only one that pushes to the human's phone; amh never refuses it for earlier unread updates. sign-in/CAPTCHA notices count as urgent by themselves; PB reports stay in their own channels"))
                 .arg(Arg::new("email").long("email").action(ArgAction::SetTrue).help("send this one message by email even when human.transport=zulip; Markdown links `[label](url)` show as the label"))
                 .arg(Arg::new("text").value_name("TEXT").conflicts_with("file").help("message body; omit to read standard input"))
                 .arg(Arg::new("file").long("file").help("file holding the message body"))
@@ -138,7 +138,7 @@ pub fn command() -> Command {
                 .arg(Arg::new("clear_for").long("clear-for").action(ArgAction::Append).value_name("ID").help("drop the dependency on item ID, e.g. one added by mistake (repeat for several)"))
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when amh cannot tell who you are"))
             )
-            .subcommand(Command::new("ask-human").about("Give the human an item to do, which you can wait for; prints its ID.").long_about("Give the human an item to do, which you can wait for; prints its ID.\n\nThe item goes on the human's own task `human.md`; the human sees it with `amh human` and resolves it with `amh human --done ID`. Then wait for it: `amh todo wait YOUR_ID --for human.md#N`, or `amh task status TASK blocked --on human.md#N`. It does not message the human; tell the human what you need with `amh tell human`. The task in setting human_items.watcher (default human_mgr.md) is told at once of each new or resolved human item.")
+            .subcommand(Command::new("ask-human").about("Give the human an item to do, which you can wait for; prints its ID.").long_about("Give the human an item to do, which you can wait for; prints its ID.\n\nThe item goes on the human's own task `human.md`; the human sees it with `amh human` and resolves it with `amh human --done ID`. Then wait for it: `amh todo wait YOUR_ID --for human.md#N`, or `amh task status TASK blocked --on human.md#N`. Under Zulip, amh posts it in the urgent channel under your task's topic (the human's reply there comes to you), so write it as one clear thing the human must do. The task in setting human_items.watcher (default human_mgr.md) is told at once of each new or resolved human item.")
                 .arg(Arg::new("text").required(true).value_name("WHAT").help("what the human should do, in plain words"))
                 .arg(Arg::new("task_file").long("task-file").value_name("NAME.md").help("your task file, when amh cannot tell who you are"))
             )
