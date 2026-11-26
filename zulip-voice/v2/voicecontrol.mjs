@@ -21,6 +21,8 @@ const MODE_BANNER_MS = 3500;   // how long the "still listening" bar stays after
 const MODE_PULSE_MS = 5000;   // a session silent this long gets a low double beat, repeated at this interval; input: low then higher (A3, E4); command: two equal low beats (A3)
 EARCON_GAIN.pulseInput = EARCON_GAIN.pulseCommand = 0.35;   // the quiet ones were the ones the human could not hear
 const CHOICE_MS = 20000;
+const LATE_HIT_WAIT_MS = 600;   // the on-device spotter can report a start word up to ~0.5 s after the clip ended; a clip is never judged keyword-less before that
+const EMPTY_GRACE_MS = 3000;
 const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
 const UPLOADS_PER_MIN = 8, EMPTY_RUN_BACKOFF = 3, BACKOFF_MS = 60000;
 /** Mode names as the human reads them (help text and toasts); rename here only. Log keys stay `command mode` etc. */
@@ -62,6 +64,7 @@ export function createVoiceControl(ctx) {
   const SKIP_COUNT_WAIT_MS = 2500;   // 🧑 2026-11-22 "recognize the command quickly. Play an acknowledgement sound ... and then start playing. Instead of flickering around": the sound confirms at once, playback waits for the count (the transcript took ~1.9 s in the log) and moves once   // 🧑 "I don't want the skip command to become slow. Maybe wait for one second"   // how long an on-device "skip" waits for the transcript's count
   let lastLocalNav = null;   // {dir, ms}: a "skip forward/backward" heard on the device; the transcript may add a count
   let startWordUploads = [], emptyRun = 0, backoffUntil = 0;
+  let emptyClosedAt = 0;   // when an empty session last timed out: speech that began within EMPTY_GRACE_MS after it was meant for that session
 
   const choiceOpen = () => !!pendingChoice && Date.now() < pendingChoice.until;
   /** One gate: manual dictation, an open session, an utterance being captured or transcribed, an announcement, an open switch question. No playback starts while it is true. */
@@ -114,6 +117,7 @@ export function createVoiceControl(ctx) {
       if (vc) cancelSession(); else if (pendingChoice) cancelChoice();
     } else if (word === 'POTATO' && commandWord() === 'potato' && !vc && !choiceOpen()) {   // the command word alone enters command mode: no start word first, one sound
       openSession('', true);
+      if (vc) vc.unconfirmed = true;   // the spotter can mistake the start word for this one: the transcript of the clip that opened it decides (handleCommandClip)
       enterCommandMode('');
     } else if (word === 'TOMATO' && vc?.mode === 'command') {
       leaveCommandMode('end word on device');
@@ -186,7 +190,8 @@ export function createVoiceControl(ctx) {
   let clipsInFlight = 0;   // clips whose transcription is still running
   async function onCommandClip(blob, meta = {}) {
     if (ctx.dictating()) return;
-    if (vc) { meta.part = {blob, text: vc.mode === 'command' ? '' : null, fromCommand: vc.mode === 'command'}; (vc.parts ??= []).push(meta.part); }   // kept so a spotted end word can send the audio itself; speech in command mode is never reply text
+    if (!vc && !pendingChoice && kwsSpotter.ready() && kwsEnabled() && Date.now() - lastHitAt > (meta.ms ?? 0) + 1500) { await new Promise(r => setTimeout(r, LATE_HIT_WAIT_MS)); if (ctx.dictating()) return; }   // 🧑 2026-11-26 a start word's hit arrived 0.1 s after its clip was dropped as keyword-less
+    if (vc) { meta.part = {blob, text: vc.mode === 'command' ? '' : null, fromCommand: vc.mode === 'command'}; (vc.parts ??= []).push(meta.part); if (vc.unconfirmed && Date.now() - (meta.ms ?? 0) <= vc.openedAt + 300) { meta.part.opening = true; vc.unconfirmed = false; } }   // kept so a spotted end word can send the audio itself; speech in command mode is never reply text
     clipsInFlight++;
     try { await handleCommandClip(blob, meta); } finally { clipsInFlight--; if (vc && !vc.ending && !vc.timer && !vc.emptyTimer && !recorder.inUtterance()) armSessionTimer(); utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) ctx.maybeAutoplay(); }
   }
@@ -201,7 +206,9 @@ export function createVoiceControl(ctx) {
     if (Date.now() - lastLocalCommandMs < (meta.ms ?? 0) + 800 && lastLocalCommandMs) { log('vc', 'clip already handled on-device: not sent to the server'); if (vc?.parts?.length) vc.parts.at(-1).text ||= ''; if (vc?.mode === 'command') armCommandTimer(); return; }
     log('vc', `clip ${Math.round(meta.ms ?? 0)}ms (${Math.round(meta.speechMs ?? 0)}ms speech) ${vc ? 'in reply' : pendingChoice ? 'for the question' : 'for the start word'}`);
     lat.stage('sw', 'clip-end');
-    if (!vc && !pendingChoice && kwsSpotter.ready() && kwsEnabled() && Date.now() - lastHitAt > (meta.ms ?? 0) + 1500) { log('vc', 'start-word clip with no local keyword: not uploaded'); standby(); return; }   // the on-device spotter hears start words; an upload per noise clip is the biggest source of Zulip calls
+    const graceReopen = !vc && !pendingChoice && !!emptyClosedAt && Date.now() - (meta.ms ?? 0) < emptyClosedAt + EMPTY_GRACE_MS;   // 🧑 2026-11-26 speech 0.7 s after an empty session timed out was dropped: it is uploaded, and counts as the reply
+    if (graceReopen) log('vc', 'speech right after an empty session timed out: uploading it as the reply');
+    if (!vc && !pendingChoice && kwsSpotter.ready() && kwsEnabled() && Date.now() - lastHitAt > (meta.ms ?? 0) + 1500 && !graceReopen) { log('vc', 'start-word clip with no local keyword: not uploaded'); standby(); return; }   // the on-device spotter hears start words; an upload per noise clip is the biggest source of Zulip calls
     if (!vc && !pendingChoice) {
       startWordUploads = startWordUploads.filter(t => Date.now() - t < 60000);
       if (startWordUploads.length >= UPLOADS_PER_MIN || zulip.rateLimitedForMs() > 0) { log('vc', `dropped a clip without uploading (${startWordUploads.length} uploads this minute${zulip.rateLimitedForMs() ? ', Zulip rate limit' : ''})`); recorder.setReplyMode(false); vcIdle(); return; }
@@ -251,18 +258,28 @@ export function createVoiceControl(ctx) {
       if (NEGATIVE_RE.test(w) || CANCEL_RE.test(w)) { pendingChoice = null; closeSessionForChoice(); recorder.beep('cancel'); vcIdle(); ctx.maybeAutoplay(); return; }
       if (!vc) { log('vc', `ignored during the switch question: "${heard}"`); vcIdle(); return; }   // the start word must not open a reply while we wait for the answer
     }
-    if (!vc) { onStandbyTranscript(heard, r); return; }
+    if (!vc) { onStandbyTranscript(heard, r, graceReopen); return; }
     const body = normalize(afterStartWord(heard) ?? heard);   // a clip that begins with the start word (the on-device spotter already opened the session) still holds what follows it
+    if (meta.part?.opening && vc.mode === 'command') {   // 🧑 2026-11-26 the spotter heard POTATO for a start word and every sentence after it was dropped
+      const first = normalize(heard).split(' ')[0] ?? '';
+      if (afterStartWord(heard) !== null && !isCommandWord(first)) {
+        log('vc', `local command word was wrong: the clip says "${heard}"; input mode`);
+        clearTimeout(vc.timer); vc.mode = 'input'; vc.sawCommand = false; meta.part.fromCommand = false; vc.parts.forEach(p => { p.fromCommand = false; });
+        recorder.beep('ready'); setVcState('dictating', 'say your reply');
+        addToSession(heard); return;
+      }
+    }
     if (vc.mode === 'command') {   // COMMAND mode: the closed list only; the end word returns to input, cancel discards
       if (stripResumePhrase(body) !== null && !body.split(' ').filter(Boolean).some(w => CANCEL_RE.test(w))) { leaveCommandMode('end word'); return; }
-      runCommands(body); return;
+      runCommands(body, heard); return;
     }
     if (CANCEL_RE.test(body)) { cancelSession(); return; }   // discards this reply and carries on
     addToSession(heard);
   }
   /** A transcript with no session open: it opens one only after the start word (or the command word, or right after a send). */
-  function onStandbyTranscript(heard, r) {
+  function onStandbyTranscript(heard, r, graceReopen = false) {
     // With server keyword spotting on (r.kws is a list): it must have heard ATTENTION, and Whisper must confirm the standalone word.
+    if (graceReopen && afterStartWord(heard) === null && !isCommandWord(normalize(heard).split(' ')[0] ?? '')) { noteStartResult(true); openSession(heard.trim()); return; }
     const kwsOn = Array.isArray(r.kws) && startWord() === 'attention' && Date.now() - lastReplyEndMs >= FOLLOW_UP_GRACE_MS;   // the server spots "attention" only; a follow-up right after a send needs no start word
     const commandFirst = isCommandWord(normalize(heard).split(' ')[0] ?? '');   // "potato next two": the command word alone starts command mode
     if (kwsOn && !commandFirst && !r.kws.includes('ATTENTION')) { noteStartResult(false); log('vc', `ignored: "${heard}" (keyword spotter did not hear the start word)`); standby(); return; }
@@ -304,7 +321,7 @@ export function createVoiceControl(ctx) {
     armSessionTimer();
   }
   /** Words after the command word, executed in order: "next three back one switch to human manager". Unknown words are ignored; nothing here becomes text. */
-  function runCommands(text) {
+  function runCommands(text, raw = '') {
     const tokens = normalize(text).split(' ').filter(Boolean).filter(t => !isCommandWord(t));
     const done = [];
     const said = [];   // what was done, in words: a bare sound never says which command it was
@@ -327,7 +344,11 @@ export function createVoiceControl(ctx) {
       if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play', 'playing'); navigated = true; ctx.holdPlayback?.(false); ctx.resumeAfterPause(); continue; }
       log('vc', `command mode ignored "${t}"`); tokens.shift(); ignored.push(t);
     }
-    if (!done.length && ignored.length && vc) {   // heard something, understood nothing: say so and show the commands (silence would look like a hang)
+    const kept = raw && vc ? withoutStrayEndWords((afterStartWord(raw) ?? raw).trim()) : '';
+    if (!done.length && ignored.length && vc && kept) {   // 🧑 2026-11-26 "a sentence heard in command mode that isn't a command must not be thrown away": it joins the reply text; "tomato" or silence returns to input mode with it
+      log('vc', `not a command: kept as reply text "${kept}"`); vc.text = [vc.text, kept].filter(Boolean).join(' '); showSessionText();
+      recorder.beep('empty'); toast(`Not a command, kept in your reply: “${kept.slice(0, 80)}”. Say ${resumePhrase()} to go back to input.`); sayAndMute('Not a command. Kept in your reply.');
+    } else if (!done.length && ignored.length && vc) {   // heard something, understood nothing: say so and show the commands (silence would look like a hang)
       const help = 'Commands: next, back, restart, next message, previous message, next agent, switch to NAME, stop, play, cancel.';
       log('vc', `command not recognized: "${ignored.join(' ')}"`); recorder.beep('empty'); toast(`Command not recognized: “${ignored.join(' ')}”. ${help}`); sayAndMute('Command not recognized. Say next, back, switch to, or cancel.');
     }
@@ -451,7 +472,7 @@ export function createVoiceControl(ctx) {
     // sentence over 8 s that began with the start word was cut off as an 'empty' session and its transcript then rejected. The microphone's own view of speech, and a clip still being transcribed, now also hold it open.
     if (utterancePending || recorder.inUtterance() || clipsInFlight) { vc.emptyTimer = setTimeout(closeEmptySession, 2000); return; }   // still talking (the clip's transcript is not back yet): never close mid-speech
     if (untranscribed()) { sendVoiceReplyNow('clips could not be transcribed here'); return; }   // offline: the audio is sent and transcribed by the server later
-    log('vc', 'empty session timed out: resuming');
+    log('vc', 'empty session timed out: resuming'); emptyClosedAt = Date.now();
     vc = null; recorder.setReplyMode(false); recorder.beep('empty');
     player.unlock();
     ctx.resumeAfterPause();
