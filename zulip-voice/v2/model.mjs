@@ -75,8 +75,9 @@ export function createModel({botId, humanId}) {
     /** 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": closed tasks' topics are hidden unless they have unread messages or `keepFn(name)` (the open topic). */
     setClosed(names, keepFn) { closed = new Set(names ?? []); if (keepFn) keep = keepFn; },
     topics() {
+      const tier = t => t.unread > 0 ? (/^(pb-)?urgent · /.test(t.name) ? 0 : 1) : 2;   // unread urgent-channel threads (keys are "channel · topic"), other unread, read
       for (const t of topics.values()) { if (loaded.has(t.name)) t.unread = this.unreadAgentMessages(t.name).length; else if (unreadIds.has(t.name)) t.unread = unreadIds.get(t.name).size; }
-      return this.allTopics().filter(t => !closed.has(t.name) || t.unread > 0 || keep(t.name)).sort((a, b) => (b.unread > 0) - (a.unread > 0));   // 🧑 "clients should sort unread threads above read ones": stable, so each group keeps priority-then-newest
+      return this.allTopics().filter(t => !closed.has(t.name) || t.unread > 0 || keep(t.name)).sort((a, b) => tier(a) - tier(b));   // 🧑 "clients should sort unread threads above read ones": stable, so each group keeps priority-then-newest
     },
     /** Every topic, closed ones too. */
     allTopics() {

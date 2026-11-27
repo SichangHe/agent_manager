@@ -98,6 +98,8 @@ assert.ok(ms > 1000 && ms < 8000, 'wav duration ' + ms);
   m.setTopics([{name: 'a', max_id: 9}, {name: 'b', max_id: 8}, {name: 'c', max_id: 7}, {name: 'd', max_id: 6}], new Map([['c', 1], ['d', 2]]));
   m.setPriorities({b: 1});
   assert.deepEqual(m.topics().map(t => t.name), ['c', 'd', 'b', 'a']);
+  m.setTopics([{name: 'a', max_id: 9}, {name: 'b', max_id: 8}, {name: 'c', max_id: 7}, {name: 'urgent · x', max_id: 1}, {name: 'pb-urgent · y', max_id: 2}, {name: 'urgent · z', max_id: 3}], new Map([['c', 1], ['urgent · x', 1], ['pb-urgent · y', 1]]));
+  assert.deepEqual(m.topics().map(t => t.name), ['pb-urgent · y', 'urgent · x', 'c', 'b', 'a', 'd', 'urgent · z']);
 }
 { // 🧑 "I'm still seeing old threads ... agent switching also gives them as options": closed tasks' topics are hidden unless unread or open
   const m = createModel({botId: 2, humanId: 1});
