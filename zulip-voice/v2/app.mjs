@@ -696,7 +696,18 @@ draftEl.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey 
 draftEl.addEventListener('focus', () => setTimeout(() => { if (atBottom()) feed.scrollTop = feed.scrollHeight; }, 300));
 
 /** Navigation by voice: chunk or whole-message steps, or replay of the current chunk (dir 0). */
-function navigate({dir, whole, count, restart}) {
+/** Plays from the first unread message of the open agent (button and voice). */
+function playFirstUnread() {
+  player.unlock();
+  const m = model.unreadAgentMessages(current).find(x => itemsOf(x).length);
+  if (!m) { toast('No unread messages here'); return; }
+  clearTimeout(burst?.timer); burst = null;
+  log('read', `skip to first unread message ${m.id}`);
+  playFrom(m, 0);
+}
+
+function navigate({dir, whole, count, restart, unread}) {
+  if (unread) { log('vc', 'navigate first unread'); playFirstUnread(); return; }
   log('vc', `navigate ${restart ? 'restart message' : dir > 0 ? 'next' : dir < 0 ? 'previous' : 'again'}${whole ? ' message' : ''} x${count}`);
   player.unlock();
   if (restart) {   // the message being read (or last heard) from its first sentence
@@ -892,6 +903,7 @@ for (const [id, direction] of [['prev', -1], ['next', 1]]) {
   for (const type of ['pointerup', 'pointerleave', 'pointercancel']) button.addEventListener(type, () => clearTimeout(timer));
   button.onclick = () => { if (!held) jump(direction); held = false; };
 }
+$('first-unread').onclick = playFirstUnread;
 $('slower').onclick = () => setRate(rate - 0.1);
 $('faster').onclick = () => setRate(rate + 0.1);
 $('auto').onclick = () => setAutoplay(!autoplay);

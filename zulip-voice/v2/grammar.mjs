@@ -120,6 +120,8 @@ export function navCommand(words) {
   const tokens = words.split(' ').filter(Boolean);
   const whole = tokens.includes('message') || tokens.includes('messages');
   const rest = tokens.filter(t => t !== 'message' && t !== 'messages');
+  // "first unread", "unread", "go to the first unread": jump to the first unread message of this agent
+  if (rest.length && rest.length <= 5 && rest.includes('unread') && rest.every(t => ['first', 'unread', 'go', 'to', 'the', 'skip'].includes(t))) return {dir: 1, whole: true, count: 1, unread: true};
   // 🧑 2026-11-23 "trying to skip to the previous message skipped to the first message": "skip previous message" was split into "skip" (next) and "previous message"; skip + any direction word is one command
   const dirWord = {forward: 1, forwards: 1, ahead: 1, next: 1, backward: -1, backwards: -1, back: -1, previous: -1, last: -1}[rest[1]];
   if (rest[0] === 'skip' && dirWord && rest.length <= 3) { const c = rest.length === 3 ? NUMBERS[rest[2]] : 1; if (c) return {dir: dirWord, whole, count: c}; }

@@ -68,6 +68,8 @@ assert.ok(ms > 1000 && ms < 8000, 'wav duration ' + ms);
   assert.deepEqual(G.navCommand('skip backward two'), {dir: -1, whole: false, count: 2});
   assert.deepEqual(G.navCommand('back back message'), {dir: -1, whole: true, count: 2});
   assert.deepEqual(G.navCommand('skip previous message'), {dir: -1, whole: true, count: 1});   // was split into skip (next) + previous message
+  assert.deepEqual(G.navCommand('first unread'), {dir: 1, whole: true, count: 1, unread: true});
+  assert.deepEqual(G.navCommand('unread'), {dir: 1, whole: true, count: 1, unread: true});
   assert.deepEqual(G.navCommand('skip back'), {dir: -1, whole: false, count: 1});
   assert.deepEqual(G.navCommand('skip next message'), {dir: 1, whole: true, count: 1});
   assert.deepEqual(G.navCommand('again'), {dir: 0, whole: false, count: 1});
