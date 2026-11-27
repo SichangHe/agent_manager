@@ -93,6 +93,12 @@ assert.ok(ms > 1000 && ms < 8000, 'wav duration ' + ms);
   assert.ok(G.commandPhrases(['alpha', 'alpha_beta']).every(p => p.text !== 'switch to alpha'));
   assert.ok(G.similarText('The build finished with two warnings today', 'The build finished with two warnings today!'));
 }
+{ // unread threads sort above read ones; each group keeps priority, then newest
+  const m = createModel({botId: 2, humanId: 1});
+  m.setTopics([{name: 'a', max_id: 9}, {name: 'b', max_id: 8}, {name: 'c', max_id: 7}, {name: 'd', max_id: 6}], new Map([['c', 1], ['d', 2]]));
+  m.setPriorities({b: 1});
+  assert.deepEqual(m.topics().map(t => t.name), ['c', 'd', 'b', 'a']);
+}
 { // 🧑 "I'm still seeing old threads ... agent switching also gives them as options": closed tasks' topics are hidden unless unread or open
   const m = createModel({botId: 2, humanId: 1});
   m.setTopics([{name: 'live', max_id: 3}, {name: 'done_task', max_id: 2}, {name: 'done_unread', max_id: 1}, {name: 'done_open', max_id: 4}], new Map([['done_unread', 1]]));

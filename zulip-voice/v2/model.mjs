@@ -76,7 +76,7 @@ export function createModel({botId, humanId}) {
     setClosed(names, keepFn) { closed = new Set(names ?? []); if (keepFn) keep = keepFn; },
     topics() {
       for (const t of topics.values()) { if (loaded.has(t.name)) t.unread = this.unreadAgentMessages(t.name).length; else if (unreadIds.has(t.name)) t.unread = unreadIds.get(t.name).size; }
-      return this.allTopics().filter(t => !closed.has(t.name) || t.unread > 0 || keep(t.name));
+      return this.allTopics().filter(t => !closed.has(t.name) || t.unread > 0 || keep(t.name)).sort((a, b) => (b.unread > 0) - (a.unread > 0));   // 🧑 "clients should sort unread threads above read ones": stable, so each group keeps priority-then-newest
     },
     /** Every topic, closed ones too. */
     allTopics() {
