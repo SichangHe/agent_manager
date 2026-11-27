@@ -249,8 +249,14 @@ async function onInit(state, isResync) {
   if (cfg.relayStreamId) voice.backfill();
   const unread = new Map(), idsByTopic = new Map();
   await loadChannels();
-  for (const s of state.unread_msgs?.streams ?? []) if (s.stream_id === cfg.streamId || isOurChannel(s.stream_id)) { unread.set(keyFor(s.stream_id, s.topic), s.unread_message_ids.length); idsByTopic.set(keyFor(s.stream_id, s.topic), s.unread_message_ids); }
-  { const unreadIds = new Set(); for (const st of state.unread_msgs?.streams ?? []) for (const id of st.unread_message_ids ?? []) unreadIds.add(id);
+  // the human's own messages are never unread: Zulip lists them as unread when posted through the API without read_by_sender; ids carry no sender, so ask for them when a topic's sender_ids includes the human
+  let own = new Set();
+  if ((state.unread_msgs?.streams ?? []).some(s => s.sender_ids?.includes(cfg.humanId))) {
+    const r = await zulip.call('GET', 'messages', {anchor: 'newest', num_before: 1000, num_after: 0, narrow: [{operator: 'sender', operand: cfg.humanId}, {operator: 'is', operand: 'unread'}], apply_markdown: false});
+    if (r.ok) { own = new Set(r.data.messages.map(m => m.id)); if (own.size) { log('read', `${own.size} of the human's own messages were unread: marking read`); zulip.call('POST', 'messages/flags', {messages: [...own], op: 'add', flag: 'read'}); } }
+  }
+  for (const s of state.unread_msgs?.streams ?? []) if (s.stream_id === cfg.streamId || isOurChannel(s.stream_id)) { const ids = s.unread_message_ids.filter(id => !own.has(id)); unread.set(keyFor(s.stream_id, s.topic), ids.length); idsByTopic.set(keyFor(s.stream_id, s.topic), ids); }
+  { const unreadIds = new Set(); for (const st of state.unread_msgs?.streams ?? []) for (const id of st.unread_message_ids ?? []) if (!own.has(id)) unreadIds.add(id);
     const changed = model.reconcileUnread(unreadIds, m => model.isAgent(m) && !reads.has(m.id));   // cached copies the server no longer lists as unread were read elsewhere
     if (changed.length) log('read', `${changed.length} cached messages were already read on the server`); }
   model.setUnreadIds(idsByTopic);
@@ -300,12 +306,13 @@ function onEvent(event) {
       model.markRead(event.messages);
       reads.forget(event.messages);
       for (const id of event.messages) player.removeFuture(id);
-    } else { model.markUnread(event.messages, Object.fromEntries(Object.entries(event.message_details ?? {}).filter(([, d]) => d.type === 'stream').map(([id, d]) => [id, keyFor(d.stream_id, d.topic)]))); }
+    } else { model.markUnread(event.messages.filter(id => { const m = model.find(id); return !(m && model.isMine(m)); }), Object.fromEntries(Object.entries(event.message_details ?? {}).filter(([, d]) => d.type === 'stream').map(([id, d]) => [id, keyFor(d.stream_id, d.topic)]))); }
     renderUnread();
   }
 }
 
 function onTaskMessage(m) {
+  if (model.isMine(m) && !m.flags?.includes('read')) { m = {...m, flags: [...(m.flags ?? []), 'read']}; zulip.call('POST', 'messages/flags', {messages: [m.id], op: 'add', flag: 'read'}); }   // own messages are never unread
   if (!model.add(m)) return;
   const stick = atBottom();
   if (m.subject === current) {
@@ -822,7 +829,7 @@ async function deliver(l) {
       else { l.state = 'failed'; refreshLocal(l); cue('error'); toast(v.error); }
       return;
     }
-    const r = await zulip.call('POST', 'messages', {type: 'stream', to: streamOf(l.topic), topic: topicOf(l.topic), content: l.text, queue_id: events.queueId() ?? '', local_id: l.localId});
+    const r = await zulip.call('POST', 'messages', {type: 'stream', to: streamOf(l.topic), topic: topicOf(l.topic), content: l.text, read_by_sender: true, queue_id: events.queueId() ?? '', local_id: l.localId});
     if (r.ok) { lat.stage('send:' + l.localId, 'post'); l.state = 'sent'; l.sentId = r.data.id; saveOutbox(); setTimeout(() => { if ((locals.get(l.topic) ?? []).includes(l)) removeLocal(l); }, 4000); l.node?.querySelector('.state')?.replaceChildren(); l.node?.classList.remove('sending'); return; }
     l.uncertain = r.uncertain;
     l.attempts = (l.attempts ?? 0) + 1;
