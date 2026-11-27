@@ -1056,7 +1056,9 @@ fn tell_guest(
             data: fs::read(path).map_err(|error| format!("amh: cannot read {image}: {error}"))?,
         });
     }
-    let to = settings::get(settings, "guest.address");
+    // The reply goes to the guest who sent the email answered.
+    let to = guest::sender_of(&stored, &guest::addresses(settings)).ok_or("amh: no guest address is set")?;
+    let to = to.as_str();
     let draft = Draft {
         from: settings::get(settings, "mail.agent_address"),
         to,

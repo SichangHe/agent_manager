@@ -751,24 +751,24 @@ fn take_in_guest_mail(
     mailbox: &mut Mailbox,
     routed: &BTreeSet<String>,
 ) -> Result<(), IntakeError> {
-    let address = settings::get(settings, "guest.address");
-    if address.is_empty() {
-        return Ok(());
-    }
-    let unseen = mailbox.unseen_from(address);
-    for (uid, raw) in unseen.map_err(IntakeError::Connection)? {
-        if routed.contains(&uid) {
-            continue;
+    let addresses = guest::addresses(settings);
+    let all = addresses.join(", ");
+    for address in &addresses {
+        let unseen = mailbox.unseen_from(address);
+        for (uid, raw) in unseen.map_err(IntakeError::Connection)? {
+            if routed.contains(&uid) {
+                continue;
+            }
+            let mail = mail::parse(&raw);
+            let stored = guest::stored_name(settings, &uid);
+            if !guest::verified(&mail, address) {
+                println!("guest mail uid {uid} rejected: the sender is not verified as {address}");
+            } else {
+                store_guest_mail(settings, store, &all, &mail, &stored)
+                    .map_err(IntakeError::Other)?;
+            }
+            mailbox.mark_read(&uid).map_err(IntakeError::Connection)?;
         }
-        let mail = mail::parse(&raw);
-        let stored = guest::stored_name(settings, &uid);
-        if !guest::verified(&mail, address) {
-            println!("guest mail uid {uid} rejected: the sender is not verified as {address}");
-        } else {
-            store_guest_mail(settings, store, address, &mail, &stored)
-                .map_err(IntakeError::Other)?;
-        }
-        mailbox.mark_read(&uid).map_err(IntakeError::Connection)?;
     }
     Ok(())
 }
