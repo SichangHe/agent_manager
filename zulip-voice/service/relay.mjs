@@ -301,7 +301,7 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
     const first = compose();
     if (discarded) { result.empty = true; result.discarded = discarded; return `discarded (${discarded}), nothing posted`; }
     if (!first) { result.empty = true; return 'empty message, nothing posted'; }
-    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: [taskStreamId, ...extraStreamIds].includes(request.streamId) ? request.streamId : taskStreamId, topic: request.topic, content: first});
+    const sent = await humanApi.call('POST', 'messages', {type: 'stream', to: [taskStreamId, ...extraStreamIds].includes(request.streamId) ? request.streamId : taskStreamId, topic: request.topic, content: first, read_by_sender: true});
     result.messageId = sent.id; result.text = first;
     if (timedOut) settled.then(async () => { const full = compose(); if (full && full !== first) await humanApi.call('PATCH', 'messages/' + sent.id, {content: full}).then(() => console.log(`send ${request.id}: late clips added by edit`), error => console.log('late edit failed: ' + error.message)); });
     const parts = texts;
