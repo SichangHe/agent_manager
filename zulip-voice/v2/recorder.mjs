@@ -8,6 +8,10 @@ const MAX_CLIP_S = 10;
 const PAUSE_MS = 700;
 const REPLY_PAUSE_MS = 1100, REPLY_MAX_CLIP_S = 30;   // a spoken reply (voice control) is cut into fewer, longer clips: fewer uploads and transcriptions
 const LISTEN_PAUSE_MS = 250;   // a start-word clip ends sooner: the command is one short word
+// Input mode (a spoken reply) keeps ONE growing piece instead of cutting at every pause: the recognizer does better with long context.
+// While speaking, the piece so far is re-sent every PIECE_REFRESH_MS (and once when a pause starts) so the text stays live; the piece ends at
+// PIECE_MAX_S (or PIECE_SOFT_S at a pause). Speed measured 2026-11-26: Qwen3-ASR takes about 0.1 s per second of speech, so 15 s is about 1.5 s.
+export const PIECE_MAX_S = 15, PIECE_SOFT_S = 12, PIECE_REFRESH_MS = 3000, PIECE_SILENCE_KEEP_MS = 1500, PIECE_PAUSE_MS = 700;
 const MIN_SPEECH_MS = 250;
 const PREROLL_MS = 300;
 const MIN_LEVEL = 0.008;     // lowered from 0.012 and the margin from 3x to 2.5x: a false trigger is harmless now (the start word gates everything)
@@ -64,14 +68,29 @@ function resampleToWav(frames, fromHz) {
 /** `start()` resolves to `{ok: true}` or `{ok: false, error}`. `onClip(blob, {ms})` per clip, `onLevel(0..1)` ~23 times a second. */
 export const EARCON_NOTES = {ready: [880, 1320], done: [1320, 880], cancel: [1319, 1047, 784], command: [740, 0, 740], tick: [1568], updated: [988, 740, 988], interrupted: [1000, 850, 720, 620], empty: [1100, 0, 1100], error: [1400, 1000, 1400, 1000], limited: [1568, 0, 1568, 0, 1568], pulseInput: [220, 0, 330], pulseCommand: [220, 0, 220]};   // every note is 600-1600 Hz: phone speakers play lower tones too quietly
 
-export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio, onSpeechOnset}) {
+export function createRecorder({log, partialReady = () => true, onClip, onLevel, onBarge, onCommandClip, onEarcon, onKwsAudio, onSpeechOnset}) {
   /** Every change of the iOS audio session type goes through here and is logged (`route ...`): changes make the output volume jump. */
   const setSession = type => { try { if (navigator.audioSession.type !== type) { navigator.audioSession.type = type; log('route', `audioSession.type -> ${type}`); } } catch { /* unsupported */ } };
   let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, speechMuteUntilMs = 0, overPromptFired = false, sustainMs = 0, idleTimer = 0;
   let flowWaiters = [], framesSeen = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
+  let pieceMode = false, pieceId = 0, pieceSeq = 0, emittedSpeechMs = 0, sinceEmitMs = 0, lastEmitSettled = false;
+
+  /** Input mode: sends the piece so far (`final`: it is complete, the next speech starts a new piece). */
+  function emitPiece(final) {
+    const settled = final || silentMs >= PIECE_PAUSE_MS, seq = ++pieceSeq;
+    const blob = resampleToWav(frames, ctx.sampleRate);
+    log('mic', `piece ${pieceId} #${seq}${final ? ' final' : settled ? ' settled' : ''}: ${Math.round(clipMs)}ms audio, ${Math.round(speechMs)}ms speech, ${blob.size}B`);
+    onCommandClip(blob, {ms: clipMs, speechMs, piece: {id: pieceId, seq}, final, settled});
+    emittedSpeechMs = speechMs; sinceEmitMs = 0; lastEmitSettled = settled;
+    if (final) { frames = []; speechMs = silentMs = clipMs = 0; emittedSpeechMs = 0; pieceId++; pieceSeq = 0; lastEmitSettled = false; }
+  }
 
   function cut(final) {
+    if (pieceMode && !capturing) {
+      if (speechMs >= REPLY_MIN_SPEECH_MS) emitPiece(true); else { frames = []; speechMs = silentMs = clipMs = 0; emittedSpeechMs = 0; }
+      return;
+    }
     if (speechMs >= (replyMode ? REPLY_MIN_SPEECH_MS : MIN_SPEECH_MS)) {
       const blob = resampleToWav(frames, ctx.sampleRate);
       clipsOut++;
@@ -114,8 +133,16 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     }
     if (!frames.length && !speaking) { preroll.push(frame); while (preroll.length * ms > PREROLL_MS) preroll.shift(); return; }
     if (!frames.length) { frames = preroll; preroll = []; clipMs = frames.length * ms; }
+    if (speaking) { speechMs += ms; silentMs = 0; if (speechMs - emittedSpeechMs > 0) lastEmitSettled = false; } else silentMs += ms;
+    if (pieceMode && !capturing) {   // one growing piece: a pause does not end it
+      if (speaking || silentMs <= PIECE_SILENCE_KEEP_MS) { frames.push(frame); clipMs += ms; }   // a long silence inside a piece is not kept
+      sinceEmitMs += ms;
+      if (clipMs >= PIECE_MAX_S * 1000 || (clipMs >= PIECE_SOFT_S * 1000 && silentMs >= PIECE_PAUSE_MS)) { cut(false); return; }
+      const grown = speechMs - emittedSpeechMs, pausedNow = silentMs >= PIECE_PAUSE_MS && !lastEmitSettled && speechMs > 0;
+      if (speechMs >= MIN_SPEECH_MS && partialReady() && ((grown >= 300 && sinceEmitMs >= PIECE_REFRESH_MS) || pausedNow)) emitPiece(false);
+      return;
+    }
     frames.push(frame); clipMs += ms;
-    if (speaking) { speechMs += ms; silentMs = 0; } else silentMs += ms;
     if (silentMs >= (replyMode && !capturing ? REPLY_PAUSE_MS : capturing || replyMode ? PAUSE_MS : LISTEN_PAUSE_MS) || clipMs >= (replyMode && !capturing ? REPLY_MAX_CLIP_S : MAX_CLIP_S) * 1000) cut(false);
   }
 
@@ -219,11 +246,17 @@ export function createRecorder({log, onClip, onLevel, onBarge, onCommandClip, on
     /** Cuts the clip in progress right now and hands it over (a spotted end word does not wait for a pause in speech). */
     flush() { if (listening && !capturing && frames.length) { speechMs = Math.max(speechMs, replyMode ? REPLY_MIN_SPEECH_MS : MIN_SPEECH_MS); cut(true); } },
     /** Reply mode lowers the speech thresholds so short words are never dropped. */
-    setReplyMode(on) { replyMode = on; },
+    setReplyMode(on) { replyMode = on; if (!on) pieceMode = false; },
+    /** Input mode: one growing piece (see PIECE_MAX_S). Off in command mode, where each phrase is its own clip. */
+    setPieceMode(on) { pieceMode = on && replyMode; },
+    /** The open piece: `{open, id, speechMs}`. */
+    pieceInfo: () => ({open: pieceMode && frames.length > 0, id: pieceId, speechMs}),
+    /** Throws away the open piece without sending it (its text is already known). */
+    drop() { frames = []; speechMs = silentMs = clipMs = 0; emittedSpeechMs = 0; lastEmitSettled = false; },
     /** Noisy-room mode: higher level and longer duration needed to start a start-word clip. */
     setBackoff(on) { backoff = on; },
     /** True while an utterance is being recorded (speech since the last clip cut): the user is talking right now. */
-    inUtterance: () => frames.length > 0,
+    inUtterance: () => frames.length > 0 && (!pieceMode || silentMs < PIECE_PAUSE_MS),   // a piece stays open through pauses: only recent speech counts
     active: () => capturing,
     /** True while the microphone stream is open (dictation or voice control). */
     micOpen: () => !!ctx,

@@ -24,6 +24,7 @@ const CHOICE_MS = 20000;
 const LATE_HIT_WAIT_MS = 600;   // the on-device spotter can report a start word up to ~0.5 s after the clip ended; a clip is never judged keyword-less before that
 const EMPTY_GRACE_MS = 3000;
 const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
+const PIECE_MAX_CALLS_PER_MIN = 110;   // live refreshes of the growing piece stop when Zulip calls this minute pass this (Zulip allows ~200)
 const UPLOADS_PER_MIN = 8, EMPTY_RUN_BACKOFF = 3, BACKOFF_MS = 60000;
 /** Mode names as the human reads them (help text and toasts); rename here only. Log keys stay `command mode` etc. */
 const MODE_NAMES = {standby: 'standby', input: 'input', command: 'command'};
@@ -71,6 +72,11 @@ export function createVoiceControl(ctx) {
   const userSpeaking = () => ctx.dictating() || !!vc || utterancePending || Date.now() < announcingUntil || choiceOpen();
   const utteranceDone = () => { utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) ctx.maybeAutoplay(); };
   const setDraft = text => { draft.value = text; ctx.autosize(); };
+  const joinText = (...xs) => xs.filter(Boolean).join(' ');
+  /** The reply text: text appended whole (`fixed`) plus every piece's latest transcript in speaking order. */
+  const recompute = () => { vc.text = joinText(vc.fixed, ...[...vc.pieces].sort((a, b) => a[0] - b[0]).map(([, e]) => e.text)); };
+  const appendText = t => { vc.fixed = joinText(vc.fixed, t); recompute(); };
+  const setPiece = (id, t) => { const e = vc.pieces.get(id); if (e) e.text = t; recompute(); showSessionText(); };
   const showSessionText = () => setDraft([vc.base.trim(), vc.text].filter(Boolean).join(' '));
 
   // 🧑 "maybe the user would not understand that the beats. Are. Indicating that they are still in a certain mode, so maybe we should also add. Visual indicators in case they freak out."
@@ -91,7 +97,7 @@ export function createVoiceControl(ctx) {
   const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
 
   const recorder = createRecorder({
-    log, onClip: ctx.onClip, onLevel: ctx.onLevel, onBarge, onCommandClip,
+    log, partialReady: () => !pieceBusy && !zulip.rateLimitedForMs() && zulip.callsLastMinute() < PIECE_MAX_CALLS_PER_MIN, onClip: ctx.onClip, onLevel: ctx.onLevel, onBarge, onCommandClip,
     onSpeechOnset: () => { lastVoiceMs = Date.now(); if (!kwsSpotter.ready()) return; for (const w of kwsSpotter.restart(0.6)) onKwsHit(w); if (vc?.mode === 'command' || choiceOpen()) for (const tag of kwsSpotter.restartCommands(0.6)) onCommandHit(tag); },
     onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); if (vc?.mode === 'command' || choiceOpen()) for (const tag of kwsSpotter.feedCommands(samples)) onCommandHit(tag); },
     onEarcon: kind => { lastPulseMs = Date.now(); player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S, EARCON_GAIN[kind] ?? 0.45); try { navigator.vibrate?.(kind === 'cancel' ? [60, 40, 60] : 0); } catch { /* unsupported (iOS) */ } if (lastHitAt && Date.now() - lastHitAt < 1500) log('lat', `local hit -> ${kind} sound started in ${Date.now() - lastHitAt}ms`); },
@@ -192,13 +198,15 @@ export function createVoiceControl(ctx) {
     if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
     setVcState('heard', 'hearing you');
   }
+  let pieceBusy = false;   // a refresh of the growing piece is being transcribed: the next one waits for it
   let clipsInFlight = 0;   // clips whose transcription is still running
   async function onCommandClip(blob, meta = {}) {
     if (ctx.dictating()) return;
     if (!vc && !pendingChoice && kwsSpotter.ready() && kwsEnabled() && Date.now() - lastHitAt > (meta.ms ?? 0) + 1500) { await new Promise(r => setTimeout(r, LATE_HIT_WAIT_MS)); if (ctx.dictating()) return; }   // 🧑 2026-11-26 a start word's hit arrived 0.1 s after its clip was dropped as keyword-less
-    if (vc) { meta.part = {blob, text: vc.mode === 'command' ? '' : null, fromCommand: vc.mode === 'command'}; (vc.parts ??= []).push(meta.part); if (vc.unconfirmed && Date.now() - (meta.ms ?? 0) <= vc.openedAt + 300) { meta.part.opening = true; vc.unconfirmed = false; } }   // kept so a spotted end word can send the audio itself; speech in command mode is never reply text
-    clipsInFlight++;
-    try { await handleCommandClip(blob, meta); } finally { clipsInFlight--; if (vc && !vc.ending && !vc.timer && !vc.emptyTimer && !recorder.inUtterance()) armSessionTimer(); utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) ctx.maybeAutoplay(); }
+    if (vc && meta.piece) { const e = vc.pieces.get(meta.piece.id) ?? (vc.pieces.set(meta.piece.id, {text: '', part: {blob, text: null, fromCommand: false, piece: meta.piece.id, applied: 0}}), vc.pieces.get(meta.piece.id)); if (!(vc.parts ??= []).includes(e.part)) vc.parts.push(e.part); Object.assign(e.part, {blob, seq: meta.piece.seq}); if (meta.final) e.part.text = null; meta.part = e.part; }   // one part per piece: each refresh replaces its audio and makes its text stale until the new transcript arrives
+    else if (vc) { meta.part = {blob, text: vc.mode === 'command' ? '' : null, fromCommand: vc.mode === 'command'}; (vc.parts ??= []).push(meta.part); if (vc.unconfirmed && Date.now() - (meta.ms ?? 0) <= vc.openedAt + 300) { meta.part.opening = true; vc.unconfirmed = false; } }   // kept so a spotted end word can send the audio itself; speech in command mode is never reply text
+    clipsInFlight++; if (meta.piece && !meta.final) pieceBusy = true;
+    try { await handleCommandClip(blob, meta); } finally { clipsInFlight--; if (meta.piece) pieceBusy = false; if (vc && !vc.ending && !vc.timer && !vc.emptyTimer && !recorder.inUtterance()) armSessionTimer(); utterancePending = false; clearTimeout(utteranceTimer); if (!userSpeaking()) ctx.maybeAutoplay(); }
   }
   /** Every start-word clip costs a Zulip upload plus messages: cap them, and back off in a noisy room instead of exhausting the rate limit. */
   function noteStartResult(useful) {
@@ -208,7 +216,8 @@ export function createVoiceControl(ctx) {
   /** Not a start word: back to standby. */
   const standby = () => { recorder.setReplyMode(false); resumeBarge(); vcIdle(); };
   async function handleCommandClip(blob, meta) {
-    if (Date.now() - lastLocalCommandMs < (meta.ms ?? 0) + 800 && lastLocalCommandMs) { log('vc', 'clip already handled on-device: not sent to the server'); if (vc?.parts?.length) vc.parts.at(-1).text ||= ''; if (vc?.mode === 'command') armCommandTimer(); return; }
+    if (meta.part?.sentAway) return;   // the reply was already sent: this clip needs no transcript
+    if (!meta.piece && Date.now() - lastLocalCommandMs < (meta.ms ?? 0) + 800 && lastLocalCommandMs) { log('vc', 'clip already handled on-device: not sent to the server'); if (vc?.parts?.length) vc.parts.at(-1).text ||= ''; if (vc?.mode === 'command') armCommandTimer(); return; }
     log('vc', `clip ${Math.round(meta.ms ?? 0)}ms (${Math.round(meta.speechMs ?? 0)}ms speech) ${vc ? 'in reply' : pendingChoice ? 'for the question' : 'for the start word'}`);
     lat.stage('sw', 'clip-end');
     const graceReopen = !vc && !pendingChoice && !!emptyClosedAt && Date.now() - (meta.ms ?? 0) < emptyClosedAt + EMPTY_GRACE_MS;   // 🧑 2026-11-26 speech 0.7 s after an empty session timed out was dropped: it is uploaded, and counts as the reply
@@ -229,6 +238,7 @@ export function createVoiceControl(ctx) {
       const retry = await voice.stt(blob, undefined, true);
       if (retry.ok) r = retry;
     }
+    if (!r.ok && meta.piece && !meta.final) { log('vc', `piece refresh failed: ${r.error}`); return; }   // a refresh is only a preview; the final piece goes out as audio if it fails too
     if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
       log('vc', `stt failed: ${r.error}`);
       if (vc?.mode === 'command') {   // 🧑 command mode with no connection gave zero feedback: say what still works (the on-device words), at most every 6 s
@@ -237,14 +247,16 @@ export function createVoiceControl(ctx) {
       if (vc) armSessionTimer();
       resumeBarge(); vcIdle(); return;
     }
+    if (meta.piece && (!vc || !vc.parts?.includes(meta.part))) return;   // the session it belonged to has ended (sent or cancelled)
     let heard = r.text.trim();
     { const w = heard.split(/\s+/).filter(Boolean); if (w.length >= 2 && removeControlWords(removeControlWords(w, 'tomato'), 'attention').length === 0 && w.some(x => soundsLike('tomato', [x])) && w.some(x => soundsLike('attention', [x]))) { log('vc', `dropped "${heard}": only control words, an echo of noise`); heard = ''; } }
-    if (meta.part) { if (meta.part.sentAway) return; meta.part.text = heard; }   // already sent from the audio: nothing more to do with this transcript
+    if (meta.part) { if (meta.part.sentAway) return; if (meta.piece) { if (meta.piece.seq < meta.part.applied) return; meta.part.applied = meta.piece.seq; if (meta.piece.seq === meta.part.seq) meta.part.text = heard; } else meta.part.text = heard; }   // an older refresh never overwrites a newer one   // already sent from the audio: nothing more to do with this transcript
     lat.stage('sw', 'stt-roundtrip', `relay q${r.timings?.queueMs ?? '?'} w${r.timings?.workMs ?? '?'} lag${r.timings?.eventLagMs ?? '?'}`);
     log('vc', `heard "${heard}" (speech ${Math.round(meta.speechMs ?? 0)}ms, no_speech ${r.noSpeechProb?.toFixed(2)}, logprob ${r.avgLogprob?.toFixed(2)})`);
     if (!listening && normalize(heard) && ((meta.speechMs ?? 1e9) < START_MIN_SPEECH_MS || r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB)) {
       log('vc', 'rejected as noise: too short or low confidence'); standby(); return;
     }
+    if (!normalize(heard) && meta.piece && vc) { setPiece(meta.piece.id, ''); if (vc.mode !== 'command') armSessionTimer(); vcIdle(); return; }
     if (!normalize(heard)) { if (!vc) { noteStartResult(false); recorder.setReplyMode(false); resumeBarge(); } else armSessionTimer(); vcIdle(); return; }   // noise must not cancel the end-of-reply timer for good
     if (lastLocalNav) {   // "skip forward three": the device heard the skip and waits for this transcript's count
       const said = normalize(afterStartWord(heard) ?? heard).replace(new RegExp(`^${commandWord()}\\s+`), ''), nav = navCommand(said), d = lastLocalNav.dir;
@@ -279,7 +291,7 @@ export function createVoiceControl(ctx) {
       runCommands(body, heard); return;
     }
     if (CANCEL_RE.test(body)) { cancelSession(); return; }   // discards this reply and carries on
-    addToSession(heard);
+    addToSession(heard, meta.piece);
   }
   /** A transcript with no session open: it opens one only after the start word (or the command word, or right after a send). */
   function onStandbyTranscript(heard, r, graceReopen = false) {
@@ -309,6 +321,7 @@ export function createVoiceControl(ctx) {
     if (!vc) return;
     clearTimeout(vc.timer); clearTimeout(vc.emptyTimer);
     const first = vc.mode !== 'command';
+    recorder.setPieceMode(false); recorder.flush();
     vc.mode = 'command'; vc.sawCommand = true;
     if (first) { armLocalCommands(); recorder.beep('command'); log('vc', 'command mode'); log('lat', `command mode ready ${Math.round(Date.now() - (vc.openedAt ?? Date.now()))}ms after the session opened`); }
     setVcState('command', MODE_NAMES.command + ' mode');
@@ -321,7 +334,7 @@ export function createVoiceControl(ctx) {
   function leaveCommandMode(why) {
     if (!vc || vc.mode !== 'command') return;
     if (why === 'silence' && !vc.text.trim()) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); log('vc', 'command mode left (silence) with nothing dictated: standby'); setDraft(vc.base); vc = null; recorder.setReplyMode(false); recorder.beep('done'); ctx.resumeAfterPause(); vcIdle(); return; }   // 🧑 an unrecognized command must not end in input mode
-    clearTimeout(vc.timer); vc.mode = 'input'; log('vc', `command mode left (${why}); back to input`);
+    clearTimeout(vc.timer); vc.mode = 'input'; recorder.setPieceMode(true); log('vc', `command mode left (${why}); back to input`);
     recorder.beep('ready'); setVcState('dictating', 'say your reply');
     armSessionTimer();
   }
@@ -351,7 +364,7 @@ export function createVoiceControl(ctx) {
     }
     const kept = raw && vc ? withoutStrayEndWords((afterStartWord(raw) ?? raw).trim()) : '';
     if (!done.length && ignored.length && vc && kept) {   // 🧑 2026-11-26 "a sentence heard in command mode that isn't a command must not be thrown away": it joins the reply text; "tomato" or silence returns to input mode with it
-      log('vc', `not a command: kept as reply text "${kept}"`); vc.text = [vc.text, kept].filter(Boolean).join(' '); showSessionText();
+      log('vc', `not a command: kept as reply text "${kept}"`); appendText(kept); showSessionText();
       recorder.beep('empty'); toast(`Not a command, kept in your reply: “${kept.slice(0, 80)}”. Say ${resumePhrase()} to go back to input.`); sayAndMute('Not a command. Kept in your reply.');
     } else if (!done.length && ignored.length && vc) {   // heard something, understood nothing: say so and show the commands (silence would look like a hang)
       const help = 'Commands: next, back, restart, next message, previous message, first unread, next agent, switch to NAME, stop, play, cancel.';
@@ -424,8 +437,8 @@ export function createVoiceControl(ctx) {
     bargePaused = false;
     if (['playing', 'loading'].includes(player.position().status)) player.pause();
     lat.finish('sw', 'pause-applied');
-    vc = {base: draft.value, text: '', timer: 0, emptyTimer: 0, openedAt: Date.now()};
-    recorder.setReplyMode(true);
+    vc = {base: draft.value, text: '', fixed: '', pieces: new Map(), timer: 0, emptyTimer: 0, openedAt: Date.now()};
+    recorder.setReplyMode(true); recorder.setPieceMode(!quiet);   // input mode: one growing piece instead of a clip per pause
     if (!quiet) recorder.beep('ready');   // quiet: the command sound follows
     log('vc', `session opened by start word; rest "${rest}"`);
     if (CANCEL_RE.test(normalize(rest))) { log('vc', 'cancel right after the start word'); vc = null; recorder.setReplyMode(false); recorder.beep('cancel'); ctx.resumeAfterPause(); vcIdle(); return; }
@@ -441,22 +454,21 @@ export function createVoiceControl(ctx) {
     ctx.resumeAfterPause(); vcIdle();
   }
   const withoutStrayEndWords = t => removeControlWords(t.split(/\s+/).filter(Boolean)).join(' ');   // "Tomato." said mid-reply is a command, never text
-  function addToSession(heard) {
+  function addToSession(heard, piece = null) {
     if (hasCancel(heard, cancelWord())) { cancelSession(); return; }   // the rare cancel word fires wherever it is said
     const words = (afterStartWord(heard) ?? heard).split(/\s+/).filter(Boolean), at = words.findIndex(isCommandWord);
     if (at >= 0 && vc && vc.mode !== 'command') {   // in input mode the command word is not a command
       log('vc', 'command word inside dictation: ignored, not a mode switch'); words.splice(at, 1); heard = words.join(' ');
-      if (!heard.trim()) { armSessionTimer(); return; }
+      if (!heard.trim()) { if (piece) setPiece(piece.id, ''); armSessionTimer(); return; }
     } else if (at >= 0 && vc) {   // in command mode: what precedes the command word is reply text, what follows is commands
       const before = words.slice(0, at).join(' ');
-      if (before) { vc.text = [vc.text, withoutStrayEndWords(before)].filter(Boolean).join(' '); showSessionText(); }
+      if (before) { appendText(withoutStrayEndWords(before)); showSessionText(); }
       enterCommandMode(words.slice(at + 1).join(' ')); return;
     }
     if (endsCancel(heard, cancelWord())) { cancelSession(); return; }   // "... cancel" at the end of any utterance cancels the whole reply
     clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
-    if (stripResumePhrase(heard) !== null && !vc.sending) { vc.text = [vc.text, (afterStartWord(heard) ?? heard).trim()].filter(Boolean).join(' '); showSessionText(); sendVoiceReplyNow('end word in the transcript'); return; }   // no quiet window
-    vc.text = [vc.text, withoutStrayEndWords((afterStartWord(heard) ?? heard).trim())].filter(Boolean).join(' ');
-    showSessionText();
+    if (stripResumePhrase(heard) !== null && !vc.sending) { const t = (afterStartWord(heard) ?? heard).trim(); if (piece) setPiece(piece.id, t); else { appendText(t); showSessionText(); } recorder.drop(); sendVoiceReplyNow('end word in the transcript'); return; }   // what follows the end word is dropped with the open piece   // no quiet window
+    { const t = withoutStrayEndWords((afterStartWord(heard) ?? heard).trim()); if (piece) setPiece(piece.id, t); else { appendText(t); showSessionText(); } }
     setVcState('dictating', 'dictating reply');
     armSessionTimer();
   }
@@ -489,10 +501,12 @@ export function createVoiceControl(ctx) {
     reply.ending = true;
     recorder.flush();   // hands the last clip to onCommandClip, which records it in reply.parts
     clearTimeout(reply.timer); clearTimeout(reply.emptyTimer);
-    if (why.includes('on device')) { const w = reply.text.trim().split(/\s+/); if (w.length && looksLikeClippedEndWord(w.at(-1))) { log('vc', `dropped the clipped end word "${w.at(-1)}"`); reply.text = w.slice(0, -1).join(' '); } }
+    // A piece whose newest audio has no transcript yet goes as audio (its older preview text is not trusted); finished text goes as text.
+    let ready = joinText(reply.fixed, ...[...reply.pieces].sort((a, b) => a[0] - b[0]).filter(([, e]) => e.part.text !== null).map(([, e]) => e.text));
+    if (why.includes('on device')) { const w = ready.trim().split(/\s+/); if (w.length && looksLikeClippedEndWord(w.at(-1))) { log('vc', `dropped the clipped end word "${w.at(-1)}"`); ready = w.slice(0, -1).join(' '); } }
     const items = [];
     if (reply.base.trim()) items.push({text: reply.base.trim()});
-    if (reply.text.trim()) items.push({text: reply.text.trim()});   // everything already transcribed, in arrival order
+    if (ready.trim()) items.push({text: ready.trim()});   // everything already transcribed, in speaking order
     for (const p of reply.parts ?? []) { p.sentAway = true; if (p.text === null && !reply.sawCommand) items.push({blob: p.blob}); }   // clips still waiting for text go as audio (the relay joins them); after a command word the audio may hold commands: only text is trusted
     vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();
     log('vc', `${why}: sending now (${items.filter(i => i.blob).length} clips for the server to transcribe)`);
@@ -501,7 +515,7 @@ export function createVoiceControl(ctx) {
       if (asm.discard || !asm.text) { log('vc', `reply not sent (${asm.why ?? 'only control words'})`); setDraft(reply.base); ctx.saveDraft(); recorder.beep('cancel'); ctx.resumeAfterPause(); vcIdle(); return; }
     }
     recorder.beep('done');
-    ctx.sendLocal(reply.text || '…', items);
+    ctx.sendLocal(ready || reply.text || '…', items);
     setDraft(''); ctx.saveDraft();
     setVcState('sending', 'sending');
     player.unlock(); ctx.resumeAfterPause(); vcIdle();
@@ -510,7 +524,9 @@ export function createVoiceControl(ctx) {
   function finishVcReply() {
     if (!vc || vc.ending) return;
     if (recorder.inUtterance()) { clearTimeout(vc.timer); vc.timer = setTimeout(finishVcReply, 1500); log('vc', 'end timer fired while you were still speaking: waiting'); return; }   // 🧑 "A buggy early stop, although I did not say the terminal word": the timer armed by an earlier transcript fired in the middle of a long clip   // a timer re-armed while a send was waiting for clips must not fire on a closed session
+    if (pieceBusy) { clearTimeout(vc.timer); vc.timer = setTimeout(finishVcReply, 400); return; }   // the last refresh of the piece is still being transcribed
     if (untranscribed()) { sendVoiceReplyNow('clips still untranscribed'); return; }
+    recorder.drop();   // the piece's text is complete; its audio is not needed
     const reply = vc, asm = assembleReply([stripResumePhrase(reply.text) ?? reply.text], {cancelWord: cancelWord(), commandWord: commandWord()}), stripped = asm.text;   // same rules as the relay: a cancel word discards it all, command speech and keywords are never text
     if (asm.discard || !stripped) log('vc', `reply not sent (${asm.why ?? 'only control words'}): "${reply.text}"`);
     vc = null; recorder.setReplyMode(false); lastReplyEndMs = Date.now();

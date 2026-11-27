@@ -125,3 +125,12 @@ latency
   - the server keyword gate stays as the fallback when the model cannot load (the energy detector plus Whisper path)
   - the npm wasm build targets Node: `build.mjs` patches two lines (no raw-fs guard) and `kws-shim.js` supplies `require("path")`; assets go to `kws-<hash>/`
   - build inputs: `npm install` in `v2/`, and the model files in `research-kws/sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01/`
+
+input mode pieces (voice control reply, 2026-11-26)
+- 🧑 "you cut. The input into too many pieces. That is just unnecessary ... much longer pieces ... Basically, we need the end to end latency to be small"
+- a spoken reply is one growing piece, not a clip per pause: pauses do not end it; it ends at 15 s (or at a pause after 12 s); then the next piece starts
+- while speaking, the whole piece so far is re-uploaded every 3 s (and once when a pause begins) and its transcript replaces the piece's text (older results never overwrite newer ones)
+- refreshes wait for the previous one, and stop when Zulip calls this minute pass 110 or the account is rate limited; the final piece always goes
+- measured (Qwen3-ASR-0.6B, GPU 1, port 8771): about 0.1 s per second of speech at 15 s (1.5 s for 15.1 s of audio), 4.1 s for 27.7 s, 5.6 s for 42.8 s, 6.9 s for 70 s
+- end word: the open piece goes as audio if its newest text is not back yet (the relay transcribes it), otherwise as text; text after the end word is dropped
+- command mode keeps one clip per phrase; `recorder.setPieceMode`
