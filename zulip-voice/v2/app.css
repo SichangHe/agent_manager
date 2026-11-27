@@ -200,3 +200,6 @@ html.picker-open, html.picker-open body { position: fixed; inset: 0; width: 100%
 #picker .sheet { flex-direction: column-reverse; }
 #picker #topics { display: flex; flex-direction: column-reverse; }
 #picker #topics li { flex-shrink: 0; }
+
+.msg.flash-unread { animation: flash-unread 1.6s ease-out; }
+@keyframes flash-unread { 0%, 40% { background: var(--hl); } 100% { background: transparent; } }

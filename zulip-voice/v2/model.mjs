@@ -25,6 +25,7 @@ export function createModel({botId, humanId}) {
   const byTopic = new Map();
   const topics = new Map(); let priorities = {}, closed = new Set(), keep = () => false;
   const loaded = new Set();
+  const unreadIds = new Map();   // topic -> ids the server listed as unread at registration, kept current by flag events (counts for topics whose history is not loaded)
   const isAgent = m => m.sender_id === botId;
   const topicInfo = name => { let t = topics.get(name); if (!t) { t = {name, maxId: 0, unread: 0}; topics.set(name, t); } return t; };
 
@@ -49,10 +50,12 @@ export function createModel({botId, humanId}) {
     agentMessages(topic) { return this.messages(topic).filter(m => isAgent(m) && !m.local); },
     unreadAgentMessages(topic) { return this.agentMessages(topic).filter(m => !m.flags?.includes('read')); },
     /** The server says `ids` are unread (read elsewhere then unread again, or a stale cache): they lose the read flag. */
-    markUnread(ids) { for (const map of byTopic.values()) for (const id of ids) { const m = map.get(id); if (m?.flags?.includes('read')) m.flags = m.flags.filter(f => f !== 'read'); } },
+    markUnread(ids, topicOf = {}) { for (const id of ids) { const t = topicOf[id] ?? this.find(id)?.subject; if (t !== undefined && unreadIds.has(t)) unreadIds.get(t).add(id); }
+      for (const map of byTopic.values()) for (const id of ids) { const m = map.get(id); if (m?.flags?.includes('read')) m.flags = m.flags.filter(f => f !== 'read'); } },
     /** Marks every cached message of ours that the server no longer lists as unread as read. Returns the ids changed. */
     reconcileUnread(unreadIds, mine) { const out = []; for (const map of byTopic.values()) for (const m of map.values()) if (mine(m) && !m.flags?.includes('read') && !unreadIds.has(m.id) && !m.local) { m.flags = [...(m.flags ?? []), 'read']; out.push(m.id); } return out; },
     markRead(ids) {
+      for (const set of unreadIds.values()) for (const id of ids) set.delete(id);
       for (const map of byTopic.values()) for (const id of ids) {
         const m = map.get(id);
         if (m && !m.flags?.includes('read')) m.flags = [...(m.flags ?? []), 'read'];
@@ -65,12 +68,14 @@ export function createModel({botId, humanId}) {
       for (const {name, max_id} of list) { const t = topicInfo(name); t.maxId = Math.max(t.maxId, max_id); }
       for (const t of topics.values()) t.unread = unreadByTopic.get(t.name) ?? 0;
     },
+    /** Registration's unread ids per topic; later flag events keep them current. */
+    setUnreadIds(map) { unreadIds.clear(); for (const [t, ids] of map) unreadIds.set(t, new Set(ids)); },
     /** Human-manager priorities (topic -> number or null; lower = first, unset last). */
     setPriorities(map) { priorities = map ?? {}; },
     /** 🧑 "I'm still seeing old threads on the web interface, and agent switching also gives them as options": closed tasks' topics are hidden unless they have unread messages or `keepFn(name)` (the open topic). */
     setClosed(names, keepFn) { closed = new Set(names ?? []); if (keepFn) keep = keepFn; },
     topics() {
-      for (const t of topics.values()) if (loaded.has(t.name)) t.unread = this.unreadAgentMessages(t.name).length;
+      for (const t of topics.values()) { if (loaded.has(t.name)) t.unread = this.unreadAgentMessages(t.name).length; else if (unreadIds.has(t.name)) t.unread = unreadIds.get(t.name).size; }
       return this.allTopics().filter(t => !closed.has(t.name) || t.unread > 0 || keep(t.name));
     },
     /** Every topic, closed ones too. */

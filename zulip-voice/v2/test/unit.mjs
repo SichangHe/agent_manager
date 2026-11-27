@@ -138,3 +138,11 @@ console.log('unit ok');
   const from = src.indexOf('export async function createRelay'), inner = src.slice(from, src.indexOf('\n}\n', from));   // the function body only: startup code after it may use process
   assert.equal(/\bprocess\.(env|argv|exit|cwd|platform)\b/.test(inner.replace(/globalThis\.process\./g, '')), false, 'use globalThis.process inside createRelay: a local function named `process` shadows it');
 }
+{ // unloaded topics' unread counts follow flag events
+  const m = createModel({botId: 2, humanId: 1});
+  m.setTopics([{name: 'a', max_id: 9}], new Map([['a', 2]]));
+  m.setUnreadIds(new Map([['a', [5, 6]]]));
+  assert.equal(m.topics()[0].unread, 2);
+  m.markRead([5]); assert.equal(m.topics()[0].unread, 1);
+  m.markUnread([7], {7: 'a'}); assert.equal(m.topics()[0].unread, 2);
+}
