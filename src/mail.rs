@@ -312,15 +312,20 @@ pub fn parse(raw: &[u8]) -> Parsed {
         .find(|part| matches!(part.body, PartType::Text(_)))
         .or_else(|| texts().next())
         .and_then(|part| part.text_contents());
+    // QQ Mail sends photos as application/octet-stream named "图片1.jpg": an attachment counts as an image by its type or, failing that, its file name.
+    // 🧑 "Guest handling is broken" (the guest's medicine photos were dropped)
     let images = message.parts.iter().filter_map(|part| {
-        let kind = part.content_type()?;
-        kind.ctype()
-            .eq_ignore_ascii_case("image")
-            .then(|| Attached {
-                name: part.attachment_name().unwrap_or_default().to_owned(),
-                kind: format!("image/{}", kind.subtype().unwrap_or_default()).to_ascii_lowercase(),
-                data: part.contents().to_vec(),
-            })
+        let name = part.attachment_name().unwrap_or_default();
+        let typed = part
+            .content_type()
+            .filter(|kind| kind.ctype().eq_ignore_ascii_case("image"))
+            .map(|kind| format!("image/{}", kind.subtype().unwrap_or_default()).to_ascii_lowercase());
+        let kind = typed.or_else(|| image_kind_of_name(name))?;
+        Some(Attached {
+            name: name.to_owned(),
+            kind,
+            data: part.contents().to_vec(),
+        })
     });
     Parsed {
         sender: sender.unwrap_or_default().to_owned(),
@@ -332,6 +337,19 @@ pub fn parse(raw: &[u8]) -> Parsed {
         body: body.unwrap_or_default().to_owned(),
         images: images.collect(),
     }
+}
+
+/// The image type a file name's extension names, if it names one.
+fn image_kind_of_name(name: &str) -> Option<String> {
+    let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
+    let kind = match extension.as_str() {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        _ => return None,
+    };
+    Some(kind.to_owned())
 }
 
 /// The header naming which agent sent an email from the shared agent account.
@@ -978,6 +996,14 @@ mod tests {
             reply_to: reply_to.to_owned(),
             references: references.to_owned(),
         })
+    }
+
+    #[test]
+    fn a_photo_sent_as_octet_stream_is_kept_by_its_name() {
+        let raw = "From: g@qq.com\r\nSubject: x\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=\"b\"\r\n\r\n--b\r\nContent-Type: text/plain\r\n\r\nhi\r\n--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"=?utf-8?B?5Zu+54mHMS5qcGc=?=\"\r\nContent-Transfer-Encoding: base64\r\n\r\nAAEC\r\n--b\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=\"notes.pdf\"\r\n\r\nx\r\n--b--\r\n";
+        let mail = parse(raw.as_bytes());
+        let images: Vec<_> = mail.images.iter().map(|i| (i.name.as_str(), i.kind.as_str(), i.data.clone())).collect();
+        assert_eq!(images, [("图片1.jpg", "image/jpeg", vec![0u8, 1, 2])]);
     }
 
     #[test]
