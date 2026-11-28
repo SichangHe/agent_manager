@@ -29,6 +29,8 @@ import torch
 from faster_whisper import WhisperModel
 from kokoro import KPipeline
 
+import zh_g2p
+
 KWS_THRESHOLD = 0.25   # measured in research-kws: 12/12 "pause" clips hit, 0/3 noise
 KWS_MODEL = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 MAX_AUDIO_BYTES = 12 * 1024 * 1024
@@ -67,6 +69,10 @@ class Speech:
             self.tts_zh = KPipeline(
                 lang_code="z", repo_id="hexgrad/Kokoro-82M", device=self.device, model=self.tts.model
             )
+            if ZH_G2P == "fix":
+                # 🧑 "the Text to speech model you are using for Chinese seems bad. It breaks up sentences poorly and pronounces characters that have multiple different pronunciation. Incorrectly,"
+                zh_g2p.load()
+                self.tts_zh.g2p = zh_g2p.g2p
             self.speak("中文已就绪。")
             self.speak("Speech is ready. Please choose your conversation.")
         elif self.engine == "qwen3":
@@ -89,11 +95,14 @@ class Speech:
         chunks = []
         for chinese, run in split_chinese(strip_quotes(text)):
             pipeline, voice = (self.tts_zh, ZH_VOICE) if chinese else (self.tts, "af_heart")
-            for result in pipeline(run, voice=voice):
-                if result.audio is not None:
-                    chunks.append(trim_silence(result.audio.cpu().numpy()))
-            # Kokoro pads each run with ~0.4 s lead and ~0.5-1 s tail silence; trimmed, a small pause remains.
-            chunks.append(np.zeros(RUN_PAUSE_SAMPLES, dtype=np.float32))
+            # "fix": one Kokoro call per clause so 。！？；：，、 each get their own pause (Kokoro itself cuts only at ASCII .!?)
+            parts = zh_g2p.clauses(run) if chinese and ZH_G2P == "fix" else [(run, 0)]
+            for part, pause_ms in parts:
+                for result in pipeline(part, voice=voice):
+                    if result.audio is not None:
+                        chunks.append(trim_silence(result.audio.cpu().numpy()))
+                # Kokoro pads each run with ~0.4 s lead and ~0.5-1 s tail silence; trimmed, a small pause remains.
+                chunks.append(np.zeros(RUN_PAUSE_SAMPLES + SAMPLE_RATE_HZ * pause_ms // 1000, dtype=np.float32))
         if chunks:
             chunks.pop()
         if not chunks:
@@ -231,6 +240,8 @@ class Speech:
 
 
 ZH_VOICE = os.environ.get("VOICE_ZH_VOICE", "zf_xiaoxiao")
+# "fix": zh_g2p.py (polyphones, tone sandhi, clause pauses); "legacy": misaki's default zh G2P and Kokoro's own chunking
+ZH_G2P = os.environ.get("VOICE_ZH_G2P", "fix")
 RUN_PAUSE_SAMPLES = SAMPLE_RATE_HZ * 3 // 100  # 30 ms (+10 ms lead, +60 ms tail kept = ~110 ms) between runs
 SILENCE_LEVEL = 0.01
 EDGE_KEEP_SAMPLES = SAMPLE_RATE_HZ // 100  # 10 ms kept at each trimmed edge
