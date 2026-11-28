@@ -93,23 +93,23 @@ const TRIM_EVERY: Duration = Duration::from_secs(10);
 
 /// Keep idle memory small: few glibc arenas (each thread otherwise gets its own, up to 64 MB each, kept after use), and freed memory returned by `trim`.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn limit_arenas() {
+pub fn limit_arenas() {
     // SAFETY: plain allocator setting, called before the daemon starts its threads.
     unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn limit_arenas() {}
+pub fn limit_arenas() {}
 
 /// Give freed heap memory back to the system.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn trim() {
+pub fn trim() {
     // SAFETY: no preconditions.
     unsafe { libc::malloc_trim(0) };
 }
 
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-fn trim() {}
+pub fn trim() {}
 
 /// Serve until killed; returns an exit status only when the daemon cannot start.
 pub fn run() -> u8 {

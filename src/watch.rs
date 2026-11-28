@@ -2080,6 +2080,8 @@ pub fn run() -> u8 {
             log(&format!("task scan failed: {error}"));
         }
         drop(_busy);
+        // Lab machines run the watcher without amhd, so it returns freed memory itself.
+        crate::daemon::trim();
         let timeout = MAIL_POLL;
         match &wake {
             Some(socket) => {

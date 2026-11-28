@@ -1103,7 +1103,10 @@ pub fn run(values: &Value) -> Result<u8, String> {
     }
     match action {
         ("agent", "view") => return Err(view::open(need("who"), flag("read_only"))),
-        ("manager", "watch") => return Ok(watch::run()),
+        ("manager", "watch") => {
+            crate::daemon::limit_arenas();
+            return Ok(watch::run());
+        }
         ("quota", "serve") => return Ok(crate::quota_observer::serve(flag("live"))),
         _ => {}
     }
