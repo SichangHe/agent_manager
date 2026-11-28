@@ -108,7 +108,17 @@ pub fn trim() {
     unsafe { libc::malloc_trim(0) };
 }
 
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+/// On a Mac, ask every malloc zone to give back the memory it can.
+#[cfg(target_os = "macos")]
+pub fn trim() {
+    unsafe extern "C" {
+        fn malloc_zone_pressure_relief(zone: *mut libc::c_void, goal: libc::size_t) -> libc::size_t;
+    }
+    // SAFETY: a null zone means all zones; goal 0 means as much as possible.
+    unsafe { malloc_zone_pressure_relief(std::ptr::null_mut(), 0) };
+}
+
+#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
 pub fn trim() {}
 
 /// Serve until killed; returns an exit status only when the daemon cannot start.
