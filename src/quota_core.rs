@@ -574,6 +574,23 @@ pub fn forget_pre_redemption(readings: &mut [Reading], redeemed: &BTreeMap<Strin
     }
 }
 
+/// The previous state of a just-redeemed account is equally stale: without this its old `exhausted` status is carried forward and keeps it at the lowest priority.
+pub fn forget_pre_redemption_buckets(
+    prev: &[Bucket],
+    redeemed: &BTreeMap<String, i64>,
+) -> Vec<Bucket> {
+    prev.iter()
+        .filter(|b| {
+            !b.creds.iter().any(|c| {
+                redeemed
+                    .get(c)
+                    .is_some_and(|t| b.observed_at.is_none_or(|at| at < *t))
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 /// The journaled steps of one redemption episode, oldest first.
 pub fn journal_steps<'a>(journal: &'a [Value], episode: &str) -> Vec<&'a str> {
     journal

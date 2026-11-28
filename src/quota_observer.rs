@@ -644,7 +644,8 @@ pub fn cycle(
         Err(e) => return Err(format!("cannot read the snapshot: {e}")),
     };
     let mut readings = core::parse_auth_files(&answer, now);
-    core::forget_pre_redemption(&mut readings, &core::redeemed_at(&files.journal()?));
+    let redeemed = core::redeemed_at(&files.journal()?);
+    core::forget_pre_redemption(&mut readings, &redeemed);
     if readings.is_empty() {
         return Err("the proxy listed no Claude or Codex credentials".to_owned());
     }
@@ -667,7 +668,11 @@ pub fn cycle(
         .filter(|r| !denied.contains(&r.name) && (!r.disabled || ours.contains(&r.name)))
         .cloned()
         .collect();
-    let (buckets, stepped) = core::step(&prev.buckets, &eligible, now);
+    let (buckets, stepped) = core::step(
+        &core::forget_pre_redemption_buckets(&prev.buckets, &redeemed),
+        &eligible,
+        now,
+    );
     events.extend(stepped);
     let mut acts = core::proxy_actions(&buckets, &readings, &denied, &ours);
     // The keys rank above every subscription only late in the month; a failed read leaves them as they are.
