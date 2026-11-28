@@ -1,6 +1,6 @@
 /** DOM builders for messages and agent rows. No state. */
 import {t} from './i18n.mjs';
-import {inlineHtml, extractAttachments} from './text.mjs';
+import {inlineHtml, extractAttachments, ATT_MARK} from './text.mjs';
 import {parsed} from './model.mjs';
 
 const el = (tag, className, html) => { const e = document.createElement(tag); if (className) e.className = className; if (html !== undefined) e.innerHTML = html; return e; };
@@ -31,6 +31,7 @@ export function agentEl(message, getUrl) {
       }
       return;
     }
+    if (block.kind === 'att') { const a = p.attachments[block.n]; if (a) body.append(attachmentsEl([a], getUrl)); return; }   // the image sits where its link was
     if (block.kind === 'code') { const pre = el('pre'); pre.append(textEl('code', '', block.text)); body.append(pre); return; }
     const node = el(block.kind === 'h' ? 'h4' : 'p', block.kind === 'li' ? 'li' : '');
     if (block.kind === 'li') node.prepend('• ');
@@ -53,7 +54,6 @@ export function agentEl(message, getUrl) {
     const text = textEl('div', 'footer-text', p.footers.join('\n'));
     box.append(chip, text); root.append(box);
   }
-  if (p.attachments.length) root.append(attachmentsEl(p.attachments, getUrl));
   const mark = textEl('button', 'mark-read', t('msg.markRead')); mark.type = 'button'; mark.dataset.markRead = message.id; root.append(mark);   // shown only while unread (CSS): clears the dot without playing
   setUnread(root, !message.flags?.includes('read'));
   return root;
@@ -117,9 +117,17 @@ export const setUnread = (root, unread) => root.classList.toggle('unread', unrea
 /** The human's message bubble; `state` is `sent`, `sending` or `failed`. */
 export function mineEl(text, state, handlers, getUrl) {
   const root = el('article', `msg mine ${state === 'sent' ? '' : state === 'queued' ? 'sending' : state}`);
-  const {text: plain, attachments} = extractAttachments(text);
-  if (plain.trim() || !attachments.length) root.append(textEl('div', 'bubble', plain.trim()));
-  if (attachments.length && getUrl) root.append(attachmentsEl(attachments, getUrl));
+  const {text: marked, attachments} = extractAttachments(text, true);
+  if (!attachments.length || !getUrl) { const plain = extractAttachments(text).text.trim(); if (plain || !attachments.length) root.append(textEl('div', 'bubble', plain)); }
+  else {   // text pieces and previews in message order
+    let pending = [];
+    const flush = () => { const s = pending.join('\n').trim(); pending = []; if (s) root.append(textEl('div', 'bubble', s)); };
+    for (const line of marked.split('\n')) {
+      const m = ATT_MARK.exec(line.trim());
+      if (m) { flush(); root.append(attachmentsEl([attachments[+m[1]]], getUrl)); } else pending.push(line);
+    }
+    flush();
+  }
   const note = el('div', 'state');
   if (state === 'sending') note.textContent = t('out.sending');
   if (state === 'queued') note.textContent = t('out.queued');

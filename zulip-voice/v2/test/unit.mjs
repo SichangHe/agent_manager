@@ -170,3 +170,10 @@ assert.equal(afterStartWord('Attention. 你好', 'attention'), '你好');
 assert.equal(afterStartWord('你好', 'attention'), null);
 
 { const {pieceSchedule} = await import('../recorder.mjs'); assert.deepEqual(pieceSchedule(100), {maxS: 10, softS: 8, refreshMs: 5000}); assert.equal(pieceSchedule(50).maxS, 20); assert.equal(pieceSchedule(400).maxS, 6, 'a slow server gets shorter pieces, never under 6 s'); assert.equal(pieceSchedule(10).maxS, 20, 'capped'); }
+
+{ // attachments keep their place in the text; never spoken
+  const {messageChunks: mc} = await import('../text.mjs');
+  const bl = mc(att.body).blocks.map(b => b.kind);
+  assert.deepEqual(bl, ['p', 'att', 'p'], 'image between the sentences: ' + bl);
+  assert.ok(!mc(att.body).chunks.some(c => //.test(c.speech) || c.block === 1));
+}
