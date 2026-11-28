@@ -515,6 +515,16 @@ fn take_in_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
             }
             None => body,
         };
+        // The human's message in the thread of a task on another machine goes there through the agents' channel.
+        let tag = crate::mail::tag_of(&subject).map(crate::zulip::task_topic).unwrap_or_default();
+        if !report && !tag.is_empty() && crate::remote::thread_elsewhere(settings, store, tag)? {
+            let text = format!("Human (verbatim), in their Zulip thread {tag}:\n{body}");
+            let posted = crate::remote::post(settings, tag, &text)?;
+            log(&format!("Zulip {id} -> {tag} on another machine (agents' channel {posted})"));
+            cursor = id;
+            store.set_record("amh-zulip-cursor.txt", &cursor.to_string())?;
+            continue;
+        }
         let name = format!("zulip-{id}.txt");
         let stored = store.root.join("manager_mail").join(&name);
         {

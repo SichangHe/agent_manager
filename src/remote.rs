@@ -55,3 +55,28 @@ pub fn post(settings: &Settings, topic: &str, text: &str) -> Result<u64, String>
     let stream = stream(settings).ok_or("zulip.agent_stream is not set")?;
     crate::zulip::post(settings, stream, topic, text)
 }
+
+/// Whether the human's thread `tag` belongs to a task on another machine: this machine has no such task,
+/// and agents here already sent to it through the agents' channel (a post under topic `tag`).
+// 🧑 (via main_manager.md) the human wrote in the mac_main_manager thread, "but amh found no task for that thread and sent it to me (fix that routing)"
+pub fn thread_elsewhere(settings: &Settings, store: &crate::store::Store, tag: &str) -> Result<bool, String> {
+    let Some(stream) = stream(settings) else {
+        return Ok(false);
+    };
+    if store.contains(&format!("{tag}.md"))? {
+        return Ok(false);
+    }
+    let narrow = serde_json::json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":tag}]);
+    let found = crate::zulip::api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", "newest".to_owned()),
+            ("num_before", "1".to_owned()),
+            ("num_after", "0".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    Ok(found["messages"].as_array().is_some_and(|messages| !messages.is_empty()))
+}
