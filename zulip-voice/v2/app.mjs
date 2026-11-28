@@ -427,8 +427,10 @@ let pausedItem = null;
 // 🧑 "I need a way to pause the. Play, so I can think": a spoken pause holds until "resume"/"play" or until something plays again; ending a voice session no longer undoes it.
 let userHold = false;
 function holdPlayback(on) { userHold = on; log('app', on ? 'playback held by pause' : 'playback hold released'); }
+const PLAY_QUIET_MS = 800;
 function resumeAfterPause() {
   if (userHold) { log('app', 'held by pause: not resuming'); return; }
+  if (vctl.sessionOpen() || vctl.userSpeaking() || vctl.micQuietMs() < PLAY_QUIET_MS) { clearTimeout(resumeAfterPause.t); resumeAfterPause.t = setTimeout(resumeAfterPause, 250); return; }   // 🧑 playback began over the human's speech: it starts only after the mic has been quiet
   { const wait = vctl.soundLeftMs?.() ?? 0; if (wait > 0 && wait < 3000) { clearTimeout(resumeAfterPause.t); resumeAfterPause.t = setTimeout(resumeAfterPause, wait + 60); return; } }   // let a chime finish first
   player.unlock(); setFollow(true); if (nowMsgId !== null) scrollToNow();
   const st = player.position().status;
@@ -446,6 +448,7 @@ function resumeAfterPause() {
 function maybeAutoplay() {
   { const wait = vctl.soundLeftMs?.() ?? 0; if (wait > 0 && wait < 3000) { clearTimeout(maybeAutoplay.t); maybeAutoplay.t = setTimeout(maybeAutoplay, wait + 60); return; } }   // a chime (e.g. cancel) is still playing: reading starts after it, never over it
   if (replacementWait) return;
+  if (autoplay && current && player.position().status === 'idle' && !vctl.userSpeaking() && vctl.micQuietMs() < PLAY_QUIET_MS) { clearTimeout(maybeAutoplay.t); maybeAutoplay.t = setTimeout(maybeAutoplay, 250); return; }
   if (!autoplay || !current || vctl.userSpeaking() || player.position().status !== 'idle') return;   // never start speech while the user speaks
   // Forward only: anything older than the newest read message counts as read and is never played again.
   const newestRead = model.agentMessages(current).filter(m => m.flags?.includes('read')).at(-1);

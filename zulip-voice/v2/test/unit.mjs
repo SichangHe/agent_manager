@@ -154,3 +154,11 @@ console.log('unit ok');
   m.markRead([5]); assert.equal(m.topics()[0].unread, 1);
   m.markUnread([7], {7: 'a'}); assert.equal(m.topics()[0].unread, 2);
 }
+
+{ // playback never starts over the human's speech (source-level guards; behaviour is covered by e2e)
+  const {readFileSync} = await import('node:fs');
+  const app = readFileSync(new URL('../app.mjs', import.meta.url), 'utf8'), vc = readFileSync(new URL('../voicecontrol.mjs', import.meta.url), 'utf8');
+  assert.match(app, /function resumeAfterPause\(\) \{[^]*?vctl\.sessionOpen\(\)[^]*?micQuietMs\(\) < PLAY_QUIET_MS/);
+  assert.match(app, /function maybeAutoplay\(\) \{[^]*?micQuietMs\(\) < PLAY_QUIET_MS/);
+  assert.match(vc, /END_WORD_CHECK_MS[^]*?quietMs\(\) < END_WORD_QUIET_MS[^]*?speech continues/);
+}

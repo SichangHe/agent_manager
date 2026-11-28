@@ -73,6 +73,7 @@ export function createRecorder({log, partialReady = () => true, onClip, onLevel,
   const setSession = type => { try { if (navigator.audioSession.type !== type) { navigator.audioSession.type = type; log('route', `audioSession.type -> ${type}`); } } catch { /* unsupported */ } };
   let epoch = 0, ctx = null, stream = null, node = null, sourceNode = null, warm = null, capturing = false, listening = false, replyMode = false, backoff = false, earconUntilMs = 0, speechMuteUntilMs = 0, overPromptFired = false, sustainMs = 0, idleTimer = 0;
   let flowWaiters = [], framesSeen = 0;
+  let lastSpeechAt = 0;
   let frames = [], preroll = [], speechMs = 0, silentMs = 0, clipMs = 0, noise = 0.004, clipsOut = 0;
   let pieceMode = false, pieceId = 0, pieceSeq = 0, emittedSpeechMs = 0, sinceEmitMs = 0, lastEmitSettled = false;
 
@@ -116,7 +117,7 @@ export function createRecorder({log, partialReady = () => true, onClip, onLevel,
     for (let i = 0; i < frame.length; i++) sum += frame[i] * frame[i];
     const level = Math.sqrt(sum / frame.length);
     const speaking = level > Math.max(MIN_LEVEL, noise * (backoff ? BACKOFF_MARGIN : NOISE_MARGIN));
-    if (!speaking) noise = noise * 0.98 + level * 0.02;
+    if (!speaking) noise = noise * 0.98 + level * 0.02; else lastSpeechAt = performance.now();
     onLevel?.(Math.min(1, level * 8));
     if (!capturing && !frames.length) {   // voice control: only sustained speech (not echo blips) barges in
       if (performance.now() < earconUntilMs) {   // our own chime or prompt must not count as speech: no barge-in, no clip
@@ -257,6 +258,8 @@ export function createRecorder({log, partialReady = () => true, onClip, onLevel,
     setBackoff(on) { backoff = on; },
     /** True while an utterance is being recorded (speech since the last clip cut): the user is talking right now. */
     inUtterance: () => frames.length > 0 && (!pieceMode || silentMs < PIECE_PAUSE_MS),   // a piece stays open through pauses: only recent speech counts
+    /** ms since the microphone last heard speech (Infinity when the mic is off): playback starts only after a quiet spell. */
+    quietMs: () => (!ctx || (!capturing && !listening)) ? Infinity : performance.now() - lastSpeechAt,
     active: () => capturing,
     /** True while the microphone stream is open (dictation or voice control). */
     micOpen: () => !!ctx,
