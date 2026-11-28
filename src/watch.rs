@@ -744,6 +744,38 @@ fn store_guest_mail(
     store.receive_mail(&key, &task).map(|_| ())
 }
 
+/// Take in the guests' posts in their Zulip channels (`guest.zulip_streams`) as guest items, like their emails.
+// 🧑 "They will need their own. Account. On Zulip. ... And hook them up to this setup."
+fn take_in_guest_zulip(settings: &Settings, store: &Store) -> Result<(), String> {
+    let all = guest::addresses(settings).join(", ");
+    for stream in crate::zulip::guest_streams(settings) {
+        let key = format!("amh-zulip-guest-cursor-{stream}.txt");
+        let mut cursor = store.record(&key)?.trim().parse::<u64>().unwrap_or(0);
+        for post in crate::zulip::guest_posts(settings, &stream, cursor)? {
+            let id = post["id"].as_u64().ok_or("Zulip message has no ID")?;
+            let content = post["content"].as_str().unwrap_or_default();
+            let images = crate::zulip::uploads(settings, content)
+                .into_iter()
+                .filter_map(|(name, data)| {
+                    Some(mail::Attached { kind: mail::image_kind_of_name(&name)?, name, data })
+                })
+                .collect();
+            let parsed = mail::Parsed {
+                sender: format!("zulip:{stream}"),
+                message_id: format!("zulip:{id}"),
+                subject: post["subject"].as_str().unwrap_or_default().to_owned(),
+                body: content.to_owned(),
+                images,
+                ..mail::Parsed::default()
+            };
+            store_guest_mail(settings, store, &all, &parsed, &guest::stored_name(settings, &format!("z{id}")))?;
+            cursor = id;
+            store.set_record(&key, &cursor.to_string())?;
+        }
+    }
+    Ok(())
+}
+
 /// Take in each new guest email; one whose sender is not verified is dropped.
 fn take_in_guest_mail(
     settings: &Settings,
@@ -1828,6 +1860,12 @@ fn zulip_once(settings: &Settings, store: &Store) -> Duration {
         && let Err(error) = take_in_zulip(settings, store)
     {
         log(&format!("Zulip intake failed: {error}"));
+    }
+    if crate::zulip::enabled(settings)
+        && crate::remote::is_main(settings)
+        && let Err(error) = take_in_guest_zulip(settings, store)
+    {
+        log(&format!("guest Zulip intake failed: {error}"));
     }
     if crate::zulip::enabled(settings)
         && let Err(error) = take_in_agent_posts(settings, store)

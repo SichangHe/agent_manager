@@ -168,6 +168,7 @@ modules
     - permission prompts: once a minute a `stuck` agent's permission prompts are answered yes and its manager is told
 - guest mailbox (`src/guest.rs`, pure; the watcher takes the mail in, `src/actions.rs` sends the answer)
     - 🧑 "1935618556@qq.com Watch emails from this address too, another guest, and make sure to email back to the same address": `guest.address` lists several guests, separated by commas; all go to the one guest agent, each stored email keeps its `From:`, and `amh tell guest` replies to that sender (an email stored without `From:` goes to the first address)
+    - 🧑 "They will need their own. Account. On Zulip. And. You need to use their. Email to Bootstrap": `guest.zulip_streams` names the guests' private channels; posts there (not the bot's or the human's) become guest items like emails, with linked uploads saved as images, stored with `From: zulip:CHANNEL`; `amh tell guest` answers in that channel and topic (no images yet)
     - mail whose `From` is exactly one of `guest.address` and whose first `Authentication-Results` has `spf=pass` and `smtp.mailfrom=` that address is stored under `guest_NAME_manager_mail/` with its thread headers and up to 4 images of 10 MB each; other mail from that address is marked read and dropped
     - a dedicated agent (task `guest_NAME.md`, NAME from `guest.name`) is started under the main manager or reused; the email becomes its open item and a `(pending)` block
     - it answers with `amh tell guest`, which sends to the guest alone on the thread of the stored email

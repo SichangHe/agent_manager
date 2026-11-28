@@ -340,7 +340,7 @@ pub fn parse(raw: &[u8]) -> Parsed {
 }
 
 /// The image type a file name's extension names, if it names one.
-fn image_kind_of_name(name: &str) -> Option<String> {
+pub fn image_kind_of_name(name: &str) -> Option<String> {
     let extension = name.rsplit_once('.')?.1.to_ascii_lowercase();
     let kind = match extension.as_str() {
         "jpg" | "jpeg" => "image/jpeg",

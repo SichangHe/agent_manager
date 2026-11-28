@@ -37,6 +37,89 @@ pub(crate) fn credentials(settings: &Settings) -> Result<Settings, String> {
     Ok(values)
 }
 
+/// The guests' private channels (`guest.zulip_streams`, comma-separated): what guests post there goes to the guest agent, and `amh tell guest` answers there.
+// 🧑 "They will need their own. Account. On Zulip. And. You need to use their. Email to Bootstrap. The whole process."
+pub fn guest_streams(settings: &Settings) -> Vec<String> {
+    settings::get(settings, "guest.zulip_streams")
+        .split(',')
+        .map(|name| name.trim().to_owned())
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Posts in `stream` after `cursor` by anyone but this bot, oldest first.
+pub fn guest_posts(settings: &Settings, stream: &str, cursor: u64) -> Result<Vec<Value>, String> {
+    let bot = api(settings, "GET", "users/me", &[])?["user_id"].as_u64().ok_or("Zulip profile has no user ID")?;
+    let narrow = json!([{"operator":"stream","operand":stream}]);
+    let result = api(
+        settings,
+        "GET",
+        "messages",
+        &[
+            ("anchor", cursor.to_string()),
+            ("num_before", "0".to_owned()),
+            ("num_after", "100".to_owned()),
+            ("include_anchor", "false".to_owned()),
+            ("apply_markdown", "false".to_owned()),
+            ("narrow", narrow.to_string()),
+        ],
+    )?;
+    Ok(result["messages"]
+        .as_array()
+        .ok_or("Zulip response has no messages")?
+        .iter()
+        // The human's own posts there are not the guest's.
+        .filter(|message| {
+            let sender = message["sender_id"].as_u64();
+            sender != Some(bot) && sender.map(|id| id.to_string()).as_deref() != Some(settings::get(settings, "zulip.human_id"))
+        })
+        .cloned()
+        .collect())
+}
+
+/// Post `content` in `stream` under `topic`; returns `zulip:ID`.
+pub fn post_in(settings: &Settings, stream: &str, topic: &str, content: &str) -> Result<String, String> {
+    let sent = api(
+        settings,
+        "POST",
+        "messages",
+        &[
+            ("type", "stream".to_owned()),
+            ("to", stream.to_owned()),
+            ("topic", topic.to_owned()),
+            ("content", content.to_owned()),
+        ],
+    )?;
+    Ok(format!("zulip:{}", sent["id"].as_u64().ok_or("Zulip send has no ID")?))
+}
+
+/// The uploads a Zulip message links to (`/user_uploads/...`), as (file name, bytes); one that cannot be fetched is skipped.
+pub fn uploads(settings: &Settings, content: &str) -> Vec<(String, Vec<u8>)> {
+    let Ok(values) = credentials(settings) else { return Vec::new() };
+    let site = settings::get(&values, "ZULIP_SITE").trim_end_matches('/').to_owned();
+    let auth = STANDARD.encode(format!(
+        "{}:{}",
+        settings::get(&values, "ZULIP_BOT_EMAIL"),
+        settings::get(&values, "ZULIP_BOT_API_KEY")
+    ));
+    let mut found = Vec::new();
+    for piece in content.split("](/user_uploads/").skip(1) {
+        let Some(path) = piece.split(')').next() else { continue };
+        let name = path.rsplit('/').next().unwrap_or_default().to_owned();
+        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
+        let fetched = agent
+            .get(&format!("{site}/user_uploads/{path}"))
+            .header("Authorization", &format!("Basic {auth}"))
+            .call()
+            .ok()
+            .and_then(|mut response| response.body_mut().with_config().limit(10 << 20).read_to_vec().ok());
+        if let Some(bytes) = fetched {
+            found.push((name, bytes));
+        }
+    }
+    found
+}
+
 pub(crate) fn api(
     settings: &Settings,
     method: &str,

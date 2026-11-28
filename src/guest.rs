@@ -72,6 +72,14 @@ pub fn sender_of(stored: &str, known: &[String]) -> Option<String> {
         .cloned()
 }
 
+/// Where a stored guest post from Zulip came from: (channel, topic), from its `From: zulip:CHANNEL` and `Subject:` lines; `None` for an email.
+pub fn zulip_origin(stored: &str) -> Option<(String, String)> {
+    let head = stored.split("\n\n").next().unwrap_or_default();
+    let field = |name: &str| head.lines().find_map(|line| line.strip_prefix(name)).map(|v| v.trim().to_owned());
+    let stream = field("From: zulip:")?;
+    Some((stream, field("Subject: ").unwrap_or_default()))
+}
+
 /// The standing goal of the guest agent.
 pub fn goal(address: &str) -> String {
     format!(
@@ -301,6 +309,8 @@ mod tests {
         assert_eq!(sender_of("From: B@qq.com\nSubject: x\n\nhi", &known).as_deref(), Some("b@qq.com"));
         assert_eq!(sender_of("Message-ID: <1>\n\nhi", &known).as_deref(), Some("a@qq.com"));
         assert_eq!(sender_of("From: evil@x.org\n\nhi", &known).as_deref(), Some("a@qq.com"));
+        assert_eq!(zulip_origin("From: zulip:guest-a\nSubject: 胃\n\nhi"), Some(("guest-a".to_owned(), "胃".to_owned())));
+        assert_eq!(zulip_origin("From: a@qq.com\nSubject: x\n\nhi"), None);
     }
 
     #[test]

@@ -1046,6 +1046,14 @@ fn tell_guest(
     let name = Path::new(mail_name).file_name().unwrap_or_default();
     let stored = read(&store.root.join(guest::mail_dir(settings)).join(name))?;
     let plan = guest::reply_plan(&stored, &body)?;
+    // A guest post from Zulip is answered in its channel and topic.
+    if let Some((stream, topic)) = guest::zulip_origin(&stored) {
+        if !images.is_empty() {
+            return Err("amh: images in Zulip answers to guests are not supported yet; describe them in words".to_owned());
+        }
+        let id = crate::zulip::post_in(settings, &stream, &topic, &body).map_err(|error| format!("amh: {error}"))?;
+        return Ok(format!("Posted to the guest in Zulip channel {stream}.\nMessage-ID: {id}\n"));
+    }
     let mut attachments = Vec::new();
     for image in images {
         let path = Path::new(image);
