@@ -4,7 +4,11 @@
 
 one program for agents and managers; usage lives in `amh --help`, not here
 - 🧑 standing rule: "in the future. Agents must guarantee that we always stay efficient, at least for CPU and memory."
-    - after a change to the daemon or watcher, check its CPU and memory once it runs live; idle amhd uses a few % of one core
+    - after a change to the daemon or watcher, check its CPU and memory once it runs live
+    - 🧑 "Try to make amh take <2% CPU and <20MB RAM at full idle so we have no problem deploying it everywhere across our machines."
+        - full idle measured on an empty machine: a daemon with `AMH_STATE_DIR` and `AMH_CFG_DIR` pointing to a temporary copy, an empty `work_logs`, and `zulip.main_bot` set to another bot so it is not the main machine: 0.16% CPU, 14.5 MB RSS (Nov 28)
+        - memory: glibc gives each thread its own arena (up to 64 MB) and keeps freed memory; `daemon::limit_arenas` caps them at 2 and `daemon::trim` returns free memory every 10 s (RSS 550 MB -> ~40 MB on the main machine)
+        - Zulip calls share one HTTP client (`zulip::http`), so TLS connections are reused
     - amhd logs each minute how many export passes ran and where their time went (`amhd: export:` in `amhd.log`)
     - a write to the database is a commit, and commits wake the exporter: an export pass must not write when nothing changed, or it wakes itself forever (the Nov 24 full-core bug)
 - 🧑 "do a port and replace things part by part ... at the beginning use py03 to call everything and only have the Rust part do command line parsing ... Test in production"
