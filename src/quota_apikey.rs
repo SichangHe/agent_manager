@@ -95,7 +95,13 @@ pub struct KeyUse {
     /// The monthly limit, from `quota.apikey.<name>.monthly_usd` (preferred) or `.monthly_tokens`: neither the proxy nor the Anthropic API exposes it.
     pub limit: Option<f64>,
     pub resets_at: i64,
+    /// When the key's newest request failed with a client error (e.g. Anthropic's "Your credit balance is too low"), within `FAIL_HOLD_H`: the key is held back so requests do not try it first.
+    pub failing_since: Option<i64>,
 }
+
+/// How long a key whose newest request failed with a client error stays held before amh lets the proxy try it first again.
+// 🧑 "each Claude request first fails on a key and falls back to a subscription, about 1 s slower." / "That is insane. Why on earth would you do that"
+pub const FAIL_HOLD_H: i64 = 6;
 
 /// The first instant of the next UTC month.
 pub fn month_end(now: i64) -> i64 {
@@ -134,7 +140,7 @@ impl KeyUse {
     /// Held at `HELD_PRIORITY` until the last `late_days` of the month, then one above the best subscription rank (`top`) while quota is left, so it is used first and nothing expires unused.
     pub fn want_priority(&self, now: i64, top: i64, late_days: f64) -> i64 {
         let late = self.hours_left(now) <= late_days * 24.0;
-        if late && self.left().is_none_or(|left| left > 0.0) {
+        if late && self.failing_since.is_none() && self.left().is_none_or(|left| left > 0.0) {
             top + 1
         } else {
             HELD_PRIORITY
@@ -143,7 +149,7 @@ impl KeyUse {
 
     pub fn to_json(&self) -> Value {
         json!({"name": self.name, "index": self.index, "auth_index": self.auth_index, "priority": self.priority,
-            "used": self.used, "usd": self.usd, "unpriced": self.unpriced, "burn_per_h": self.burn_per_h, "limit": self.limit, "resets_at": self.resets_at})
+            "used": self.used, "usd": self.usd, "unpriced": self.unpriced, "burn_per_h": self.burn_per_h, "limit": self.limit, "resets_at": self.resets_at, "failing_since": self.failing_since})
     }
 
     pub fn from_json(v: &Value) -> Option<Self> {
@@ -165,6 +171,7 @@ impl KeyUse {
             burn_per_h: v["burn_per_h"].as_f64().unwrap_or_default(),
             limit: v["limit"].as_f64(),
             resets_at: v["resets_at"].as_i64()?,
+            failing_since: v["failing_since"].as_i64(),
         })
     }
 }
@@ -239,6 +246,29 @@ fn usage_since(
     ))
 }
 
+/// When `auth_index`'s newest request failed with a client error (400-403) less than `FAIL_HOLD_H` ago; its time.
+fn failing_since(db: &Connection, auth_index: &str, now: i64) -> Result<Option<i64>, String> {
+    let newest = db
+        .query_row(
+            "SELECT CAST(strftime('%s', ts) AS INTEGER), failed, status FROM req
+             WHERE ts >= date(?1, 'unixepoch', '-1 day') AND json_extract(raw, '$.auth_index') = ?2
+             ORDER BY CAST(strftime('%s', ts) AS INTEGER) DESC LIMIT 1",
+            params![now - FAIL_HOLD_H * 3600, auth_index],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?, row.get::<_, Option<i64>>(2)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(format!("proxy usage store: {e}")),
+        })?;
+    Ok(newest.and_then(|(at, failed, status)| {
+        (failed.unwrap_or_default() != 0
+            && status.is_some_and(|s| (400..=403).contains(&s))
+            && now - at < FAIL_HOLD_H * 3600)
+            .then_some(at)
+    }))
+}
+
 /// The keys as the proxy lists them (`(auth_index, priority)` in config order, from `GET claude-api-key`), named by `quota.apikeys` in the same order, with their usage this month.
 pub fn read(
     settings: &Settings,
@@ -288,6 +318,7 @@ pub fn read(
                     / BURN_H as f64,
                 limit: usd_limit.or_else(|| get("monthly_tokens")),
                 resets_at: month_end(now),
+                failing_since: failing_since(&db, auth_index, now)?,
             })
         })
         .collect()
@@ -333,8 +364,11 @@ pub fn lines(keys: &[KeyUse], now: i64) -> String {
             } else {
                 format!("; UNPRICED, missing from spend: {}", k.unpriced.join(", "))
             };
+            let failing = k.failing_since.map_or(String::new(), |at| {
+                format!("; FAILING: its last request was refused {} ago, so it is held back", span_h((now - at) as f64 / 3600.0))
+            });
             format!(
-                "api key {}: {quota}; monthly, resets in {}; priority {}{unpriced}\n",
+                "api key {}: {quota}; monthly, resets in {}; priority {}{unpriced}{failing}\n",
                 k.name,
                 span_h(k.hours_left(now)),
                 k.priority
@@ -358,6 +392,7 @@ mod tests {
             unpriced: Vec::new(),
             burn_per_h: 0.0,
             limit,
+            failing_since: None,
             resets_at: month_end(
                 Utc.with_ymd_and_hms(2026, 11, 21, 6, 0, 0)
                     .unwrap()
@@ -395,6 +430,9 @@ mod tests {
             HELD_PRIORITY
         );
         assert_eq!(key(0.0, None, -1).want_priority(at(28), 0, 3.0), 1);
+        // A key whose requests are refused (e.g. no credit) is never put first.
+        let refused = KeyUse { failing_since: Some(at(28)), ..key(0.0, None, -1) };
+        assert_eq!(refused.want_priority(at(28), 0, 3.0), HELD_PRIORITY);
         assert!(changes(&[k.clone()], 2, at(21), 3.0).is_empty());
         assert_eq!(
             changes(&[k], 2, at(29), 3.0),
