@@ -40,7 +40,7 @@ const en = {
   'sign-out.confirm': 'Sign out of this account?',
   'debug.title': 'Debug', 'dbg.copy': 'Copy all', 'dbg.send': 'Send to server', 'dbg.ping': 'Test voice', 'dbg.kick': 'Reconnect', 'dbg.clear': 'Clear', 'dbg.self': 'Self-test',
   'login.aria': 'Sign in', 'login.howto': 'New here? How to use this', 'login.note': 'Paste your zuliprc once. The key stays in this browser.', 'login.connect': 'Connect',
-  'login.need': 'Need [api] with site, email and key.', 'login.bot': 'Use the human account, not a bot.',
+  'login.need': 'Need [api] with site, email and key.', 'login.badsite': 'The site must be a full URL, e.g. https://example.zulipchat.com.', 'login.bot': 'Use the human account, not a bot.',
   // feed and view
   'feed.earlier': 'Load earlier messages', 'feed.choose': 'Choose an agent', 'feed.loading': 'Loading…', 'feed.none': 'No messages yet',
   'msg.switching': 'Switching to {name}', 'msg.empty': '(empty)', 'msg.items': p => `· ${p.n} item${p.n === 1 ? '' : 's'}`, 'msg.markRead': 'Mark read',
@@ -121,7 +121,7 @@ const zh = {
   'sign-out.confirm': '退出此账号？',
   'debug.title': '调试', 'dbg.copy': '全部复制', 'dbg.send': '发送到服务器', 'dbg.ping': '测试语音', 'dbg.kick': '重新连接', 'dbg.clear': '清除', 'dbg.self': '自检',
   'login.aria': '登录', 'login.howto': '第一次使用？使用说明', 'login.note': '粘贴一次 zuliprc。密钥只保存在此浏览器中。', 'login.connect': '连接',
-  'login.need': '需要包含 site、email 和 key 的 [api] 段。', 'login.bot': '请使用人类账号，不要使用机器人账号。',
+  'login.need': '需要包含 site、email 和 key 的 [api] 段。', 'login.badsite': 'site 必须是完整网址，例如 https://example.zulipchat.com。', 'login.bot': '请使用人类账号，不要使用机器人账号。',
   'feed.earlier': '加载更早的消息', 'feed.choose': '请选择智能体', 'feed.loading': '加载中…', 'feed.none': '还没有消息',
   'msg.switching': '正在切换到 {name}', 'msg.empty': '（空）', 'msg.items': p => `· ${p.n} 项`, 'msg.markRead': '标为已读',
   'att.tapShow': ' · 点按显示', 'att.hide': '隐藏', 'out.sending': '发送中…', 'out.queued': '等待连接…', 'out.failed': '未发送', 'out.retry': '重试', 'out.delete': '删除',

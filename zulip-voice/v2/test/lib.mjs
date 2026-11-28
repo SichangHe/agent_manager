@@ -56,11 +56,11 @@ export async function serve(root = process.env.DIST || dir, files = {}) {
 }
 
 /** Opens the client in iPhone-sized WebKit (or `BROWSER=chromium`) with the test account; `prefs` seeds localStorage. */
-export async function openClient({url, prefs = {}, browserName = process.env.BROWSER || 'webkit', mic = null, storageState}) {
+export async function openClient({url, prefs = {}, browserName = process.env.BROWSER || 'webkit', mic = null, storageState, loggedOut = false, locale}) {
   const type = pw[browserName];
   
   const browser = await type.launch({headless: true, args: browserName === 'chromium' ? ['--autoplay-policy=no-user-gesture-required'] : []});
-  const context = await browser.newContext({...pw.devices['iPhone 14'], ...(browserName === 'chromium' ? {isMobile: false, defaultBrowserType: undefined} : {}), storageState});
+  const context = await browser.newContext({...pw.devices['iPhone 14'], ...(browserName === 'chromium' ? {isMobile: false, defaultBrowserType: undefined} : {}), storageState, ...(locale ? {locale} : {})});
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push('pageerror: ' + e.message));
@@ -68,7 +68,7 @@ export async function openClient({url, prefs = {}, browserName = process.env.BRO
   await page.addInitScript(({account, prefs, mic}) => {
     if (!sessionStorage.getItem('seeded')) {
       sessionStorage.setItem('seeded', '1');
-      localStorage.setItem('zulip-voice-account', JSON.stringify(account));
+      if (account) localStorage.setItem('zulip-voice-account', JSON.stringify(account));
       for (const [k, v] of Object.entries({'voice2-channels': [], 'voice2-kws': false, ...prefs})) localStorage.setItem(k, JSON.stringify(v));
     }
     if (mic) { // The only fake: microphone hardware. Plays the recorded WAV into getUserMedia.
@@ -80,7 +80,7 @@ export async function openClient({url, prefs = {}, browserName = process.env.BRO
         return dest.stream;
       };
     }
-  }, {account, prefs, mic});
+  }, {account: loggedOut ? null : account, prefs, mic});
   await page.goto(url);
   return {browser, context, page, errors, close: () => browser.close()};
 }

@@ -2295,6 +2295,21 @@ scenarios.language = async ({srv}) => {
     await c.page.reload();
     await L.waitFor(c.page, 'zh after reload', () => document.querySelector('#settings').getAttribute('aria-label') === '设置', 15000);
   } finally { await c.close(); }
+  // Signed out: the sign-in dialog follows the browser language, has a visible switch, and the switch sets voice2-lang, the title and html lang.
+  const o = await L.openClient({url: srv.url, loggedOut: true, locale: 'zh-CN'});
+  try {
+    const text = sel => o.page.evaluate(s => document.querySelector(s).textContent.trim(), sel);
+    await L.waitFor(o.page, 'login shown', () => document.querySelector('#login').open);
+    assert.equal(await text('#login-form .muted'), '粘贴一次 zuliprc。密钥只保存在此浏览器中。');
+    assert.equal(await o.page.evaluate(() => document.documentElement.lang), 'zh-CN');
+    assert.ok(await o.page.locator('.langbtn[data-setlang="en"]').isVisible(), 'switch visible');
+    await o.page.click('.langbtn[data-setlang="en"]');
+    assert.equal(await text('#login-form .muted'), 'Paste your zuliprc once. The key stays in this browser.');
+    assert.equal(await text('.wide.accent'), 'Connect');
+    assert.equal(await o.page.evaluate(() => [document.documentElement.lang, document.title, JSON.parse(localStorage.getItem('voice2-lang'))].join()), 'en,Voice,en');
+    await o.page.click('.langbtn[data-setlang="zh"]');
+    assert.equal(await text('.wide.accent'), '连接');
+  } finally { await o.close(); }
 };
 
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);

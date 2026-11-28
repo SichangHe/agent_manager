@@ -88,7 +88,7 @@ button:disabled { opacity: .35; }
 #draft { flex: 1; width: 100%; font: inherit; font-size: 17px; color: inherit; background: none; border: 0; outline: 0; resize: none; padding: 8px 0; max-height: 40vh; line-height: 1.35; }
 #level { position: absolute; right: 10px; bottom: 8px; width: 60px; height: 12px; opacity: .85; }
 #mic .done { display: none; }
-#composer.rec #mic { background: var(--danger); color: #fff; }
+#composer.rec #mic { background: var(--danger); color: var(--accent-fg); }
 #composer.rec #mic .mic { display: none; }
 #composer.rec #mic .done { display: block; }
 #composer.rec #draft { padding-right: 64px; }
@@ -147,7 +147,7 @@ pre { margin: 0; font: 12px/1.35 ui-monospace, Menlo, monospace; white-space: pr
 #listen[data-state='listening'] { background: var(--accent); color: var(--accent-fg); }
 #listen[data-state='on'] { background: color-mix(in srgb, var(--accent) 35%, var(--panel)); }
 #listen[data-state='waiting'] { outline: 2px dashed var(--warn); }
-#listen[data-state='heard'], #listen[data-state='dictating'], #listen[data-state='sending'] { background: var(--danger); color: #fff; }
+#listen[data-state='heard'], #listen[data-state='dictating'], #listen[data-state='sending'] { background: var(--danger); color: var(--accent-fg); }
 #prev-agent-name { display: none; }
 #prev-agent .arrow { font-size: 20px; line-height: 1; }
 
@@ -203,3 +203,7 @@ html.picker-open, html.picker-open body { position: fixed; inset: 0; width: 100%
 
 .msg.flash-unread { animation: flash-unread 1.6s ease-out; }
 @keyframes flash-unread { 0%, 40% { background: var(--hl); } 100% { background: transparent; } }
+
+.langbar { display: flex; gap: 0; align-self: stretch; border: 2px solid var(--accent); border-radius: 12px; overflow: hidden; }
+.langbtn { flex: 1; font: inherit; font-size: 18px; font-weight: 600; padding: 12px; border: 0; background: transparent; color: inherit; cursor: pointer; }
+.langbtn[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }

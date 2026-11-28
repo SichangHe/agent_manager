@@ -18,6 +18,10 @@ import {t, applyStatic, onLangChange, setLang, getLang} from './i18n.mjs';
 
 const BUILD = 'v2.0';
 applyStatic();   // the interface language (saved setting, else the browser's) before anything is shown
+// the sign-in language switch works before anything else is loaded
+const syncLangBtns = () => { for (const b of document.querySelectorAll('.langbtn')) b.setAttribute('aria-pressed', String(b.dataset.setlang === getLang())); };
+for (const b of document.querySelectorAll('.langbtn')) b.onclick = () => setLang(b.dataset.setlang);
+onLangChange(syncLangBtns); syncLangBtns();
 const log = createLog();
 const lat = createLatency(log);
 addEventListener('error', e => log('err', `${e.message} @${e.filename?.split('/').pop()}:${e.lineno}`));
