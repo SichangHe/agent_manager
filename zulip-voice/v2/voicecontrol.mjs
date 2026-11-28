@@ -25,7 +25,7 @@ const CHOICE_MS = 20000;
 const LATE_HIT_WAIT_MS = 600;   // the on-device spotter can report a start word up to ~0.5 s after the clip ended; a clip is never judged keyword-less before that
 const EMPTY_GRACE_MS = 3000;
 const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = -1.0;
-const PIECE_MAX_CALLS_PER_MIN = 110;   // live refreshes of the growing piece stop when Zulip calls this minute pass this (Zulip allows ~200)
+const PIECE_MAX_CALLS_PER_MIN = 60;   // live refreshes of the growing piece stop when Zulip calls this minute pass this (Zulip allows ~200)
 const UPLOADS_PER_MIN = 8, EMPTY_RUN_BACKOFF = 3, BACKOFF_MS = 60000;
 /** Mode names as the human reads them (help text and toasts); rename here only. Log keys stay `command mode` etc. */
 const MODE_NAMES = {standby: 'standby', input: 'input', command: 'command'};
@@ -98,7 +98,8 @@ export function createVoiceControl(ctx) {
   const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
 
   const recorder = createRecorder({
-    log, partialReady: () => !pieceBusy && !zulip.rateLimitedForMs() && zulip.callsLastMinute() < PIECE_MAX_CALLS_PER_MIN, onClip: ctx.onClip, onLevel: ctx.onLevel, onBarge, onCommandClip,
+    pieceMsPerAudioS: () => voice.sttMsPerAudioS(),
+    log, partialReady: () => !pieceBusy && !zulip.rateLimitedForMs() && !zulip.lowBudget() && zulip.callsLastMinute() < PIECE_MAX_CALLS_PER_MIN, onClip: ctx.onClip, onLevel: ctx.onLevel, onBarge, onCommandClip,
     onSpeechOnset: () => { lastVoiceMs = Date.now(); if (!kwsSpotter.ready()) return; for (const w of kwsSpotter.restart(0.6)) onKwsHit(w); if (vc?.mode === 'command' || choiceOpen()) for (const tag of kwsSpotter.restartCommands(0.6)) onCommandHit(tag); },
     onKwsAudio: samples => { for (const w of kwsSpotter.feed(samples)) onKwsHit(w); if (vc?.mode === 'command' || choiceOpen()) for (const tag of kwsSpotter.feedCommands(samples)) onCommandHit(tag); },
     onEarcon: kind => { lastPulseMs = Date.now(); player.earcon(EARCON_NOTES[kind], EARCON_NOTE_S, EARCON_GAIN[kind] ?? 0.45); try { navigator.vibrate?.(kind === 'cancel' ? [60, 40, 60] : 0); } catch { /* unsupported (iOS) */ } if (lastHitAt && Date.now() - lastHitAt < 1500) log('lat', `local hit -> ${kind} sound started in ${Date.now() - lastHitAt}ms`); },
@@ -237,7 +238,7 @@ export function createVoiceControl(ctx) {
     }
     const listening = !!vc || choiceOpen();
     // Domain words bias reply dictation only; never a prompt that names the control words: the model echoes it back on noise. Start-word clips also get keyword spotting on the server.
-    let r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening);
+    let r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening, {patient: !!meta.final || (!meta.piece && !!vc)});
     // 🧑 "if the front end. Detects something like the start words. But confidence is low. Then. We should request the backend to do it again. And confirm."
     const lowConfidence = r.ok && !listening && (r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB);
     if (lowConfidence && Date.now() - lastHitAt < 3000) {
@@ -254,6 +255,7 @@ export function createVoiceControl(ctx) {
       if (vc) armSessionTimer();
       resumeBarge(); vcIdle(); return;
     }
+    if (meta.piece && !meta.final && meta.piece.seq <= 1 && (meta.speechMs ?? 0) < 1000 && r.text.trim().length <= 4) { log('vc', `dropped a short first preview "${r.text.trim()}" (${Math.round(meta.speechMs ?? 0)}ms speech)`); return; }   // noise before the words ("二千神。"): a later refresh carries the real text
     if (meta.piece && (!vc || !vc.parts?.includes(meta.part))) return;   // the session it belonged to has ended (sent or cancelled)
     let heard = r.text.trim();
     { const w = heard.split(/\s+/).filter(Boolean); if (w.length >= 2 && removeControlWords(removeControlWords(w, 'tomato'), 'attention').length === 0 && w.some(x => soundsLike('tomato', [x])) && w.some(x => soundsLike('attention', [x]))) { log('vc', `dropped "${heard}": only control words, an echo of noise`); heard = ''; } }

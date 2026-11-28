@@ -29,7 +29,8 @@ $('app').hidden = false;
 cfg = await completeAccount(cfg, zulip, store);
 
 const model = createModel(cfg);
-const voice = createVoice({zulip, cfg, log});
+let lastDelayToastMs = 0;
+const voice = createVoice({zulip, cfg, log, onDelay: ms => { if (Date.now() - lastDelayToastMs > 8000) { lastDelayToastMs = Date.now(); toast(`Zulip is rate limiting: sending is delayed (${Math.ceil(ms / 1000)}s). Nothing is lost.`); } }});
 let current = store.get('voice2-topic', null);
 let autoplay = store.get('voice2-autoplay', true);
 let rate = store.get('voice2-rate', 1);

@@ -128,9 +128,10 @@ latency
 
 input mode pieces (voice control reply, 2026-11-26)
 - 🧑 "you cut. The input into too many pieces. That is just unnecessary ... much longer pieces ... Basically, we need the end to end latency to be small"
-- a spoken reply is one growing piece, not a clip per pause: pauses do not end it; it ends at 15 s (or at a pause after 12 s); then the next piece starts
-- while speaking, the whole piece so far is re-uploaded every 3 s (and once when a pause begins) and its transcript replaces the piece's text (older results never overwrite newer ones)
-- refreshes wait for the previous one, and stop when Zulip calls this minute pass 110 or the account is rate limited; the final piece always goes
+- a spoken reply is one growing piece, not a clip per pause: pauses do not end it; the wait after the end word is the time to transcribe the open piece, so its length follows processing time: the longest piece that transcribes in about 1 s (the relay's measured stt work per second of audio, 0.1 s/s -> 10 s; clamped to 6-20 s), or at a pause after 80% of it; then the next piece starts
+- while speaking, the whole piece so far is re-uploaded only to keep the shown text live: once per half piece (at least 5 s), and when a pause begins after such a gap; its transcript replaces the piece's text (older results never overwrite newer ones). Continuous speech at 0.1 s/s: 2 sends per 10 s, about 36 Zulip calls a minute; the wait after the end word is about 1-2 s
+- refreshes wait for the previous one, and stop when Zulip calls this minute pass 60, X-RateLimit-Remaining (when readable) is under 40, or the account is rate limited
+- the final piece, the upload and the send request wait out a 429 (Retry-After / X-RateLimit-Reset, up to 150 s) and retry; a toast says sending is delayed; nothing is dropped
 - measured (Qwen3-ASR-0.6B, GPU 1, port 8771): about 0.1 s per second of speech at 15 s (1.5 s for 15.1 s of audio), 4.1 s for 27.7 s, 5.6 s for 42.8 s, 6.9 s for 70 s
 - end word: the open piece goes as audio if its newest text is not back yet (the relay transcribes it), otherwise as text; text after the end word is dropped
 - command mode keeps one clip per phrase; `recorder.setPieceMode`

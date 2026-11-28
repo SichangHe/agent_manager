@@ -4,6 +4,7 @@ import {parseAgentMessage, messageChunks, speechPieces, speechText, splitSentenc
 import {parseRequest, wavDurationMs} from '../../service/relay.mjs';
 import {createModel, itemsOf} from '../model.mjs';
 import {speechWav} from './lib.mjs';
+import {afterStartWord} from '../grammar.mjs';
 
 const real = '[terminal_viz] Zulip voice: Claude agent now steering\n\nGot these three.\n"Why does autoplay turn off by itself?" The code switches it off.\n\n- first point, e.g. this one\n- second `code` point with **bold**\n\n```js\nconst x = 1;\n```\nSee [docs](https://example.com/a/b) now.\n[switch: other_task.md]';
 const p = parseAgentMessage(real);
@@ -162,3 +163,10 @@ console.log('unit ok');
   assert.match(app, /function maybeAutoplay\(\) \{[^]*?micQuietMs\(\) < PLAY_QUIET_MS/);
   assert.match(vc, /END_WORD_CHECK_MS[^]*?quietMs\(\) < END_WORD_QUIET_MS[^]*?speech continues/);
 }
+
+// the start word followed by Chinese text with a full-width comma and no space
+assert.equal(afterStartWord('Attention，这是哪个中文模型？', 'attention'), '这是哪个中文模型？');
+assert.equal(afterStartWord('Attention. 你好', 'attention'), '你好');
+assert.equal(afterStartWord('你好', 'attention'), null);
+
+{ const {pieceSchedule} = await import('../recorder.mjs'); assert.deepEqual(pieceSchedule(100), {maxS: 10, softS: 8, refreshMs: 5000}); assert.equal(pieceSchedule(50).maxS, 20); assert.equal(pieceSchedule(400).maxS, 6, 'a slow server gets shorter pieces, never under 6 s'); assert.equal(pieceSchedule(10).maxS, 20, 'capped'); }

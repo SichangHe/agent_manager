@@ -5,7 +5,7 @@ const URL_TTL_MS = 50000;
 const PREPARED_TTL_MS = 6 * 3600000;
 const newId = prefix => prefix + '_' + Array.from(crypto.getRandomValues(new Uint8Array(9)), b => b.toString(16).padStart(2, '0')).join('');
 
-export function createVoice({zulip, cfg, log}) {
+export function createVoice({zulip, cfg, log, onDelay}) {
   const pending = new Map();
   const bundles = new Map();
 
@@ -37,14 +37,28 @@ export function createVoice({zulip, cfg, log}) {
     log('relay', `backfilled ${bundles.size} prepared messages`);
   }
 
-  /** Posts a request and waits for its result: `{ok: true, result}` or `{ok: false, error}`. */
-  async function request(op, fields, timeoutMs, id = newId(op)) {
+  /** Runs `fn` again after each Zulip 429, waiting for the time Zulip asked (Retry-After / X-RateLimit-Reset), for at most `maxMs`: a reply must never be dropped because of the rate limit. */
+  async function patiently(fn, maxMs = 150000) {
+    const started = Date.now();
+    for (;;) {
+      const r = await fn();
+      if (r.ok || r.status !== 429 || Date.now() - started > maxMs) return r;
+      const wait = Math.max(1000, zulip.rateLimitedForMs() + 300);
+      log('relay', `rate limited: waiting ${Math.round(wait / 1000)}s, then retrying`);
+      onDelay?.(wait);
+      await new Promise(resolve => setTimeout(resolve, wait));
+    }
+  }
+
+  /** Posts a request and waits for its result: `{ok: true, result}` or `{ok: false, error}`. `patient`: wait out a rate limit instead of failing. */
+  async function request(op, fields, timeoutMs, id = newId(op), patient = false) {
     const sentMs = performance.now();
     const waiting = new Promise(resolve => {
       pending.set(id, resolve);
       setTimeout(() => { if (pending.delete(id)) resolve(null); }, timeoutMs);
     });
-    const posted = await zulip.call('POST', 'messages', {type: 'stream', to: cfg.relayStreamId, topic: op, content: JSON.stringify({voice: 1, id, op, ...fields})});
+    const post = () => zulip.call('POST', 'messages', {type: 'stream', to: cfg.relayStreamId, topic: op, content: JSON.stringify({voice: 1, id, op, ...fields})});
+    const posted = await (patient ? patiently(post) : post());
     if (!posted.ok) { pending.delete(id); return {ok: false, error: posted.error}; }
     const postedMs = performance.now() - sentMs;
     const result = await waiting;
@@ -82,12 +96,12 @@ export function createVoice({zulip, cfg, log}) {
   async function sendVoice({sendId, topic, streamId, items, cancelWord, commandWord}) {
     await Promise.all(items.filter(i => i.blob && !i.uri).map(async i => {
       const form = new FormData(); form.append('file', i.blob, `dictation-${Date.now()}.wav`);
-      const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
+      const up = await patiently(() => zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000}));
       if (up.ok) i.uri = up.data.uri;
     }));
     if (items.some(i => i.blob && !i.uri)) return {ok: false, error: 'upload failed'};
     const wire = items.map(i => i.blob ? {uri: i.uri} : {text: i.text});
-    const r = await request('send', {topic, ...(streamId ? {streamId} : {}), ...(cancelWord ? {cancelWord} : {}), ...(commandWord ? {commandWord} : {}), items: wire, attachment: wire.filter(i => i.uri).map(i => `[audio](${i.uri})`).join(' ')}, 90000, sendId);
+    const r = await request('send', {topic, ...(streamId ? {streamId} : {}), ...(cancelWord ? {cancelWord} : {}), ...(commandWord ? {commandWord} : {}), items: wire, attachment: wire.filter(i => i.uri).map(i => `[audio](${i.uri})`).join(' ')}, 90000, sendId, true);
     return r.ok ? {ok: true, messageId: r.result.messageId, empty: !!r.result.empty, discarded: r.result.discarded} : r;
   }
 
@@ -97,15 +111,21 @@ export function createVoice({zulip, cfg, log}) {
     const xs = sttTimes.filter(t => Date.now() - t.at < 300000), q = (k, f) => { const a = xs.map(f).sort((p, r) => p - r); return a.length ? a[Math.min(a.length - 1, Math.floor(a.length * k))] : 0; };
     return {n: xs.length, p50: q(0.5, t => t.roundTrip), p90: q(0.9, t => t.roundTrip), workP50: q(0.5, t => t.work)};
   }
+  /** The relay's median transcription time per second of audio (ms) over the last clips of 2 s or more; 100 (measured) until there are 3. Sizes the open reply piece. */
+  function sttMsPerAudioS() {
+    const xs = sttTimes.filter(t => t.audioS >= 2).slice(-8).map(t => t.work / t.audioS).sort((p, r) => p - r);
+    return xs.length >= 3 ? Math.max(20, xs[xs.length >> 1]) : 100;
+  }
   /** `{ok: true, text}` for a WAV blob. */
-  async function stt(blob, prompt, kws) {
+  async function stt(blob, prompt, kws, {patient = false} = {}) {
     const form = new FormData();
     form.append('file', blob, `dictation-${Date.now()}.wav`);
-    const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
+    const upload = () => zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000});
+    const up = await (patient ? patiently(upload) : upload());
     if (!up.ok) return {ok: false, error: up.error};
     for (let attempt = 0; attempt < 3; attempt++) {
-      const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {}), ...(kws ? {kws: true} : {})}, 60000);
-      if (r.ok) { sttTimes.push({at: Date.now(), roundTrip: r.totalMs, work: r.result.timings?.workMs ?? 0}); if (sttTimes.length > 30) sttTimes.shift(); }
+      const r = await request('stt', {uri: up.data.uri, attachment: `[audio](${up.data.uri})`, ...(prompt ? {prompt} : {}), ...(kws ? {kws: true} : {})}, 60000, undefined, patient);
+      if (r.ok) { sttTimes.push({at: Date.now(), roundTrip: r.totalMs, work: r.result.timings?.workMs ?? 0, audioS: (blob.size - 44) / 32000}); if (sttTimes.length > 30) sttTimes.shift(); }
       if (r.ok) return {ok: true, text: r.result.text.trim(), timings: {...r.result.timings, roundTripMs: r.totalMs}, noSpeechProb: r.result.noSpeechProb, avgLogprob: r.result.avgLogprob, kws: r.result.kws};
       if (attempt === 2) return r;
     }
@@ -136,5 +156,5 @@ export function createVoice({zulip, cfg, log}) {
     return r.ok ? {ok: true, ...r.result, totalMs: r.totalMs} : r;
   }
 
-  return {sttStats, onMessage, backfill, sendVoice, bundleFor, chunkIndex, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
+  return {sttStats, sttMsPerAudioS, onMessage, backfill, sendVoice, bundleFor, chunkIndex, ttsBatch, preparedEntries: () => [...bundles.values()].flat(), sendLog, stt, clipUrl, ping, preparedCount: () => bundles.size, pendingCount: () => pending.size};
 }

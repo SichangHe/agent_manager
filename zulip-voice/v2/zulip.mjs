@@ -6,7 +6,7 @@ const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
 export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(...a)) {
   const authorization = 'Basic ' + btoa(String.fromCharCode(...new TextEncoder().encode(email + ':' + key)));
   let rateLimitedUntilMs = 0, consecutive429 = 0, last429Ms = 0;
-  let totalCalls = 0;
+  let totalCalls = 0, remaining = null, remainingAtMs = 0;   // X-RateLimit-Remaining of the last answer (when the browser lets the page read it)
   const callTimes = [];   // start times of API calls in the last minute, for the budget display and tests
   async function call(method, path, fields = {}, {timeoutMs = 15000, signal} = {}) {
     const started = performance.now();
@@ -31,9 +31,11 @@ export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(.
     let data;
     try { data = await response.json(); } catch { data = {}; }
     const ms = Math.round(performance.now() - started);
+    { const h = response.headers.get('x-ratelimit-remaining'), n = h === null ? NaN : Number(h); if (Number.isFinite(n)) { remaining = n; remainingAtMs = Date.now(); } }
     if (response.status === 429) {
       consecutive429 = Date.now() - last429Ms < 120000 ? consecutive429 + 1 : 1; last429Ms = Date.now();
-      const asked = Number(data['retry-after'] ?? response.headers.get('retry-after')) || 0;   // never less than 3 s, doubling while it keeps happening (a 0 s answer used to cause 3 calls in 3 s)
+      const reset = Number(response.headers.get('x-ratelimit-reset')) || 0, resetS = reset > 1e9 ? reset - Date.now() / 1000 : reset;   // seconds until the limit resets (or a Unix time)
+      const asked = Number(data['retry-after'] ?? response.headers.get('retry-after')) || Math.max(0, Math.ceil(resetS)) || 0;   // never less than 3 s, doubling while it keeps happening (a 0 s answer used to cause 3 calls in 3 s)
       rateLimitedUntilMs = Date.now() + Math.min(60, Math.max(3, asked) * 2 ** (consecutive429 - 1)) * 1000 + Math.random() * 500;
       log('http', `${label} 429 rate limited until +${Math.round((rateLimitedUntilMs - Date.now()) / 1000)}s`);
     }
@@ -45,7 +47,9 @@ export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(.
     if (path !== 'events') log('http', `${label} ok ${ms}ms`);
     return {ok: true, data, ms};
   }
-  return {site, call, callsLastMinute: () => { while (callTimes[0] < Date.now() - 60000) callTimes.shift(); return callTimes.length; }, totalCalls: () => totalCalls, rateLimitedForMs: () => Math.max(0, rateLimitedUntilMs - Date.now()), callLog: callTimes};
+  return {site, call, callsLastMinute: () => { while (callTimes[0] < Date.now() - 60000) callTimes.shift(); return callTimes.length; }, totalCalls: () => totalCalls, rateLimitedForMs: () => Math.max(0, rateLimitedUntilMs - Date.now()), callLog: callTimes,
+    /** Few calls left this minute (by the server's own count when readable, else by ours): optional calls such as live previews should wait. */
+    lowBudget: () => (remaining !== null && Date.now() - remainingAtMs < 15000 && remaining < 40) || (() => { while (callTimes[0] < Date.now() - 60000) callTimes.shift(); return callTimes.length > 70; })()};
 }
 
 /**

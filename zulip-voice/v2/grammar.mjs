@@ -63,6 +63,7 @@ const START_ALIASES = {attention: ['attention', 'attension', 'attentions', 'atte
 export function afterStartWord(text, word) {
   const accepted = new Set([word, ...(START_ALIASES[word] ?? [])]);
   const words = text.trim().split(/\s+/).filter(Boolean);
+  { const m = /^([A-Za-z'.,!?;:\-\u3000-\u303f\uff00-\uffef]*)([\u3400-\u9fff].*)$/su.exec(words[0] ?? ''); if (m && m[1]) words.splice(0, 1, m[1], m[2]); }   // "Attention，这是…": a Chinese sentence follows the start word without a space
   if (word === 'attention') { const c = leadingControlCount('attention', words); if (c) return words.slice(c).join(' '); }
   const isStart = w => { const n = normalize(w); return n && (accepted.has(n) || editDistance(n, word) <= Math.floor(word.length / 4)); };
   if (!words.length || !isStart(words[0])) return null;
