@@ -87,13 +87,15 @@ class Speech:
     def speak(self, text: str) -> bytes | str:
         """Return a mono WAV or an error, without retaining conversation text."""
         chunks = []
-        for chinese, run in split_chinese(text):
-            pipeline, voice = (self.tts_zh, "zf_xiaobei") if chinese else (self.tts, "af_heart")
-            chunks += [
-                result.audio.cpu().numpy()
-                for result in pipeline(run, voice=voice)
-                if result.audio is not None
-            ]
+        for chinese, run in split_chinese(strip_quotes(text)):
+            pipeline, voice = (self.tts_zh, ZH_VOICE) if chinese else (self.tts, "af_heart")
+            for result in pipeline(run, voice=voice):
+                if result.audio is not None:
+                    chunks.append(trim_silence(result.audio.cpu().numpy()))
+            # Kokoro pads each run with ~0.4 s lead and ~0.5-1 s tail silence; trimmed, a small pause remains.
+            chunks.append(np.zeros(RUN_PAUSE_SAMPLES, dtype=np.float32))
+        if chunks:
+            chunks.pop()
         if not chunks:
             return "No speech produced for this text."
         output = io.BytesIO()
@@ -228,6 +230,29 @@ class Speech:
         }
 
 
+ZH_VOICE = os.environ.get("VOICE_ZH_VOICE", "zf_xiaoxiao")
+RUN_PAUSE_SAMPLES = SAMPLE_RATE_HZ * 3 // 100  # 30 ms (+10 ms lead, +60 ms tail kept = ~110 ms) between runs
+SILENCE_LEVEL = 0.01
+EDGE_KEEP_SAMPLES = SAMPLE_RATE_HZ // 100  # 10 ms kept at each trimmed edge
+# 🧑 "Quotation marks screwing up the TTS and making a noise and a large gap"
+QUOTES = "\"“”„‟‘’‚‛'`´«»‹›「」『』﹁﹂＂＇〝〞〟"
+
+
+def strip_quotes(text: str) -> str:
+    """Drop quotation marks (they become noise or a long pause in Kokoro), keeping apostrophes inside words such as don't."""
+    text = re.sub(r"(?<=[A-Za-z])['’](?=[A-Za-z])", "\x00", text)
+    text = re.sub(f"[{re.escape(QUOTES)}]", "", text)
+    return re.sub(r"\s+", " ", text.replace("\x00", "'")).strip()
+
+
+def trim_silence(audio: np.ndarray) -> np.ndarray:
+    """Cut leading and trailing near-silence, keeping 10 ms at each edge."""
+    loud = np.flatnonzero(np.abs(audio) > SILENCE_LEVEL)
+    if loud.size == 0:
+        return audio[:0]
+    return audio[max(0, loud[0] - EDGE_KEEP_SAMPLES) : loud[-1] + 1 + EDGE_KEEP_SAMPLES * 6]
+
+
 HAN = "\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
 CHINESE_RUN = re.compile(f"[{HAN}](?:[{HAN}\u3000-\u303f\uff00-\uffef0-9\\s]*[{HAN}\u3000-\u303f\uff00-\uffef])?")
 
@@ -236,11 +261,11 @@ def split_chinese(text: str) -> list[tuple[bool, str]]:
     """Text cut into (is_chinese, run) pieces in order; a Chinese run starts with a Han character and keeps CJK punctuation and digits inside it."""
     pieces, at = [], 0
     for m in CHINESE_RUN.finditer(text):
-        if text[at:m.start()].strip():
+        if re.search(r"\w", text[at:m.start()]):
             pieces.append((False, text[at:m.start()]))
         pieces.append((True, m.group()))
         at = m.end()
-    if text[at:].strip():
+    if re.search(r"\w", text[at:]):
         pieces.append((False, text[at:]))
     return pieces
 
