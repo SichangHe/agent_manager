@@ -426,7 +426,12 @@ fn reconcile(
         .credits(reading)
         .is_ok_and(|left| !left.iter().any(|(id, _)| *id == credit));
     let reset = matches!((before, used_now), (Some(b), Some(n)) if core::quota_reset(b, n));
-    let confirmed = gone && reset;
+    // quota_support.md: "amh-quota said team1@trymidas reset redemption 'uncertain', but it worked ... amh's check read a stale snapshot; it should stop retrying."
+    // The proxy's usage reading lags a redemption, so a consume call the provider accepted (`called`) whose credit is no longer listed is confirmed without waiting for it.
+    let accepted = files
+        .journal()
+        .is_ok_and(|journal| core::journal_steps(&journal, episode).contains(&"called"));
+    let confirmed = gone && (reset || accepted);
     if confirmed {
         files.step(now, episode, "confirmed", json!({}));
     } else if record {
@@ -759,9 +764,10 @@ pub fn cycle(
                 let Some((cred, Some(before))) = files_intent_cred(&journal, &episode) else {
                     continue;
                 };
+                let accepted = core::journal_steps(&journal, &episode).contains(&"called");
                 if cred == reading.name
                     && bucket.status != Status::Unknown
-                    && core::quota_reset(before, core::usage(&bucket.windows))
+                    && (accepted || core::quota_reset(before, core::usage(&bucket.windows)))
                     && reconcile(
                         proxy,
                         files,
