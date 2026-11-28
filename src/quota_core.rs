@@ -456,12 +456,18 @@ pub fn pools(buckets: &[Bucket], now: i64) -> BTreeMap<String, Pool> {
 // 🧑 "The proxy should use the account that expires the first unless it starts to rate limit"
 /// Among buckets not known to be exhausted, the soonest weekly reset ranks first, because that is the quota that expires first. A bucket whose last reading is stale (unknown) is ranked by that reading too: leaving its old priority in place let it tie with, or outrank, an account that resets days later. A rate-limited account needs no demotion here: the proxy sets it aside after its 429.
 pub fn priorities(buckets: &[Bucket]) -> BTreeMap<String, i64> {
+    // Readings come only with traffic, so a never-read account ranked last would never be read (after the Nov 27 reboot 3 of 4 Claude accounts stayed "never read" for 11 h while one took all traffic). It ranks first instead: one request reads it, then it takes its real place; if it is out, the proxy moves on after its 429.
     let key = |b: &Bucket| {
-        b.windows
+        let d7 = b
+            .windows
             .iter()
             .find(|w| w.kind == Kind::D7 && w.state == WinState::Active)
-            .and_then(|w| w.resets_at)
-            .unwrap_or(i64::MAX)
+            .and_then(|w| w.resets_at);
+        match d7 {
+            Some(at) => at,
+            None if b.status == Status::Unknown && b.observed_at.is_none() => i64::MIN,
+            None => i64::MAX,
+        }
     };
     let mut result = BTreeMap::new();
     for pool in POOLS {
@@ -546,8 +552,17 @@ pub fn episode(b: &Bucket) -> Option<String> {
 /// Even a new episode of one principal waits this long after its last redemption attempt: a flicker through unknown must not redeem twice.
 const REDEEM_GAP_S: i64 = 6 * 3600;
 
-/// Whether to start redeeming for this bucket: authorized, Codex, exhausted, and nothing journaled for this episode, so no episode is ever redeemed twice.
+/// Whether to start redeeming for this bucket: authorized, exhausted, and nothing journaled for this episode, so no episode is ever redeemed twice.
 // 🧑 "Yes" (to redeeming Codex resets automatically as soon as an account runs out)
+// 🧑 "I see we have full resets. Use it right after earlier accounts run out?" (Claude full resets)
+/// A Claude reset is spent only on the weekly limit: a 5h limit clears by itself within hours.
+fn weekly_out(b: &Bucket) -> bool {
+    b.pool != "claude"
+        || b.windows.iter().any(|w| {
+            w.kind == Kind::D7 && w.state == WinState::Active && w.used_pct >= OK_BELOW_PCT
+        })
+}
+
 pub fn should_redeem(journal: &[Value], b: &Bucket, authorized: bool, now: i64) -> bool {
     let recent = journal.iter().any(|e| {
         e["episode"]
@@ -557,7 +572,7 @@ pub fn should_redeem(journal: &[Value], b: &Bucket, authorized: bool, now: i64) 
             && e["t"].as_i64().is_none_or(|t| now - t < REDEEM_GAP_S)
     });
     authorized
-        && b.pool == "codex"
+        && weekly_out(b)
         && !recent
         && episode(b).is_some_and(|ep| journal_steps(journal, &ep).is_empty())
 }
@@ -590,6 +605,32 @@ pub fn parse_expiry(text: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(text)
         .ok()
         .map(|t| t.timestamp())
+}
+
+/// Claude reset grants `(id, ends_at)` that would reset the weekly limit now, from the `cedar_ember` object of the usage answer.
+/// Grants that clear only the 5h or overage windows (e.g. a model-launch grant) are skipped: they do not help an account at its weekly limit.
+pub fn claude_grants(status: &Value) -> Vec<(String, String)> {
+    if status["eligible"] != true {
+        return Vec::new();
+    }
+    status["grants"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|g| {
+            g["resets_left"].as_i64().unwrap_or(0) > 0
+                && g["paused"] != true
+                && g["clears"]
+                    .as_array()
+                    .is_some_and(|c| c.iter().any(|w| w == "seven_day"))
+        })
+        .filter_map(|g| {
+            Some((
+                g["id"].as_str()?.to_owned(),
+                g["ends_at"].as_str().unwrap_or_default().to_owned(),
+            ))
+        })
+        .collect()
 }
 
 /// The episode of a deadline redemption: one per credit, so exhaustion episodes never block it.
@@ -737,7 +778,7 @@ pub fn uncertain_episodes(journal: &[Value]) -> Vec<String> {
 
 /// Whether an exhaustion episode's failed redemption may be retried.
 pub fn should_retry(journal: &[Value], b: &Bucket, authorized: bool, now: i64) -> bool {
-    authorized && b.pool == "codex" && episode(b).is_some_and(|ep| retry_due(journal, &ep, now))
+    authorized && weekly_out(b) && episode(b).is_some_and(|ep| retry_due(journal, &ep, now))
 }
 
 /// Steps with no outcome: the observer crashed between them, so the redemption is uncertain and never retried.
@@ -1173,6 +1214,28 @@ mod tests {
     }
 
     #[test]
+    fn claude_grants_keep_usable_weekly_resets_only() {
+        let status = json!({"eligible": true, "grants": [
+            {"id": "full-reset-2611", "resets_left": 1, "paused": false, "usable_now": true, "clears": ["five_hour", "seven_day"], "ends_at": "2026-12-10T22:00:00+00:00"},
+            {"id": "launch-fable", "resets_left": 1, "paused": false, "usable_now": true, "clears": ["five_hour", "seven_day_overage_included"], "ends_at": "2027-03-09T07:59:00+00:00"},
+            {"id": "used", "resets_left": 0, "paused": false, "usable_now": true, "clears": ["seven_day"], "ends_at": "2026-12-10T22:00:00+00:00"},
+            {"id": "paused", "resets_left": 1, "paused": true, "usable_now": true, "clears": ["seven_day"], "ends_at": "2026-12-10T22:00:00+00:00"},
+            {"id": "later", "resets_left": 1, "paused": false, "usable_now": false, "clears": ["seven_day"], "ends_at": "2026-12-11T22:00:00+00:00"}
+        ]});
+        assert_eq!(
+            claude_grants(&status),
+            vec![
+                (
+                    "full-reset-2611".to_owned(),
+                    "2026-12-10T22:00:00+00:00".to_owned()
+                ),
+                ("later".to_owned(), "2026-12-11T22:00:00+00:00".to_owned())
+            ]
+        );
+        assert!(claude_grants(&json!({"eligible": false, "grants": []})).is_empty());
+    }
+
+    #[test]
     fn priority_prefers_soonest_weekly_reset_and_enumerated_counterexamples() {
         let p = priorities(&[
             bucket("late", "claude", Status::Available, 10.0, Some(NOW + 9000)),
@@ -1186,11 +1249,25 @@ mod tests {
         ]);
         assert_eq!(p["soon"], p["tie"]);
         assert!(
-            p["hot"] > p["soon"] && p["soon"] > p["stale"] && p["stale"] > p["late"] && p["late"] > p["no7d"],
+            p["hot"] > p["soon"]
+                && p["soon"] > p["stale"]
+                && p["stale"] > p["late"]
+                && p["late"] > p["no7d"],
             "soonest 7d first even when its 5h window is high or its reading is stale; unknown 7d last"
         );
         assert!(!p.contains_key("gone"), "exhausted buckets get no priority");
         assert_eq!(p["other"], 1, "pools rank separately");
+        let mut unread = bucket("unread", "claude", Status::Unknown, 0.0, None);
+        unread.windows.clear();
+        unread.observed_at = None;
+        let q = priorities(&[
+            unread,
+            bucket("soon", "claude", Status::Available, 10.0, Some(NOW + 1000)),
+        ]);
+        assert!(
+            q["unread"] > q["soon"],
+            "a never-read account ranks first so it gets read"
+        );
         assert_eq!(p["no7d"], 1);
     }
 
@@ -1303,17 +1380,18 @@ mod tests {
     }
 
     #[test]
-    fn redemption_requires_authorization_codex_and_a_fresh_episode() {
+    fn redemption_requires_authorization_and_a_fresh_episode() {
         let b = bucket("x", "codex", Status::Exhausted, 100.0, Some(NOW + 5));
         let ep = episode(&b).unwrap_or_default();
         assert!(should_redeem(&[], &b, true, NOW));
         assert!(!should_redeem(&[], &b, false, NOW));
-        assert!(!should_redeem(
-            &[],
-            &bucket("x", "claude", Status::Exhausted, 100.0, Some(NOW + 5)),
-            true,
-            NOW
-        ));
+        let mut weekly = bucket("x", "claude", Status::Exhausted, 10.0, Some(NOW + 5));
+        assert!(
+            !should_redeem(&[], &weekly, true, NOW),
+            "a Claude reset is not spent on a 5h limit"
+        );
+        weekly.windows[1].used_pct = 100.0;
+        assert!(should_redeem(&[], &weekly, true, NOW));
         assert!(!should_redeem(
             &[],
             &bucket("x", "codex", Status::Available, 1.0, Some(NOW + 5)),

@@ -28,6 +28,15 @@ const NOTICE_AFTER_FAILURES: u32 = 2;
 const EVENTS_MAX_BYTES: u64 = 8 << 20;
 const EVENTS: &str = "quota-events.jsonl";
 const CREDITS_URL: &str = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits";
+/// Claude reset grants ("cedar_ember" program), as the proxy panel reads and claims them.
+const CLAUDE_API: &str = "https://api.anthropic.com";
+const CLAUDE_GRANTS_PATH: &str = "/api/oauth/usage?cedar_ember=1&skip_spend=1";
+const CLAUDE_PROGRAM: &str = "cedar_ember";
+
+/// "Claude" or "Codex", for notices.
+fn tool(pool: &str) -> &'static str {
+    if pool == "claude" { "Claude" } else { "Codex" }
+}
 
 const NOTICES_FILE: &str = "quota-notices.json";
 const APPEARED_RECORD: &str = "amh-quota-appeared.txt";
@@ -251,8 +260,13 @@ impl Proxy {
         url: &str,
         body: Option<Value>,
     ) -> Result<Value, CallError> {
-        let mut payload = json!({"auth_index": r.auth_index, "method": method, "url": url,
-            "header": {"Authorization": "Bearer $TOKEN$", "Chatgpt-Account-Id": r.account_id, "User-Agent": "codex_cli_rs", "Content-Type": "application/json"}});
+        let header = if r.pool == "claude" {
+            json!({"Authorization": "Bearer $TOKEN$", "User-Agent": "claude-cli/2.1.280 (external, cli)", "Content-Type": "application/json", "anthropic-beta": "oauth-2025-04-20"})
+        } else {
+            json!({"Authorization": "Bearer $TOKEN$", "Chatgpt-Account-Id": r.account_id, "User-Agent": "codex_cli_rs", "Content-Type": "application/json"})
+        };
+        let mut payload =
+            json!({"auth_index": r.auth_index, "method": method, "url": url, "header": header});
         if let Some(body) = body {
             payload["data"] = json!(body.to_string());
         }
@@ -279,6 +293,13 @@ impl Proxy {
 
     /// The available reset credits `(id, expires_at)`, earliest-expiring first.
     fn credits(&self, r: &Reading) -> Result<Vec<(String, String)>, CallError> {
+        if r.pool == "claude" {
+            let answer =
+                self.api_call(r, "GET", &format!("{CLAUDE_API}{CLAUDE_GRANTS_PATH}"), None)?;
+            let mut found = core::claude_grants(&answer["cedar_ember"]);
+            found.sort_by_key(|(_, expires)| (expires.is_empty(), expires.clone()));
+            return Ok(found);
+        }
         let answer = self.api_call(r, "GET", CREDITS_URL, None)?;
         let mut found: Vec<(String, String)> = answer["credits"]
             .as_array()
@@ -294,6 +315,44 @@ impl Proxy {
             .collect();
         found.sort_by_key(|(_, expires)| (expires.is_empty(), expires.clone()));
         Ok(found)
+    }
+
+    /// Use one reset credit. Claude: read the account's organization, then claim the grant; only the claim can change anything.
+    fn consume(&self, r: &Reading, credit_id: &str, request_id: &str) -> Result<Value, CallError> {
+        if r.pool != "claude" {
+            return self.api_call(
+                r,
+                "POST",
+                &format!("{CREDITS_URL}/consume"),
+                Some(json!({"credit_id": credit_id, "redeem_request_id": request_id})),
+            );
+        }
+        let profile = self
+            .api_call(r, "GET", &format!("{CLAUDE_API}/api/oauth/profile"), None)
+            .map_err(|e| match e {
+                CallError::Rejected(w) | CallError::Uncertain(w) => {
+                    CallError::Rejected(format!("profile: {w}"))
+                }
+            })?;
+        let Some(org) = profile["organization"]["uuid"].as_str() else {
+            return Err(CallError::Rejected(
+                "profile has no organization".to_owned(),
+            ));
+        };
+        let answer = self.api_call(
+            r,
+            "POST",
+            &format!("{CLAUDE_API}/api/organizations/{org}/reset_rate_limits"),
+            Some(
+                json!({"program": CLAUDE_PROGRAM, "grant_id": credit_id, "request_id": request_id}),
+            ),
+        )?;
+        match answer["result"].as_str() {
+            // already_used: this claim changed nothing (the grant went elsewhere), so the account is not known to be reset.
+            Some("reset") => Ok(answer),
+            Some(other) => Err(CallError::Rejected(format!("result {other}"))),
+            None => Err(CallError::Uncertain("no result in the answer".to_owned())),
+        }
     }
 }
 
@@ -454,7 +513,7 @@ fn fresh_used(proxy: &Proxy, reading: &Reading, now: i64) -> Option<core::Usage>
         .map(|r| core::usage(&r.windows))
 }
 
-/// Redeem one reset credit of a Codex bucket, journaled step by step. `want` names the credit (a deadline or a retry); without it the earliest-expiring one is used.
+/// Redeem one reset credit of a Claude or Codex bucket, journaled step by step. `want` names the credit (a deadline or a retry); without it the earliest-expiring one is used.
 /// A rejected or uncertain call is retried by later cycles, with backoff, while the credit is still listed and unexpired.
 /// Returns whether a call was attempted.
 #[allow(clippy::too_many_arguments)]
@@ -509,7 +568,8 @@ fn redeem(
             store,
             &format!("{what}:{episode}"),
             &format!(
-                "Codex reset credit redemption for {} {what} ({why}); credit {credit_id} expires in {hours}. {retry_note}",
+                "{} reset credit redemption for {} {what} ({why}); credit {credit_id} expires in {hours}. {retry_note}",
+                tool(&reading.pool),
                 reading.name
             ),
         );
@@ -525,12 +585,7 @@ fn redeem(
             );
         }
     };
-    match proxy.api_call(
-        reading,
-        "POST",
-        &format!("{CREDITS_URL}/consume"),
-        Some(json!({"credit_id": credit_id, "redeem_request_id": request_id})),
-    ) {
+    match proxy.consume(reading, &credit_id, &request_id) {
         Err(CallError::Rejected(why)) => {
             files.step(now, episode, "rejected", json!({"why": why}));
             failed(&why, "was rejected");
@@ -715,7 +770,7 @@ pub fn cycle(
                     store,
                     &format!("uncertain:{episode}"),
                     &format!(
-                        "A Codex reset credit redemption ({episode}) was interrupted and is uncertain; it is retried while the credit is still listed. Check the provider's history."
+                        "A reset credit redemption ({episode}) was interrupted and is uncertain; it is retried while the credit is still listed. Check the provider's history."
                     ),
                 );
             }
@@ -740,7 +795,6 @@ pub fn cycle(
         let retry = core::should_retry(&journal, bucket, authorized, now);
         if !first
             && !retry
-            && bucket.pool == "codex"
             && bucket.status == Status::Exhausted
             && !live
             && memory.shadow_redeem.insert(bucket.principal.clone())
@@ -783,7 +837,7 @@ pub fn cycle(
                 }
             }
         }
-        let Some(reading) = reading.filter(|_| live && bucket.pool == "codex") else {
+        let Some(reading) = reading.filter(|_| live) else {
             continue;
         };
         if first || retry {
@@ -831,7 +885,8 @@ pub fn cycle(
                     store,
                     &format!("expired_unredeemed:{id}"),
                     &format!(
-                        "URGENT: Codex reset credit {id} of {} expired unredeemed: every deadline attempt failed.",
+                        "URGENT: {} reset credit {id} of {} expired unredeemed: every deadline attempt failed.",
+                        tool(&bucket.pool),
                         bucket.principal
                     ),
                 );
@@ -855,7 +910,8 @@ pub fn cycle(
                             store,
                             &format!("credit_lost:{id}"),
                             &format!(
-                                "Codex reset credit {id} of {} left the provider's list and no redemption of ours is on record: it expired unused or was used elsewhere.",
+                                "{} reset credit {id} of {} left the provider's list and no redemption of ours is on record: it expired unused or was used elsewhere.",
+                                tool(&bucket.pool),
                                 bucket.principal
                             ),
                         );
@@ -881,7 +937,8 @@ pub fn cycle(
                         store,
                         &format!("at_risk:{id}"),
                         &format!(
-                            "Codex reset credit {id} of {} expires in {} and automatic redemption is off (`quota.redeem` is not true): redeem it by hand.",
+                            "{} reset credit {id} of {} expires in {} and automatic redemption is off (`quota.redeem` is not true): redeem it by hand.",
+                            tool(&bucket.pool),
                             bucket.principal,
                             span(*at - now)
                         ),
