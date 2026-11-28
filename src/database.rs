@@ -112,7 +112,7 @@ impl Database {
         if ready && has_schema() {
             connection
                 .execute_batch(
-                    "PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA wal_autocheckpoint=0; PRAGMA journal_size_limit=33554432;",
+                    "PRAGMA synchronous=NORMAL; PRAGMA mmap_size=0; PRAGMA cache_size=-512; PRAGMA wal_autocheckpoint=0; PRAGMA journal_size_limit=33554432;",
                 )
                 .map_err(error)?;
             return Ok(Self(
@@ -127,6 +127,7 @@ impl Database {
              PRAGMA wal_autocheckpoint=0; -- checkpoints run in the background (`checkpoint`), not inside a commit that holds the store lock
              PRAGMA journal_size_limit=33554432; -- a checkpointed WAL shrinks back to 32 MB
              PRAGMA mmap_size=0;
+             PRAGMA cache_size=-512; -- 512 KiB per connection, not 2 MB: up to 8 pooled connections stay open
              CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS tasks (name TEXT PRIMARY KEY, text TEXT NOT NULL);
              CREATE TABLE IF NOT EXISTS events (

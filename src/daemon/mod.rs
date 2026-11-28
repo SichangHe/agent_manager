@@ -85,7 +85,31 @@ pub fn crash_point(point: &str) {
 /// Full mtime scan of task files, catching edits inotify missed.
 const FULL_SCAN: Duration = Duration::from_secs(600);
 /// Longest the exporter waits without a commit before re-exporting writes made outside the daemon.
-const EXPORT_TICK: Duration = Duration::from_secs(1);
+// 🧑 "Try to make amh take <2% CPU and <20MB RAM at full idle so we have no problem deploying it everywhere across our machines."
+// Writes go through the daemon's writer, which wakes the exporter, so the tick only catches rare outside writes.
+const EXPORT_TICK: Duration = Duration::from_secs(30);
+/// How often freed heap memory goes back to the system.
+const TRIM_EVERY: Duration = Duration::from_secs(10);
+
+/// Keep idle memory small: few glibc arenas (each thread otherwise gets its own, up to 64 MB each, kept after use), and freed memory returned by `trim`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn limit_arenas() {
+    // SAFETY: plain allocator setting, called before the daemon starts its threads.
+    unsafe { libc::mallopt(libc::M_ARENA_MAX, 2) };
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn limit_arenas() {}
+
+/// Give freed heap memory back to the system.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn trim() {
+    // SAFETY: no preconditions.
+    unsafe { libc::malloc_trim(0) };
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn trim() {}
 
 /// Serve until killed; returns an exit status only when the daemon cannot start.
 pub fn run() -> u8 {
@@ -119,6 +143,7 @@ fn serve() -> Result<(), String> {
     unsafe {
         libc::signal(libc::SIGTERM, on_term as *const () as libc::sighandler_t);
     }
+    limit_arenas();
     let settings = crate::settings::load()?;
     let store = Store::new(&settings);
     let _single = single_instance(&store.state_dir)?;
@@ -188,8 +213,10 @@ fn serve() -> Result<(), String> {
         .map_err(|e| format!("amh: cannot start the checkpointer: {e}"))?;
     listen(&store.state_dir)?;
     notify_systemd("READY=1");
+    const BEAT: Duration = Duration::from_millis(100);
+    let per = |every: Duration| (every.as_millis() / BEAT.as_millis()) as u64;
     for beat in 1u64.. {
-        std::thread::sleep(Duration::from_millis(10));
+        std::thread::sleep(BEAT);
         if stopping() {
             // A clean stop: requests and sends in flight finish and are recorded, so an upgrade resends nothing.
             let began = Instant::now();
@@ -213,10 +240,13 @@ fn serve() -> Result<(), String> {
             );
             std::process::exit(0);
         }
-        if beat % 300 == 0 {
+        if beat % per(Duration::from_secs(3)) == 0 {
             notify_systemd("WATCHDOG=1");
         }
-        if beat % 6_000 == 0 {
+        if beat % per(TRIM_EVERY) == 0 {
+            trim();
+        }
+        if beat % per(Duration::from_secs(60)) == 0 {
             eprintln!(
                 "amhd: commit-queue wait p99 {} us, writer hold p99 {} us",
                 queue.wait_p99_us(),
