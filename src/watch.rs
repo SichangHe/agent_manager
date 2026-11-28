@@ -1956,7 +1956,10 @@ pub fn run() -> u8 {
         }
         // 🧑 "Task file rebuild should be lazy. Locking should be in us not ms": task files are imported and exported here, outside the lock.
         let phase = Instant::now();
-        if let Err(error) = store.sync_files() {
+        // Under amhd its own threads import typed edits and export (`daemon::edits`, `export_loop`); doing it here too wrote `export:stamp` every pass, a commit that woke the exporter for a needless pass (amhd at 7-8% CPU on exxact).
+        if !crate::daemon::commit::installed()
+            && let Err(error) = store.sync_files()
+        {
             log(&format!("task file sync failed: {error}"));
         }
         log_elapsed("task file sync", phase);

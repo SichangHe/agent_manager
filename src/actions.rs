@@ -495,9 +495,8 @@ fn systemctl(args: &[&str]) -> Result<u8, String> {
     let mut command = Command::new("systemctl");
     // Agent sessions often lack the variable `systemctl --user` needs to find the user's bus.
     if std::env::var_os("XDG_RUNTIME_DIR").is_none() {
-        use std::os::unix::fs::MetadataExt;
-        let uid = fs::metadata("/proc/self").map(|own| own.uid());
-        let uid = uid.map_err(|error| format!("amh: cannot read own user id: {error}"))?;
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
         command.env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
     }
     let status = command.arg("--user").args(args).status();
@@ -2100,6 +2099,20 @@ pub fn run(values: &Value) -> Result<u8, String> {
             } else {
                 UNIT
             };
+            // A Mac has no systemd: the watcher is a launchd job (`watch.launchd_label`), restarted with launchctl.
+            if cfg!(target_os = "macos") {
+                let label = match settings::get(&settings, "watch.launchd_label") {
+                    "" => "com.sichanghe.amh-watch",
+                    label => label,
+                };
+                // SAFETY: getuid has no preconditions.
+                let target = format!("gui/{}/{label}", unsafe { libc::getuid() });
+                let status = Command::new("launchctl")
+                    .args(["kickstart", "-k", &target])
+                    .status()
+                    .map_err(|error| format!("amh: cannot run launchctl: {error}"))?;
+                return Ok(status.code().and_then(|code| u8::try_from(code).ok()).unwrap_or(1));
+            }
             let restarted = systemctl(&["restart", unit])?;
             return match restarted {
                 0 => systemctl(&["--no-pager", "--lines=3", "status", unit]),
