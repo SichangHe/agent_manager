@@ -643,7 +643,8 @@ pub fn cycle(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Snapshot::default(),
         Err(e) => return Err(format!("cannot read the snapshot: {e}")),
     };
-    let readings = core::parse_auth_files(&answer, now);
+    let mut readings = core::parse_auth_files(&answer, now);
+    core::forget_pre_redemption(&mut readings, &core::redeemed_at(&files.journal()?));
     if readings.is_empty() {
         return Err("the proxy listed no Claude or Codex credentials".to_owned());
     }
@@ -864,7 +865,9 @@ pub fn cycle(
             );
             memory.credits.remove(&bucket.principal);
             // The reset makes the credential usable now, and a disabled one gets no traffic to show it.
+            // Disabling clears the proxy's cooldown from the 429 that exhausted it; otherwise it keeps the reset account idle until the old reset time.
             if core::journal_steps(&files.journal()?, &episode).last() == Some(&"confirmed")
+                && proxy.apply(&Act::Disable(reading.name.clone())).is_ok()
                 && proxy.apply(&Act::Enable(reading.name.clone())).is_ok()
             {
                 ours.remove(&reading.name);
@@ -961,7 +964,9 @@ pub fn cycle(
                 Some(&credit),
             );
             memory.credits.remove(&bucket.principal);
+            // Disabling clears the proxy's cooldown from the 429 that exhausted it; otherwise it keeps the reset account idle until the old reset time.
             if core::journal_steps(&files.journal()?, &episode).last() == Some(&"confirmed")
+                && proxy.apply(&Act::Disable(reading.name.clone())).is_ok()
                 && proxy.apply(&Act::Enable(reading.name.clone())).is_ok()
             {
                 ours.remove(&reading.name);
@@ -1294,11 +1299,19 @@ mod tests {
         let first = cycle(&settings, &store, &p, &files, &mut memory, true, now).expect("cycle");
         assert!(first.buckets.iter().any(|b| b.status == Status::Exhausted));
         let calls = proxy.log.lock().expect("log").clone();
+        // Only the momentary disable that clears the proxy's cooldown after the redemption, at once re-enabled.
+        let off = calls
+            .iter()
+            .position(|c| c.contains("\"name\":\"a\"") && c.contains("\"disabled\":true"));
         assert!(
-            calls
+            off.is_none_or(|i| calls
                 .iter()
-                .all(|c| !(c.contains("a") && c.contains("\"disabled\":true"))),
-            "exhausted `a` is never disabled: {calls:?}"
+                .position(|c| c == "consume")
+                .is_some_and(|k| k < i)
+                && calls
+                    .get(i + 1)
+                    .is_some_and(|c| c.contains("\"disabled\":false"))),
+            "exhausted `a` is never left disabled: {calls:?}"
         );
         assert_eq!(calls.iter().filter(|c| *c == "consume").count(), 1);
         let steps: Vec<String> = files

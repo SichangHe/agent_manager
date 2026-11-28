@@ -535,6 +535,45 @@ pub fn proxy_actions(
     acts
 }
 
+/// Per credential, when a redemption of ours was last confirmed.
+pub fn redeemed_at(journal: &[Value]) -> BTreeMap<String, i64> {
+    let mut cred_of = BTreeMap::new();
+    let mut out = BTreeMap::new();
+    for e in journal {
+        let Some(ep) = e["episode"].as_str() else {
+            continue;
+        };
+        match e["step"].as_str() {
+            Some("intent") => {
+                if let Some(c) = e["detail"]["cred"].as_str() {
+                    cred_of.insert(ep.to_owned(), c.to_owned());
+                }
+            }
+            Some("confirmed") => {
+                if let (Some(c), Some(t)) = (cred_of.get(ep), e["t"].as_i64()) {
+                    out.insert(c.clone(), t);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// A reading taken before the account's last confirmed redemption describes the used-up quota, not the fresh one: drop it, so the account counts as never read and ranks first until traffic reads it.
+// 🧑 "The team account resets Monday 2 a.m. It needs to be used up somehow before reset." (its reset had been redeemed, yet its stale 100% reading ranked it last)
+pub fn forget_pre_redemption(readings: &mut [Reading], redeemed: &BTreeMap<String, i64>) {
+    for r in readings {
+        if let Some(t) = redeemed.get(&r.name)
+            && r.observed_at.is_none_or(|at| at < *t)
+        {
+            r.windows.clear();
+            r.observed_at = None;
+            r.quota_until = None;
+        }
+    }
+}
+
 /// The journaled steps of one redemption episode, oldest first.
 pub fn journal_steps<'a>(journal: &'a [Value], episode: &str) -> Vec<&'a str> {
     journal
@@ -1211,6 +1250,35 @@ mod tests {
             next_reset: d7_reset,
             auth_error: None,
         }
+    }
+
+    #[test]
+    fn readings_before_a_confirmed_redemption_are_forgotten() {
+        let j = vec![
+            json!({"episode": "e", "step": "intent", "t": 100, "detail": {"cred": "a"}}),
+            json!({"episode": "e", "step": "confirmed", "t": 110}),
+        ];
+        let red = redeemed_at(&j);
+        assert_eq!(red.get("a"), Some(&110));
+        let mut rs = vec![
+            reading("a", "claude:a", false, Some(0)),
+            reading("b", "claude:b", false, Some(0)),
+        ];
+        rs[0].observed_at = Some(105);
+        rs[1].observed_at = Some(105);
+        let before = rs[1].windows.len();
+        forget_pre_redemption(&mut rs, &red);
+        assert!(rs[0].observed_at.is_none() && rs[0].windows.is_empty());
+        assert_eq!(rs[1].windows.len(), before);
+        rs[0].observed_at = Some(120);
+        let mut fresh = rs[0].clone();
+        fresh.windows = vec![];
+        forget_pre_redemption(std::slice::from_mut(&mut fresh), &red);
+        assert_eq!(
+            fresh.observed_at,
+            Some(120),
+            "a reading after the redemption is kept"
+        );
     }
 
     #[test]
