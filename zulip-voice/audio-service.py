@@ -122,11 +122,13 @@ class Speech:
         if not stamps and not force:
             return "", -9.0
         speech = collect_chunks(samples, stamps)[0] if stamps else samples
-        inputs = self.processor.apply_transcription_request(audio=speech, language="English", prompt=prompt or None).to(self.qwen.device, self.qwen.dtype)
+        inputs = self.processor.apply_transcription_request(audio=speech, language=None, prompt=prompt or None).to(self.qwen.device, self.qwen.dtype)
         out = self.qwen.generate(**inputs, max_new_tokens=256, do_sample=False, output_scores=True, return_dict_in_generate=True)
         ids = out.sequences[:, inputs["input_ids"].shape[1]:]
         logprobs = self.qwen.compute_transition_scores(out.sequences, out.scores, normalize_logits=True)
         text = self.processor.decode(ids, return_format="transcription_only")[0].strip()
+        # language=None auto-detects (zh_input_check.md: mixed zh/en came out translated to English); drop a leaked "language X<asr_text>" prefix
+        text = re.sub(r"^\s*language\s+[A-Za-z]+\s*<asr_text>", "", text).strip()
         return text, float(logprobs.mean()) if logprobs.numel() else -9.0
 
     def load_kws(self) -> None:
