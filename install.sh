@@ -43,6 +43,23 @@ if [ ! -f "$config" ]; then
     curl -fsSL https://raw.githubusercontent.com/SichangHe/.config/macos/amh/config.toml -o "$config"
     echo "fetched $config"
 fi
+# 🧑 (via ruby1_manager.md) ruby1 "has no automatic intake/delivery": the watcher runs as a user service (Linux with systemd).
+# A login shell starts it, so a per-host XDG_STATE_HOME set in the shell profile (hosts sharing one home) applies.
+unit_dir=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
+if [ "$(uname -s)" = Linux ] && command -v systemctl >/dev/null 2>&1 && [ ! -f "$unit_dir/amh-watch.service" ] \
+    && [ ! -f "$state/amhd.client" ]; then
+    mkdir -p "$unit_dir"
+    printf '[Unit]\nDescription=amh watcher: Zulip intake and delivery to agents on this machine\nAfter=network-online.target\n\n[Service]\nExecStart=/bin/sh -lc "exec amh manager watch"\nRestart=always\nRestartSec=5s\n\n[Install]\nWantedBy=default.target\n' > "$unit_dir/amh-watch.service"
+    echo "wrote $unit_dir/amh-watch.service"
+fi
+# A machine on the amh daemon (amhd.service, which conflicts with amh-watch.service) keeps it.
+if [ "$(uname -s)" = Linux ] && command -v systemctl >/dev/null 2>&1 && [ ! -f "$state/amhd.client" ] \
+    && ! systemctl --user cat amhd.service >/dev/null 2>&1; then
+    systemctl --user daemon-reload && systemctl --user enable --now amh-watch.service && echo "started amh-watch.service" \
+        || echo "could not start amh-watch.service; run: systemctl --user enable --now amh-watch.service" >&2
+    loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes \
+        || echo "the watcher stops when you log out; keep it running: loginctl enable-linger $(id -un) (may need sudo)" >&2
+fi
 [ -f "$state/zulip.env" ] || echo "missing $state/zulip.env: rerun with ZULIP_BOT_EMAIL=... ZULIP_BOT_API_KEY=... for this machine's Zulip bot" >&2
 case ":$PATH:" in *":$bin_dir:"*) ;; *) echo "add $bin_dir to PATH" >&2 ;; esac
 echo "check: echo hello | amh tell agent main_manager.md --from $(hostname -s)"

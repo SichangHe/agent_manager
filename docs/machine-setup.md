@@ -22,6 +22,7 @@
 - check: `echo hello | amh tell agent main_manager.md --from NAME` prints `sent through Zulip`; the main machine's main manager gets it within ~10 s
 - sending from a script or an agent amh did not start: `--from NAME` names the sender; a reply to `NAME` is posted to topic `NAME` of the agents' channel
 - receiving here needs Omnigent and the watcher (`amh manager watch`); a task started here records `machine: BOT` and takes posts to its tag
+    - `install.sh` installs and starts the watcher as the user service `amh-watch.service` on Linux (a login shell runs it, so a per-host `XDG_STATE_HOME` from the shell profile applies); `loginctl enable-linger USER` keeps it running after logout; on a Mac, run `amh manager watch` under launchd
 - many hosts at once
     - 🧑 "Make setting up AMH seamless, basically a one-step process, one command ... we need a way to set them up in batches"
     - on the main machine: `scripts/new-machine-bots NAME...` makes one bot per host through the human's logged-in browser (`scripts/zulip-new-bot.mjs`; bots cannot create bots) and adds it to the agents' channel; logins in `~/.local/share/amh-machines/NAME.env`
