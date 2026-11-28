@@ -5,7 +5,8 @@
  */
 import {createRecorder, EARCON_NOTES, EARCON_NOTE_S} from './recorder.mjs';
 import {createKeywordSpotter} from './kws.mjs';
-import {assembleReply, looksLikeClippedEndWord, soundsLike, removeControlWords, DOMAIN_PROMPT} from './text.mjs';
+import {assembleReply, looksLikeClippedEndWord, soundsLike, removeControlWords, DOMAIN_PROMPT, DOMAIN_PROMPT_ZH} from './text.mjs';
+import {t as tr, getLang} from './i18n.mjs';
 import {itemsOf} from './model.mjs';
 import {$, toast} from './chrome.mjs';
 import {normalize, rankTopics, clearWinner, commandPhrases, afterStartWord as afterStart, stripResumePhrase as stripResume, isCommandWord as isCmd, isCancel, hasCancelWord as hasCancel, endsWithCancel as endsCancel,
@@ -28,7 +29,6 @@ const START_MIN_SPEECH_MS = 250, START_MAX_NO_SPEECH = 0.6, START_MIN_LOGPROB = 
 const PIECE_MAX_CALLS_PER_MIN = 60;   // live refreshes of the growing piece stop when Zulip calls this minute pass this (Zulip allows ~200)
 const UPLOADS_PER_MIN = 8, EMPTY_RUN_BACKOFF = 3, BACKOFF_MS = 60000;
 /** Mode names as the human reads them (help text and toasts); rename here only. Log keys stay `command mode` etc. */
-const MODE_NAMES = {standby: 'standby', input: 'input', command: 'command'};
 const COMMAND_SOUND_MS = EARCON_NOTES.command.length * EARCON_NOTE_S * 1000;
 
 /**
@@ -89,12 +89,13 @@ export function createVoiceControl(ctx) {
     if (flash) bannerUntil = Date.now() + MODE_BANNER_MS;
     el.hidden = !mode || Date.now() > bannerUntil; if (el.hidden) return;
     el.dataset.mode = mode;
-    $('mode-name').textContent = mode === 'command' ? 'Command mode' : 'Input mode';
+    $('mode-name').textContent = mode === 'command' ? tr('mode.commandTitle') : tr('mode.inputTitle');
     $('mode-hint').textContent = mode === 'command'
-      ? `Still listening. Say a command: next, back, pause, resume, switch to NAME. "${resumePhrase()}" leaves, "${cancelWord()}" cancels. Two equal low beats = still in command mode.`
-      : `Still listening. What you say becomes your reply. "${resumePhrase()}" sends, "${cancelWord()}" cancels. A low rising beat = still listening.`;
+      ? tr('mode.commandHint', {resume: resumePhrase(), cancel: cancelWord()})
+      : tr('mode.inputHint', {resume: resumePhrase(), cancel: cancelWord()});
   }
-  const setVcState = (state, label) => { showModeBanner(); $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = 'Voice control: ' + label; $('listen').setAttribute('aria-label', 'Voice control: ' + label); };
+  let vcShown = ['off', 'off'];
+  const setVcState = (state, key) => { vcShown = [state, key]; showModeBanner(); const label = tr('vc.' + key); $('listen').dataset.state = state; $('listen-label').textContent = label; $('listen').title = tr('vc.aria', {label}); $('listen').setAttribute('aria-label', tr('vc.aria', {label})); };
   const vcIdle = () => { const playing = ['playing', 'loading'].includes(player.position().status); setVcState(playing ? 'listening' : 'on', playing ? 'listening' : 'paused'); };
 
   const recorder = createRecorder({
@@ -204,7 +205,7 @@ export function createVoiceControl(ctx) {
     log('vc', `speech detected while ${player.position().status}${vc ? ' (session open)' : ''}`);
     utterancePending = true; clearTimeout(utteranceTimer); utteranceTimer = setTimeout(utteranceDone, 6000);
     if (vc) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); vc.timer = vc.emptyTimer = 0; }
-    setVcState('heard', 'hearing you');
+    setVcState('heard', 'hearing');
   }
   let pieceBusy = false;   // a refresh of the growing piece is being transcribed: the next one waits for it
   let clipsInFlight = 0;   // clips whose transcription is still running
@@ -238,7 +239,7 @@ export function createVoiceControl(ctx) {
     }
     const listening = !!vc || choiceOpen();
     // Domain words bias reply dictation only; never a prompt that names the control words: the model echoes it back on noise. Start-word clips also get keyword spotting on the server.
-    let r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? DOMAIN_PROMPT : undefined, !listening, {patient: !!meta.final || (!meta.piece && !!vc)});
+    let r = await voice.stt(blob, vc && vc.mode !== 'command' && (meta.speechMs ?? 0) >= 1500 ? (getLang() === 'zh' ? DOMAIN_PROMPT_ZH : DOMAIN_PROMPT) : undefined, !listening, {patient: !!meta.final || (!meta.piece && !!vc)});
     // 🧑 "if the front end. Detects something like the start words. But confidence is low. Then. We should request the backend to do it again. And confirm."
     const lowConfidence = r.ok && !listening && (r.noSpeechProb > START_MAX_NO_SPEECH || r.avgLogprob < START_MIN_LOGPROB);
     if (lowConfidence && Date.now() - lastHitAt < 3000) {
@@ -250,8 +251,8 @@ export function createVoiceControl(ctx) {
     if (!r.ok) {   // a transient failure is silent: inside a reply the clip stays as audio and goes out with the reply; the user is told what to do only once
       log('vc', `stt failed: ${r.error}`);
       if (vc?.mode === 'command') {   // 🧑 command mode with no connection gave zero feedback: say what still works (the on-device words), at most every 6 s
-        if (Date.now() - (vc.toldCommandOffline ?? 0) > 6000) { vc.toldCommandOffline = Date.now(); recorder.beep('empty'); toast('No connection: command not heard. Only on-device commands work.'); sayAndMute("No connection. I can't hear that command. Say cancel, stop, or switch to."); }
-      } else if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute("Connection lost. Keep talking; I'll send when it's back."); }
+        if (Date.now() - (vc.toldCommandOffline ?? 0) > 6000) { vc.toldCommandOffline = Date.now(); recorder.beep('empty'); toast(tr('vc.noConnToast')); sayAndMute(tr('say.noConnCmd')); }
+      } else if (vc && !vc.toldOffline) { vc.toldOffline = true; sayAndMute(tr('say.connLost')); }
       if (vc) armSessionTimer();
       resumeBarge(); vcIdle(); return;
     }
@@ -291,7 +292,7 @@ export function createVoiceControl(ctx) {
       if (afterStartWord(heard) !== null && !isCommandWord(first)) {
         log('vc', `local command word was wrong: the clip says "${heard}"; input mode`);
         clearTimeout(vc.timer); vc.mode = 'input'; vc.sawCommand = false; meta.part.fromCommand = false; vc.parts.forEach(p => { p.fromCommand = false; });
-        recorder.beep('ready'); setVcState('dictating', 'say your reply');
+        recorder.beep('ready'); setVcState('dictating', 'sayReply');
         addToSession(heard); return;
       }
     }
@@ -319,7 +320,7 @@ export function createVoiceControl(ctx) {
     if (rest === null && followUp && commandLike(heard)) rest = heard;   // a command right after a send is still a command, never reply text
     // 🧑 "The system picked up garbage": room talk 2 s after a send opened a reply with no start word and was sent after the silence. Speech after a send now needs the start word like any other.
     if (rest === null && followUp) log('vc', `right after a send, but no start word: "${heard}"`);
-    if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(`Ignored (no start word): ${heard.slice(0, 60)}`); recorder.setReplyMode(false); vcIdle(); return; }
+    if (rest === null) { noteStartResult(false); resumeBarge(); log('vc', `ignored: "${heard}" (no start word)`); toast(tr('vc.ignored', {heard: heard.slice(0, 60)})); recorder.setReplyMode(false); vcIdle(); return; }
     noteStartResult(true);
     if (commandFirst && afterStartWord(heard) === null) { openSession('', true); enterCommandMode(heard.trim().split(/\s+/).slice(1).join(' ')); return; }   // "potato next two" from standby: command mode directly
     openSession(rest);
@@ -333,8 +334,8 @@ export function createVoiceControl(ctx) {
     recorder.setPieceMode(false); recorder.flush();
     vc.mode = 'command'; vc.sawCommand = true;
     if (first) { armLocalCommands(); recorder.beep('command'); log('vc', 'command mode'); log('lat', `command mode ready ${Math.round(Date.now() - (vc.openedAt ?? Date.now()))}ms after the session opened`); }
-    setVcState('command', MODE_NAMES.command + ' mode');
-    toast(MODE_NAMES.command[0].toUpperCase() + MODE_NAMES.command.slice(1) + ' mode: back, next, switch to…, cancel');
+    setVcState('command', 'command');
+    toast(tr('vc.commandToast'));
     armCommandTimer();
     if (rest) runCommands(rest);
   }
@@ -344,7 +345,7 @@ export function createVoiceControl(ctx) {
     if (!vc || vc.mode !== 'command') return;
     if (why === 'silence' && !vc.text.trim()) { clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); log('vc', 'command mode left (silence) with nothing dictated: standby'); setDraft(vc.base); vc = null; recorder.setReplyMode(false); recorder.beep('done'); ctx.resumeAfterPause(); vcIdle(); return; }   // 🧑 an unrecognized command must not end in input mode
     clearTimeout(vc.timer); vc.mode = 'input'; recorder.setPieceMode(true); log('vc', `command mode left (${why}); back to input`);
-    recorder.beep('ready'); setVcState('dictating', 'say your reply');
+    recorder.beep('ready'); setVcState('dictating', 'sayReply');
     armSessionTimer();
   }
   /** Words after the command word, executed in order: "next three back one switch to human manager". Unknown words are ignored; nothing here becomes text. */
@@ -357,7 +358,7 @@ export function createVoiceControl(ctx) {
     const finishSession = (discard = false) => { if (!vc) return; clearTimeout(vc.timer); clearTimeout(vc.emptyTimer); setDraft(discard ? vc.base : vc.base + (vc.text ? (vc.base ? ' ' : '') + vc.text : '')); ctx.saveDraft(); vc = null; recorder.setReplyMode(false); };
     while (tokens.length && vc) {
       const t = tokens[0], two = tokens.slice(0, 2).join(' ');
-      if (SEND_LOG_RE.test(two) || SEND_LOG_RE.test(tokens.slice(0, 3).join(' '))) { tokens.splice(0, SEND_LOG_RE.test(two) ? 2 : 3); log('vc', 'send log by voice'); tick('log', 'sending the log'); ctx.sendLog('voice command').then(r => { if (!r?.ok) sayAndMute('Sending the log failed'); }); continue; }
+      if (SEND_LOG_RE.test(two) || SEND_LOG_RE.test(tokens.slice(0, 3).join(' '))) { tokens.splice(0, SEND_LOG_RE.test(two) ? 2 : 3); log('vc', 'send log by voice'); tick('log', tr('say.sendingLog')); ctx.sendLog('voice command').then(r => { if (!r?.ok) sayAndMute(tr('say.logFailed')); }); continue; }
       if (NEXT_AGENT_RE.test(tokens.slice(0, 4).join(' ')) || NEXT_AGENT_RE.test(tokens.slice(0, 3).join(' ')) || NEXT_AGENT_RE.test(two)) { log('vc', 'next agent with unread messages'); done.push('next agent'); recorder.beep('tick'); finishSession(true); bargePaused = false; ctx.switchNextUnread(); left = true; break; }
       if (SWITCH_BACK_RE.test(tokens.slice(0, 3).join(' ')) || SWITCH_BACK_RE.test(two)) { log('vc', 'switch back to the previous agent'); done.push('switch back'); recorder.beep('tick'); finishSession(true); bargePaused = false; ctx.switchBack(); left = true; break; }
       if (/^(switch|switched|switching|go)$/.test(t) && /^(to|agent|agents)$/.test(tokens[1] ?? '')) {   // Whisper often hears "switched to"; the name is free-form: it takes the rest of the utterance and ends the chain
@@ -366,23 +367,22 @@ export function createVoiceControl(ctx) {
       }
       if (CANCEL_RE.test(two) || CANCEL_RE.test(t)) { cancelSession(); return done; }
       const take = [5, 4, 3, 2, 1].find(n => navCommand(tokens.slice(0, n).join(' ')));   // longest prefix that is one navigation command ("next three", "previous message", "back")
-      if (take) { const nav = navCommand(tokens.splice(0, take).join(' ')); navs.push(nav); tick('navigate', `${nav.unread ? 'first unread' : nav.restart ? 'from the start' : nav.dir === 0 ? 'again' : nav.dir > 0 ? 'next' : 'back'}${nav.whole && !nav.restart ? ' message' : ''}${nav.count > 1 ? ' ' + nav.count : ''}`); navigated = true; continue; }
-      if (/^(stop|pause|wait)$/.test(t)) { tokens.shift(); player.pause(); ctx.holdPlayback?.(true); tick('pause', 'paused'); continue; }
-      if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play', 'playing'); navigated = true; ctx.holdPlayback?.(false); ctx.resumeAfterPause(); continue; }
+      if (take) { const nav = navCommand(tokens.splice(0, take).join(' ')); navs.push(nav); tick('navigate', `${nav.unread ? tr('nav.unread') : nav.restart ? tr('nav.restart') : nav.dir === 0 ? tr('nav.again') : nav.whole ? (nav.dir > 0 ? tr('nav.nextMsg') : tr('nav.backMsg')) : nav.dir > 0 ? tr('nav.next') : tr('nav.back')}${nav.count > 1 ? ' ' + nav.count : ''}`); navigated = true; continue; }
+      if (/^(stop|pause|wait)$/.test(t)) { tokens.shift(); player.pause(); ctx.holdPlayback?.(true); tick('pause', tr('say.paused')); continue; }
+      if (/^(play|resume|continue)$/.test(t)) { tokens.shift(); tick('play', tr('say.playing')); navigated = true; ctx.holdPlayback?.(false); ctx.resumeAfterPause(); continue; }
       log('vc', `command mode ignored "${t}"`); tokens.shift(); ignored.push(t);
     }
     const kept = raw && vc ? withoutStrayEndWords((afterStartWord(raw) ?? raw).trim()) : '';
     if (!done.length && ignored.length && vc && kept) {   // 🧑 2026-11-26 "a sentence heard in command mode that isn't a command must not be thrown away": it joins the reply text; "tomato" or silence returns to input mode with it
       log('vc', `not a command: kept as reply text "${kept}"`); appendText(kept); showSessionText();
-      recorder.beep('empty'); toast(`Not a command, kept in your reply: “${kept.slice(0, 80)}”. Say ${resumePhrase()} to go back to input.`); sayAndMute('Not a command. Kept in your reply.');
+      recorder.beep('empty'); toast(tr('vc.notCommandToast', {kept: kept.slice(0, 80), resume: resumePhrase()})); sayAndMute(tr('say.notCommand'));
     } else if (!done.length && ignored.length && vc) {   // heard something, understood nothing: say so and show the commands (silence would look like a hang)
-      const help = 'Commands: next, back, restart, next message, previous message, first unread, next agent, switch to NAME, stop, play, cancel.';
-      log('vc', `command not recognized: "${ignored.join(' ')}"`); recorder.beep('empty'); toast(`Command not recognized: “${ignored.join(' ')}”. ${help}`); sayAndMute('Command not recognized. Say next, back, switch to, or cancel.');
+      log('vc', `command not recognized: "${ignored.join(' ')}"`); recorder.beep('empty'); toast(tr('vc.unrecognizedToast', {heard: ignored.join(' ')})); sayAndMute(tr('say.unrecognized'));
     }
     if (done.length) log('vc', `commands: ${done.join(', ')}`);
     // 🧑 "It should, say. Back, with the number first, and then, start playing": navigation waits until the confirmation has been spoken, so the two never overlap.
-    if (said.length && navs.length) sayThen(said.join(', '), () => { for (const nav of navs) ctx.navigate(nav); });
-    else if (said.length) sayAndMute(said.join(', '));   // e.g. "paused"
+    if (said.length && navs.length) sayThen(said.join(tr('sep')), () => { for (const nav of navs) ctx.navigate(nav); });
+    else if (said.length) sayAndMute(said.join(tr('sep')));   // e.g. "paused"
     else for (const nav of navs) ctx.navigate(nav);
     if (navigated && vc && !left) { finishSession(); vcIdle(); left = true; }
     if (vc && !left) armCommandTimer();
@@ -390,7 +390,7 @@ export function createVoiceControl(ctx) {
   }
 
   // ---- switching by voice ----
-  function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('cancel'); toast('Switch cancelled'); ctx.maybeAutoplay(); } }
+  function cancelChoice() { if (pendingChoice) { pendingChoice = null; recorder.beep('cancel'); toast(tr('vc.switchCancelled')); ctx.maybeAutoplay(); } }
   function askChoice(names, confirm, prompt) {
     pendingChoice = {names, until: Date.now() + CHOICE_MS, confirm};
     setTimeout(() => { if (pendingChoice && Date.now() >= pendingChoice.until) cancelChoice(); }, CHOICE_MS + 500);
@@ -404,16 +404,16 @@ export function createVoiceControl(ctx) {
     if (!normalize(spoken)) {   // "switch to" with no name: wait for the name
       const names = model.topics().slice(0, 3).map(t => t.name);
       pendingChoice = {names, until: Date.now() + CHOICE_MS, confirm: false}; setTimeout(() => { if (pendingChoice && Date.now() >= pendingChoice.until) cancelChoice(); }, CHOICE_MS + 500);
-      toast('Switch to which agent?'); sayAndMute('Which agent?'); armLocalCommands(); return;
+      toast(tr('vc.whichToast')); sayAndMute(tr('say.which')); armLocalCommands(); return;
     }
     const ranked = rank(spoken);
     log('vc', `switch to "${spoken}" -> ${ranked.slice(0, 3).map(x => `${x.t.name}:${x.score.toFixed(2)}`).join(', ') || 'no match'}`);
-    if (!ranked.length) { log('vc', 'no agent matches'); toast(`No agent called “${spoken}”`); sayAndMute(`No agent called ${spoken}`); return; }
+    if (!ranked.length) { log('vc', 'no agent matches'); toast(tr('vc.noAgentToast', {name: spoken})); sayAndMute(tr('say.noAgent', {name: spoken})); return; }
     const clear = clearWinner(ranked), names = clear ? [ranked[0].t.name] : ranked.slice(0, 3).map(x => x.t.name);
     const readable = n => n.replace(/[_-]/g, ' ');
     // 🧑 "if I say "switch to some agent name," and ... only found one match, we don't need to wait for me to say "positive." We just switch there immediately" / "Maybe this would be a configuration that we can toggle."
     if (clear && !store.get('voice2-switch-confirm', false)) { log('vc', `one clear match: switching to ${names[0]} at once`); closeSessionForChoice(); ctx.switchTopic(names[0], true); vcIdle(); return; }
-    askChoice(names, clear, clear ? `Switch to ${readable(names[0])}?` : names.map((n, i) => `${i + 1}, ${readable(n)}.`).join(' '));
+    askChoice(names, clear, clear ? tr('say.switchTo', {name: readable(names[0])}) : names.map((n, i) => tr('say.choice', {n: i + 1, name: readable(n)})).join(' '));
     lat.stage('switch', 'question-shown');
   }
   /** Earcon plus "Now on <agent>", so a switch to an agent with nothing to play is still noticeable; unread messages play afterwards. Silent unless voice control is on. */
@@ -428,7 +428,7 @@ export function createVoiceControl(ctx) {
     }
     announcingUntil = Date.now() + 4000;
     recorder.muteFor(3500, true); sayingUntil = Date.now() + 3500;
-    const speak = () => player.say(`Now on ${topic}`).then(ms => { sayingUntil = Date.now() + ms; recorder.muteFor(ms, true); announcingUntil = Date.now() + ms + 300; resumeLater(ms + 350); });
+    const speak = () => player.say(tr('say.nowOn', {name: topic})).then(ms => { sayingUntil = Date.now() + ms; recorder.muteFor(ms, true); announcingUntil = Date.now() + ms + 300; resumeLater(ms + 350); });
     if (confirmed) setTimeout(() => { if (ctx.current() === topic) speak(); else announcingUntil = 0; }, COMMAND_SOUND_MS + 100); else speak();
   }
 
@@ -452,7 +452,7 @@ export function createVoiceControl(ctx) {
     log('vc', `session opened by start word; rest "${rest}"`);
     if (CANCEL_RE.test(normalize(rest))) { log('vc', 'cancel right after the start word'); vc = null; recorder.setReplyMode(false); recorder.beep('cancel'); ctx.resumeAfterPause(); vcIdle(); return; }
     if (rest) addToSession(rest);
-    else { setVcState('dictating', 'say your reply'); vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS); }
+    else { setVcState('dictating', 'sayReply'); vc.emptyTimer = setTimeout(closeEmptySession, EMPTY_SESSION_MS); }
   }
   /** Discards the open reply (restoring the draft), plays the cancel tone and carries on reading. */
   function cancelSession() {
@@ -478,7 +478,7 @@ export function createVoiceControl(ctx) {
     clearTimeout(vc.emptyTimer); vc.emptyTimer = 0;
     if (stripResumePhrase(heard) !== null && !vc.sending) { const t = (afterStartWord(heard) ?? heard).trim(); if (piece) setPiece(piece.id, t); else { appendText(t); showSessionText(); } recorder.drop(); sendVoiceReplyNow('end word in the transcript'); return; }   // what follows the end word is dropped with the open piece   // no quiet window
     { const t = withoutStrayEndWords((afterStartWord(heard) ?? heard).trim()); if (piece) setPiece(piece.id, t); else { appendText(t); showSessionText(); } }
-    setVcState('dictating', 'dictating reply');
+    setVcState('dictating', 'dictating');
     armSessionTimer();
   }
   /** (Re)starts the end-of-reply timer: end word + short silence, else the long silence; an empty session gets the empty timeout. */
@@ -556,7 +556,7 @@ export function createVoiceControl(ctx) {
     const r = await kwsSpotter.load();
     if (r.ok) prebuildCommands();
     if (!r.ok && retry && voiceControl && kwsEnabled()) { setTimeout(() => { if (voiceControl && kwsEnabled() && !kwsSpotter.ready()) loadKws(false); }, 8000); }
-    if (!r.ok && voiceControl) { toast('On-device start word failed to load; using the server (slower)'); setTimeout(() => $('set-kws').checked = kwsEnabled(), 0); }
+    if (!r.ok && voiceControl) { toast(tr('vc.kwsFailed')); setTimeout(() => $('set-kws').checked = kwsEnabled(), 0); }
   }
   async function setVoiceControl(on) {
     voiceControl = on; voiceListening = on; store.set('voice2-vc', on);
@@ -565,13 +565,13 @@ export function createVoiceControl(ctx) {
     if (kwsEnabled()) loadKws(); else log('kws', 'on-device start word is OFF in Settings: start words take the server path (slower)');   // lazy: the model (about 21 MB over the wire, once) loads only when voice control is switched on
     const r = await recorder.listen(true);
     if (r.ok && !r.running) { voiceListening = false; setVcState('waiting', 'tap'); log('vc', 'armed, waiting for a tap'); return; }
-    if (!r.ok) { toast(r.error); player.say('Microphone stopped. Tap the microphone button to restart.'); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
+    if (!r.ok) { toast(r.error); player.say(tr('say.micStopped')); voiceControl = false; store.set('voice2-vc', false); $('set-voice').checked = false; setVcState('off', 'off'); }
     log('vc', `voice control ${r.ok ? 'on' : 'failed'}`);
     if (r.ok && r.running) recorder.beep('ready');
   }
 
   // ---- settings sheet ----
-  document.querySelectorAll('.mn').forEach(e => { e.textContent = MODE_NAMES[e.dataset.m]; });   // help text uses the names above
+  
   const textSetting = (id, key, fallback, clean) => { $(id).value = store.get(key, fallback); $(id).onchange = e => store.set(key, clean(e.target.value.trim()) || fallback); };
   textSetting('set-phrase', 'voice2-resume-phrase', RESUME_DEFAULT, v => v);
   textSetting('set-start', 'voice2-start-word', START_DEFAULT, v => v.toLowerCase());
@@ -583,7 +583,7 @@ export function createVoiceControl(ctx) {
   { const box = $('set-switch-confirm'); if (box) { box.checked = store.get('voice2-switch-confirm', false); box.onchange = e => store.set('voice2-switch-confirm', e.target.checked); } }
   $('set-kws').onchange = e => { store.set('voice2-kws', e.target.checked); if (e.target.checked && voiceControl) loadKws(); else if (!e.target.checked) kwsSpotter.unload(); };
   $('set-voice').onchange = e => setVoiceControl(e.target.checked);
-  $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? 'Voice control on: say attention, then your reply, and finish with "tomato"' : 'Voice control off'); };
+  $('listen').onclick = e => { e.stopPropagation(); setVoiceControl(!voiceControl); toast(voiceControl ? tr('vc.on') : tr('vc.offToast')); };
 
   return {
     recorder, userSpeaking, announceSwitch, prebuildCommands, cancelWord, commandWord,
@@ -591,6 +591,7 @@ export function createVoiceControl(ctx) {
     sessionOpen: () => !!vc,
     micQuietMs: () => recorder.quietMs(),
     /** A saved "on" re-arms after reload: try at once, else on the first tap anywhere. */
+    relocalize() { setVcState(...vcShown); },
     start() { if (voiceControl) { $('set-voice').checked = true; setVcState('waiting', 'tap'); setVoiceControl(true); } },
     onGesture() { if (voiceControl && !recorder.active() && !voiceListening) setVoiceControl(true); },
     /** The draft was sent by hand: a later timer must not send it again. */

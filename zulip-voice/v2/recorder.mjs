@@ -3,6 +3,7 @@
  * Raw PCM through an AudioWorklet avoids MediaRecorder, whose chunks are not independently decodable and which is flaky on iOS.
  * Clips without speech are dropped.
  */
+import {t} from './i18n.mjs';
 const TARGET_HZ = 16000;
 const MAX_CLIP_S = 10;
 const PAUSE_MS = 700;
@@ -211,7 +212,7 @@ export function createRecorder({log, partialReady = () => true, pieceMsPerAudioS
         if (ctx?.state === 'suspended') await Promise.race([ctx.resume(), new Promise(r => setTimeout(r, 400))]);   // without a gesture iOS may keep it suspended
         return {ok: true, running: ctx?.state === 'running'};
       }
-      catch (error) { log('mic', `listen failed: ${error.name} ${error.message}`); listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied.' : `Microphone unavailable (${error.name}).`}; }
+      catch (error) { log('mic', `listen failed: ${error.name} ${error.message}`); listening = false; return {ok: false, error: error.name === 'NotAllowedError' ? t('err.micDenied') : t('err.micUnavailable', {name: error.name})}; }
     },
     async start() {
       if (capturing) return {ok: true};
@@ -226,7 +227,7 @@ export function createRecorder({log, partialReady = () => true, pieceMsPerAudioS
         if (error.message === 'cancelled') return {ok: false, cancelled: true};   // stop() superseded this start; a newer start owns `capturing`
         capturing = false;
         log('mic', `start failed: ${error.name} ${error.message}`);
-        return {ok: false, error: error.name === 'NotAllowedError' ? 'Microphone permission denied. Allow it in Settings > Safari > Microphone.' : `Microphone unavailable (${error.name}).`};
+        return {ok: false, error: error.name === 'NotAllowedError' ? t('err.micDeniedSafari') : t('err.micUnavailable', {name: error.name})};
       }
     },
     /** Resolves true when audio frames are really arriving while capturing; false after `timeoutMs`. */

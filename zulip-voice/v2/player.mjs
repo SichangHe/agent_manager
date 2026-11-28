@@ -6,6 +6,7 @@
  *
  * Status: `idle` (nothing queued), `loading` (waiting for audio data), `playing`, `paused`, `blocked` (needs a tap), `error` (will retry).
  */
+import {speechLang} from './i18n.mjs';
 const SILENCE = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA=';
 const AHEAD = 3;
 const URL_FRESH_MS = 25000;
@@ -311,7 +312,7 @@ export function createPlayer({log, voice, onItemStart, onItemEnd, onIdle, onStat
       const myGen = ++sayGen;
       const spoken = text.replace(/[_-]/g, ' ');
       const local = () => {   // no connection: the phone's own voice, so prompts and confirmations are never silent
-        try { if (!globalThis.speechSynthesis) return 0; speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(spoken); u.lang = 'en-US'; u.rate = 1.05; speechSynthesis.speak(u); log('audio', `spoken on the phone (no connection): ${spoken}`); return 800 + spoken.length * 70; } catch { return 0; }
+        try { if (!globalThis.speechSynthesis) return 0; speechSynthesis.cancel(); const u = new SpeechSynthesisUtterance(spoken); u.lang = speechLang(); u.rate = 1.05; speechSynthesis.speak(u); log('audio', `spoken on the phone (no connection): ${spoken}`); return 800 + spoken.length * 70; } catch { return 0; }
       };
       if (navigator.onLine === false) return local();
       const r = await voice.ttsBatch([spoken]);

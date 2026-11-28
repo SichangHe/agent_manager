@@ -12,115 +12,116 @@
 </head>
 <body>
 <div id="app" hidden>
-  <main id="feed" aria-label="Conversation"></main>
-  <button id="jump" hidden>Jump to playing</button>
-  <button id="first-unread" class="icon" aria-label="Scroll to first unread message"><svg viewBox="0 0 24 24" class="i"><path d="M6 4h12M12 20V9M6.5 14.5L12 9l5.5 5.5"/></svg></button>
-  <div id="net" hidden>No connection. Messages and audio will resume by themselves.</div>
+  <main id="feed" data-i18n-aria="conversation" aria-label="Conversation"></main>
+  <button id="jump" hidden data-i18n="jump">Jump to playing</button>
+  <button id="first-unread" class="icon" data-i18n-aria="first-unread" aria-label="Scroll to first unread message"><svg viewBox="0 0 24 24" class="i"><path d="M6 4h12M12 20V9M6.5 14.5L12 9l5.5 5.5"/></svg></button>
+  <div id="net" hidden data-i18n="net.off">No connection. Messages and audio will resume by themselves.</div>
   <div id="banner" hidden></div>
   <!-- 🧑 "let's just move all the control to the bottom of the screen" -->
   <footer id="dock">
     <div id="mode-banner" hidden><b id="mode-name"></b> <span id="mode-hint"></span></div>
     <header id="bar">
-      <button id="agent" class="chip" aria-label="Choose agent"><span id="agent-name">…</span><svg viewBox="0 0 24 24" class="i"><path d="M6 9l6 6 6-6"/></svg><b id="agent-unread" hidden></b></button>
+      <button id="agent" class="chip" data-i18n-aria="agent.chooseAria" aria-label="Choose agent"><span id="agent-name">…</span><svg viewBox="0 0 24 24" class="i"><path d="M6 9l6 6 6-6"/></svg><b id="agent-unread" hidden></b></button>
       <span class="grow"></span>
-      <button id="conn" class="chip quiet" aria-label="Connection and debug"><i id="conn-dot"></i><span id="conn-text"></span></button>
-      <button id="settings" class="icon" aria-label="Settings"><svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
+      <button id="conn" class="chip quiet" data-i18n-aria="conn.aria" aria-label="Connection and debug"><i id="conn-dot"></i><span id="conn-text"></span></button>
+      <button id="settings" class="icon" data-i18n-aria="settings" aria-label="Settings"><svg viewBox="0 0 24 24" class="i"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg></button>
     </header>
     <div id="transport">
-      <button id="prev" class="icon" aria-label="Previous message"><svg viewBox="0 0 24 24" class="i"><path d="M6 5v14M19 5L9 12l10 7z"/></svg></button>
-      <button id="play" class="icon big" aria-label="Play"><svg viewBox="0 0 24 24" class="i play"><path d="M8 5l11 7-11 7z"/></svg><svg viewBox="0 0 24 24" class="i pause"><path d="M8 5v14M16 5v14"/></svg><span class="spin"></span></button>
-      <button id="next" class="icon" aria-label="Next message"><svg viewBox="0 0 24 24" class="i"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
-      <button id="find" class="icon" aria-label="Switch agent"><svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg></button>
+      <button id="prev" class="icon" data-i18n-aria="prev" aria-label="Previous message"><svg viewBox="0 0 24 24" class="i"><path d="M6 5v14M19 5L9 12l10 7z"/></svg></button>
+      <button id="play" class="icon big" data-i18n-aria="play" aria-label="Play"><svg viewBox="0 0 24 24" class="i play"><path d="M8 5l11 7-11 7z"/></svg><svg viewBox="0 0 24 24" class="i pause"><path d="M8 5v14M16 5v14"/></svg><span class="spin"></span></button>
+      <button id="next" class="icon" data-i18n-aria="next" aria-label="Next message"><svg viewBox="0 0 24 24" class="i"><path d="M18 5v14M5 5l10 7-10 7z"/></svg></button>
+      <button id="find" class="icon" data-i18n-aria="find.aria" aria-label="Switch agent"><svg viewBox="0 0 24 24" class="i"><circle cx="11" cy="11" r="6"/><path d="M16 16l4 4"/></svg></button>
       <span class="grow"></span>
-      <button id="slower" class="icon sm" aria-label="Slower">−</button>
+      <button id="slower" class="icon sm" data-i18n-aria="slower" aria-label="Slower">−</button>
       <span id="rate">1.0×</span>
-      <button id="faster" class="icon sm" aria-label="Faster">+</button>
-      <button id="auto" class="chip" aria-pressed="true">Auto</button>
+      <button id="faster" class="icon sm" data-i18n-aria="faster" aria-label="Faster">+</button>
+      <button id="auto" class="chip" aria-pressed="true" data-i18n="auto">Auto</button>
     </div>
     <form id="composer" autocomplete="off">
       <div id="field">
-        <textarea id="draft" rows="1" placeholder="Message" enterkeyhint="send" aria-label="Message"></textarea>
+        <textarea id="draft" rows="1" placeholder="Message" data-i18n-ph="message" enterkeyhint="send" data-i18n-aria="message" aria-label="Message"></textarea>
         <canvas id="level" width="120" height="24" hidden></canvas>
       </div>
-      <button type="button" id="cancel-rec" class="icon" aria-label="Discard recording" hidden><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
-      <button type="button" id="next-unread" class="icon round" hidden aria-label="Next agent with unread messages"><span class="arrow">⇥</span><span id="next-unread-count"></span></button>
-      <button type="button" id="prev-agent" class="icon round" hidden aria-label="Back to the previous agent"><span class="arrow">↩</span><span id="prev-agent-name"></span></button>
-      <button type="button" id="attach" class="icon round" aria-label="Attach a file or photo"><svg viewBox="0 0 24 24" class="i"><path d="M21 11l-8.5 8.5a5 5 0 01-7-7L14 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L15 7"/></svg></button><input type="file" id="attach-input" multiple hidden>
+      <button type="button" id="cancel-rec" class="icon" data-i18n-aria="cancel-rec" aria-label="Discard recording" hidden><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      <button type="button" id="next-unread" class="icon round" hidden data-i18n-aria="next-unread" aria-label="Next agent with unread messages"><span class="arrow">⇥</span><span id="next-unread-count"></span></button>
+      <button type="button" id="prev-agent" class="icon round" hidden data-i18n-aria="prev-agent" aria-label="Back to the previous agent"><span class="arrow">↩</span><span id="prev-agent-name"></span></button>
+      <button type="button" id="attach" class="icon round" data-i18n-aria="attach" aria-label="Attach a file or photo"><svg viewBox="0 0 24 24" class="i"><path d="M21 11l-8.5 8.5a5 5 0 01-7-7L14 4a3.5 3.5 0 015 5l-8.5 8.5a2 2 0 01-3-3L15 7"/></svg></button><input type="file" id="attach-input" multiple hidden>
       <button type="button" id="listen" class="icon round" data-state="off" aria-label="Voice control: off"><svg viewBox="0 0 24 24" class="i"><path d="M3 12h2M7 8v8M11 5v14M15 8v8M19 10v4"/></svg><span id="listen-label"></span></button>
-      <button type="button" id="mic" class="icon round" aria-label="Dictate"><svg viewBox="0 0 24 24" class="i mic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg><svg viewBox="0 0 24 24" class="i done"><path d="M5 13l4 4L19 7"/></svg></button>
-      <button type="submit" id="send" class="icon round accent" aria-label="Send" disabled><svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
+      <button type="button" id="mic" class="icon round" data-i18n-aria="dictate" aria-label="Dictate"><svg viewBox="0 0 24 24" class="i mic"><rect x="9" y="3" width="6" height="12" rx="3"/><path d="M5 11a7 7 0 0014 0M12 18v3"/></svg><svg viewBox="0 0 24 24" class="i done"><path d="M5 13l4 4L19 7"/></svg></button>
+      <button type="submit" id="send" class="icon round accent" data-i18n-aria="send" aria-label="Send" disabled><svg viewBox="0 0 24 24" class="i"><path d="M12 19V5M5 12l7-7 7 7"/></svg></button>
     </form>
   </footer>
   <div id="toast" hidden></div>
   <div id="tap-flash" aria-hidden="true"></div>
 </div>
 
-<dialog id="picker" aria-label="Choose agent"><div class="sheet">
-  <div class="sheet-head"><input id="search" type="search" placeholder="Search agents" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+<dialog id="picker" data-i18n-aria="agent.chooseAria" aria-label="Choose agent"><div class="sheet">
+  <div class="sheet-head"><input id="search" type="search" placeholder="Search agents" data-i18n-ph="search.ph" autocomplete="off" autocapitalize="none" spellcheck="false"><button class="close icon" data-close data-i18n-aria="close" aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <ul id="topics"></ul>
 </div></dialog>
 
-<dialog id="keys-sheet" aria-label="Keyboard shortcuts"><div class="sheet">
-  <div class="sheet-head"><h2>Keyboard shortcuts</h2><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+<dialog id="keys-sheet" data-i18n-aria="keys.title" aria-label="Keyboard shortcuts"><div class="sheet">
+  <div class="sheet-head"><h2 data-i18n="keys.title">Keyboard shortcuts</h2><button class="close icon" data-close data-i18n-aria="close" aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <section><dl class="keys">
-    <dt>Space</dt><dd>play / pause</dd>
-    <dt>&larr; / &rarr;</dt><dd>previous / next chunk</dd>
-    <dt>Shift + &larr; / &rarr;</dt><dd>previous / next message</dd>
-    <dt>[ / ]</dt><dd>slower / faster</dd>
-    <dt>a</dt><dd>auto-read on / off</dd>
-    <dt>m</dt><dd>dictate; again: stop and keep text</dd>
-    <dt>Esc</dt><dd>discard recording; leave the text box</dd>
-    <dt>Enter</dt><dd>send (in the text box)</dd>
-    <dt>i</dt><dd>type a reply</dd>
-    <dt>/</dt><dd>find agent</dd>
-    <dt>Alt + &uarr; / &darr;</dt><dd>previous / next agent in the list</dd>
-    <dt>v</dt><dd>voice control on / off</dd>
-    <dt>?</dt><dd>this list</dd>
+    <dt>Space</dt><dd data-i18n="k.space">play / pause</dd>
+    <dt>&larr; / &rarr;</dt><dd data-i18n="k.arrows">previous / next chunk</dd>
+    <dt>Shift + &larr; / &rarr;</dt><dd data-i18n="k.shiftarrows">previous / next message</dd>
+    <dt>[ / ]</dt><dd data-i18n="k.speed">slower / faster</dd>
+    <dt>a</dt><dd data-i18n="k.a">auto-read on / off</dd>
+    <dt>m</dt><dd data-i18n="k.m">dictate; again: stop and keep text</dd>
+    <dt>Esc</dt><dd data-i18n="k.esc">discard recording; leave the text box</dd>
+    <dt>Enter</dt><dd data-i18n="k.enter">send (in the text box)</dd>
+    <dt>i</dt><dd data-i18n="k.i">type a reply</dd>
+    <dt>/</dt><dd data-i18n="k.slash">find agent</dd>
+    <dt>Alt + &uarr; / &darr;</dt><dd data-i18n="k.alt">previous / next agent in the list</dd>
+    <dt>v</dt><dd data-i18n="k.v">voice control on / off</dd>
+    <dt>?</dt><dd data-i18n="k.q">this list</dd>
   </dl></section>
 </div></dialog>
 
-<dialog id="settings-sheet" aria-label="Settings"><div class="sheet">
-  <div class="sheet-head"><h2>Settings</h2><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+<dialog id="settings-sheet" data-i18n-aria="settings" aria-label="Settings"><div class="sheet">
+  <div class="sheet-head"><h2 data-i18n="set.title">Settings</h2><button class="close icon" data-close data-i18n-aria="close" aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <section>
-    <label class="row"><span>Autoplay new messages</span><input id="set-auto" type="checkbox"></label>
-    <label class="row"><span>Voice control</span><input id="set-voice" type="checkbox"></label>
-    <label class="row"><span>End phrase (default: tomato; to say the word itself, say "roo" or type it)</span><input id="set-phrase" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
-    <p class="muted" style="font-size:13px"><b><span class="mn" data-m="input">input</span> mode:</b> say the start word ("attention"), then talk: everything you say is your reply. Finish it with <b>tomato</b> (sends). Say <b>tornado</b> anywhere, in any mode, to cancel and discard at once (the old <b>cancel</b> still works through the server).<br><b><span class="mn" data-m="command">command</span> mode:</b> say the command word (default <b>potato</b>; a double thump) from standby on its own: no start word is needed. While input mode is open (including right after "attention") it does nothing. Now only commands are heard, nothing becomes text, and each one answers with a tick. They chain in one breath. Commands: <b>skip forward</b> / <b>skip backward</b> (add a count: <b>skip forward three</b>; up to ten; past the last chunk it ends reading), <b>previous message</b>, <b>next message</b>, <b>first unread</b> (or <b>unread</b>: scroll to the first unread message of this agent; playback is untouched), <b>again</b>, <b>stop</b>, <b>play</b>, <b>switch to NAME</b>, <b>switch back</b> (old <b>next</b>/<b>back</b> still work). Confirming a switch (<b>positive</b>) answers at once with the same double thump; then the new agent's unread messages start, or, if there are none, "Now on NAME" is spoken (never over a message); a falling pair means it was declined, cancelled or timed out. Answers to "Switch to NAME?": <b>positive</b> / <b>negative</b> (or yes / no), or <b>number one</b>, <b>number two</b>… Navigation and switching leave command mode; four seconds of quiet, or <b>tomato</b>, return to input mode with your draft kept.</p>
-    <label class="row"><span>Cancel word (default: tornado; discards what you are saying, anywhere)</span><input id="set-cancel" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
-    <p class="muted" style="font-size:13px">Only the default cancel word is also recognised on the phone itself (instant). A different word is recognised by the server after you stop talking: slower.</p>
-    <label class="row"><span>Command word (default: potato)</span><input id="set-cmd" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
-    <label class="row"><span>Start word (default: attention)</span><input id="set-start" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
-    <label class="row"><span>Long silence finishes a reply (seconds, 0 = off)</span><input id="set-silence" type="number" min="0" max="30" step="1" style="width:70px;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
-    <label class="row"><span>On-device keyword recognition (on by default; uses about 300 MB more memory, turn off if the page reloads on its own)</span><input id="set-kws" type="checkbox"></label>
-    <label class="row"><span>Ask "Switch to X?" before a voice switch with one clear match (off: switch at once; say switch again if it is wrong)</span><input id="set-switch-confirm" type="checkbox"></label>
-    <label class="row"><span>Hide attachments</span><input id="set-hide-att" type="checkbox"></label>
-    <label class="row"><span>Speed <b id="set-rate-text"></b></span><input id="set-rate" type="range" min="0.5" max="3" step="0.1"></label>
+    <label class="row"><span data-i18n="set.language">Language</span><select id="set-lang" style="font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"><option value="en">English</option><option value="zh">中文</option></select></label>
+    <label class="row"><span data-i18n="set.autoplay">Autoplay new messages</span><input id="set-auto" type="checkbox"></label>
+    <label class="row"><span data-i18n="set.voice">Voice control</span><input id="set-voice" type="checkbox"></label>
+    <label class="row"><span data-i18n="set.phrase">End phrase (default: tomato; to say the word itself, say "roo" or type it)</span><input id="set-phrase" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
+    <p class="muted" style="font-size:13px" data-i18n-html="set.help"></p>
+    <label class="row"><span data-i18n="set.cancel">Cancel word (default: tornado; discards what you are saying, anywhere)</span><input id="set-cancel" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
+    <p class="muted" style="font-size:13px" data-i18n="set.cancel.note">Only the default cancel word is also recognised on the phone itself (instant). A different word is recognised by the server after you stop talking: slower.</p>
+    <label class="row"><span data-i18n="set.cmd">Command word (default: potato)</span><input id="set-cmd" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
+    <label class="row"><span data-i18n="set.start">Start word (default: attention)</span><input id="set-start" type="text" autocapitalize="none" autocomplete="off" spellcheck="false" style="flex:1;max-width:55%;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
+    <label class="row"><span data-i18n="set.silence">Long silence finishes a reply (seconds, 0 = off)</span><input id="set-silence" type="number" min="0" max="30" step="1" style="width:70px;font:inherit;padding:6px 10px;border-radius:10px;border:1px solid var(--line);background:var(--panel);color:inherit"></label>
+    <label class="row"><span data-i18n="set.kws">On-device keyword recognition (on by default; uses about 300 MB more memory, turn off if the page reloads on its own)</span><input id="set-kws" type="checkbox"></label>
+    <label class="row"><span data-i18n="set.switchConfirm">Ask "Switch to X?" before a voice switch with one clear match (off: switch at once; say switch again if it is wrong)</span><input id="set-switch-confirm" type="checkbox"></label>
+    <label class="row"><span data-i18n="set.hideAtt">Hide attachments</span><input id="set-hide-att" type="checkbox"></label>
+    <label class="row"><span><span data-i18n="set.speed">Speed</span> <b id="set-rate-text"></b></span><input id="set-rate" type="range" min="0.5" max="3" step="0.1"></label>
   </section>
   <section>
-    <button id="open-keys" class="wide">Keyboard shortcuts (?)</button>
-    <button id="open-debug" class="wide">Connection and debug log</button>
-    <button id="reload" class="wide">Reload app</button>
+    <button id="open-keys" class="wide" data-i18n="open-keys">Keyboard shortcuts (?)</button>
+    <button id="open-debug" class="wide" data-i18n="open-debug">Connection and debug log</button>
+    <button id="reload" class="wide" data-i18n="reload">Reload app</button>
   </section>
   <section>
     <p class="muted" id="account-text"></p>
-    <button id="sign-out" class="wide danger">Sign out…</button>
+    <button id="sign-out" class="wide danger" data-i18n="sign-out">Sign out…</button>
   </section>
 </div></dialog>
 
-<dialog id="debug-sheet" aria-label="Debug"><div class="sheet full">
-  <div class="sheet-head"><h2>Debug</h2><button class="close icon" data-close aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
+<dialog id="debug-sheet" data-i18n-aria="debug.title" aria-label="Debug"><div class="sheet full">
+  <div class="sheet-head"><h2>Debug</h2><button class="close icon" data-close data-i18n-aria="close" aria-label="Close"><svg viewBox="0 0 24 24" class="i"><path d="M6 6l12 12M18 6L6 18"/></svg></button></div>
   <pre id="debug-status"></pre>
-  <div class="debug-actions"><button id="dbg-copy">Copy all</button><button id="dbg-send">Send to server</button><button id="dbg-ping">Test voice</button><button id="dbg-kick">Reconnect</button><button id="dbg-clear">Clear</button><button onclick="location.href='test.html'">Self-test</button></div>
+  <div class="debug-actions"><button id="dbg-copy" data-i18n="dbg.copy">Copy all</button><button id="dbg-send" data-i18n="dbg.send">Send to server</button><button id="dbg-ping" data-i18n="dbg.ping">Test voice</button><button id="dbg-kick" data-i18n="dbg.kick">Reconnect</button><button id="dbg-clear" data-i18n="dbg.clear">Clear</button><button onclick="location.href='test.html'" data-i18n="dbg.self">Self-test</button></div>
   <pre id="debug-log"></pre>
 </div></dialog>
 
-<dialog id="login" aria-label="Sign in"><form class="sheet" id="login-form">
-  <h2>Voice</h2>
-  <a id="howto" href="using.html" target="_blank" rel="noopener">New here? How to use this</a>
-  <p class="muted">Paste your zuliprc once. The key stays in this browser.</p>
+<dialog id="login" data-i18n-aria="login.aria" aria-label="Sign in"><form class="sheet" id="login-form">
+  <h2 data-i18n="title">Voice</h2>
+  <a id="howto" href="using.html" target="_blank" rel="noopener" data-i18n="login.howto">New here? How to use this</a>
+  <p class="muted" data-i18n="login.note">Paste your zuliprc once. The key stays in this browser.</p>
   <textarea name="zuliprc" rows="6" required autocomplete="off" autocapitalize="none" spellcheck="false" placeholder="[api]&#10;email=…&#10;key=…&#10;site=https://…"></textarea>
   <p id="login-error" class="error" role="status"></p>
-  <button class="wide accent">Connect</button>
+  <button class="wide accent" data-i18n="login.connect">Connect</button>
 </form></dialog>
 
 <script type="module" src="app.mjs"></script>

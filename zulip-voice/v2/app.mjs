@@ -14,8 +14,10 @@ import {createReads} from './reads.mjs';
 import {createVoiceControl} from './voicecontrol.mjs';
 import {createDictation} from './dictation.mjs';
 import {rankTopics, similarText} from './grammar.mjs';
+import {t, applyStatic, onLangChange, setLang, getLang} from './i18n.mjs';
 
 const BUILD = 'v2.0';
+applyStatic();   // the interface language (saved setting, else the browser's) before anything is shown
 const log = createLog();
 const lat = createLatency(log);
 addEventListener('error', e => log('err', `${e.message} @${e.filename?.split('/').pop()}:${e.lineno}`));
@@ -30,7 +32,7 @@ cfg = await completeAccount(cfg, zulip, store);
 
 const model = createModel(cfg);
 let lastDelayToastMs = 0;
-const voice = createVoice({zulip, cfg, log, onDelay: ms => { if (Date.now() - lastDelayToastMs > 8000) { lastDelayToastMs = Date.now(); toast(`Zulip is rate limiting: sending is delayed (${Math.ceil(ms / 1000)}s). Nothing is lost.`); } }});
+const voice = createVoice({zulip, cfg, log, onDelay: ms => { if (Date.now() - lastDelayToastMs > 8000) { lastDelayToastMs = Date.now(); toast(t('toast.rateDelay', {s: Math.ceil(ms / 1000)})); } }});
 let current = store.get('voice2-topic', null);
 let autoplay = store.get('voice2-autoplay', true);
 let rate = store.get('voice2-rate', 1);
@@ -94,13 +96,13 @@ function renderFeed() {
   feed.replaceChildren();
   els.clear();
   hasEarlier = hasEarlier && !!current;
-  if (hasEarlier) { const b = document.createElement('button'); b.className = 'notice'; b.id = 'earlier'; b.textContent = 'Load earlier messages'; b.onclick = loadEarlier; feed.append(b); }
+  if (hasEarlier) { const b = document.createElement('button'); b.className = 'notice'; b.id = 'earlier'; b.textContent = t('feed.earlier'); b.onclick = loadEarlier; feed.append(b); }
   const messages = model.messages(current);
-  if (!messages.length) { const d = document.createElement('div'); d.className = 'empty'; d.id = 'empty'; d.textContent = !current ? 'Choose an agent' : loading === current ? 'Loading…' : 'No messages yet'; feed.append(d); }
+  if (!messages.length) { const d = document.createElement('div'); d.className = 'empty'; d.id = 'empty'; d.textContent = !current ? t('feed.choose') : loading === current ? t('feed.loading') : t('feed.none'); feed.append(d); }
   for (const m of messages) appendMessage(m);
   for (const l of locals.get(current) ?? []) feed.append(localEl(l));
   pinBottom();
-  $('agent-name').textContent = current ?? 'Choose agent';
+  $('agent-name').textContent = current ?? t('agent.choose');
   highlight();
 }
 
@@ -179,7 +181,7 @@ feed.addEventListener('click', e => {
   const b = e.target.closest?.('button.mark-read'); if (!b) return;
   const id = +b.dataset.markRead; log('read', `marked read by hand: ${id}`);
   const playing = nowMsgId === id && player.position().status !== 'idle'; if (playing) player.stop();
-  markRead([id]); renderUnread(); toast('Marked read');
+  markRead([id]); renderUnread(); toast(t('toast.markedRead'));
 });
 function renderUnread() {
   for (const [id, node] of els) { const m = model.messages(current).find(x => x.id === id); if (m && model.isAgent(m)) setUnread(node, !m.flags?.includes('read')); }
@@ -289,7 +291,7 @@ async function catchUpReadMark(serverUnread) {
   log('read', `watermark at ${newestRead.id}: ${r.ok ? 'ok' : r.error}`);
 }
 
-function renderFeedKeepingScroll() { const stick = atBottom(); if (!els.size || !feed.querySelector('.msg')) renderFeed(); if (stick) feed.scrollTop = feed.scrollHeight; $('agent-name').textContent = current ?? 'Choose agent'; }
+function renderFeedKeepingScroll() { const stick = atBottom(); if (!els.size || !feed.querySelector('.msg')) renderFeed(); if (stick) feed.scrollTop = feed.scrollHeight; $('agent-name').textContent = current ?? t('agent.choose'); }
 
 
 // ---- events ----
@@ -337,7 +339,7 @@ function onNewAgentMessage(m) {
   if (!items.length) markRead([m.id]);
   else if (vctl.userSpeaking()) { /* stays unread; read after the user finishes */ }
   else if (autoplay || player.position().status !== 'idle') {
-    if (!player.isUnlocked()) showBanner('Tap to listen', 'tap', () => { player.unlock(); maybeAutoplay(); });
+    if (!player.isUnlocked()) showBanner(t('toast.tapListen'), 'tap', () => { player.unlock(); maybeAutoplay(); });
     else player.append(items);
   }
   if (pendingSwitch && !items.length && player.position().status === 'idle') runSwitch();
@@ -462,7 +464,7 @@ function maybeAutoplay() {
   if (pos && (model.find(pos.msgId)?.flags?.includes('read') || (pos.topic === current && !pastWatermark({msgId: pos.msgId, idx: pos.idx - 1})))) { store.set('voice2-pos', null); pos = null; }   // finished, or older than the watermark   // a finished message is never resumed
   const resumable = pos?.topic === current && model.find(pos.msgId) && itemsOf(model.find(pos.msgId), pos.idx).length;
   if (!speakable.length && !resumable) { hideBanner(); return; }
-  if (!player.isUnlocked()) { showBanner(`Tap to listen (${speakable.length} unread)`, 'tap', () => { player.unlock(); maybeAutoplay(); }); return; }
+  if (!player.isUnlocked()) { showBanner(t('toast.tapListenN', {n: speakable.length}), 'tap', () => { player.unlock(); maybeAutoplay(); }); return; }
   hideBanner();
   const at = pos?.topic === current ? model.find(pos.msgId) : null;
   if (at && itemsOf(at, pos.idx).length) {   // resume exactly where listening stopped, then continue forward
@@ -480,7 +482,7 @@ function endOfQueue() {
   log('read', `end of messages: marking ${model.unreadAgentMessages(current).length} unread as read`);
   markRead(model.agentMessages(current).map(m => m.id));
   store.set('voice2-pos', null);
-  toast('End of messages');
+  toast(t('toast.end'));
 }
 const RESTART_AFTER_S = 2;
 const SKIP_DEBOUNCE_MS = 350;
@@ -492,7 +494,7 @@ let burst = null;   // taps within SKIP_DEBOUNCE_MS of each other: `{msgId, idx,
 function jump(direction, whole = false, noRestart = false, defer = false) {
   const agents = model.agentMessages(current);
   const flat = agents.flatMap(m => itemsOf(m));
-  if (!flat.length) return toast('No agent messages here');
+  if (!flat.length) return toast(t('toast.noAgentMsgs'));
   const from = burst ?? (nowMsgId === null ? null : {msgId: nowMsgId, idx: nowIdx});
   const at = from ? flat.findIndex(it => it.msgId === from.msgId && it.idx === from.idx) : -1;
   let target;
@@ -514,7 +516,7 @@ function jump(direction, whole = false, noRestart = false, defer = false) {
   else if (direction < 0 && !burst && !noRestart && player.currentTime() > RESTART_AFTER_S) target = flat[at];
   else target = flat[at + direction];
   if (!target && direction > 0) { endOfQueue(); return; }   // skipping past the last chunk ends reading: nothing plays, nothing wraps around
-  if (!target) return toast('No earlier messages');
+  if (!target) return toast(t('toast.noEarlier'));
   const play = () => playFrom(agents.find(m => m.id === target.msgId), target.idx);
   if (burst) clearTimeout(burst.timer);
   const pending = !!burst || defer;
@@ -546,26 +548,28 @@ function togglePlay() {
   const {status} = player.position();
   player.unlock();
   if (status === 'loading') {   // idempotent: a quick second tap never restarts or queues; a later tap cancels
-    if (Date.now() - lastPlayTapMs < 1500) { toast(navigator.onLine ? 'Loading audio…' : 'Waiting for the connection…'); lastPlayTapMs = Date.now(); return; }
+    if (Date.now() - lastPlayTapMs < 1500) { toast(navigator.onLine ? t('toast.loadingAudio') : t('toast.waitConn')); lastPlayTapMs = Date.now(); return; }
     player.pause(); return;
   }
   lastPlayTapMs = Date.now();
   if (status === 'playing') player.pause();
   else if (status === 'paused') player.resume();
-  else if (status === 'error' || status === 'blocked') { if (Date.now() - lastErrorTapMs < 1500) { toast(navigator.onLine ? 'Still trying to load audio…' : 'Waiting for the connection…'); return; } lastErrorTapMs = Date.now(); player.retry(); }
+  else if (status === 'error' || status === 'blocked') { if (Date.now() - lastErrorTapMs < 1500) { toast(navigator.onLine ? t('toast.stillLoading') : t('toast.waitConn')); return; } lastErrorTapMs = Date.now(); player.retry(); }
   else {
     const agents = model.agentMessages(current);
     const start = model.unreadAgentMessages(current).find(m => itemsOf(m).length) ?? agents.findLast(m => itemsOf(m).length);
-    if (start) playFrom(start, 0); else toast('Nothing to read');
+    if (start) playFrom(start, 0); else toast(t('toast.nothingRead'));
   }
 }
 
+let lastTransport = {status: 'idle'};
 function renderTransport({status, error}) {
+  lastTransport = {status, error};
   $('play').dataset.state = status;
   try { navigator.mediaSession.playbackState = status === 'playing' || status === 'loading' ? 'playing' : status === 'paused' ? 'paused' : 'none'; } catch { /* unsupported */ }
-  $('play').setAttribute('aria-label', status === 'playing' ? 'Pause' : 'Play');
-  if (status === 'error') showBanner(`Waiting for audio (${error}). Retrying by itself…`, 'warn', () => player.retry());
-  else if (status === 'blocked') showBanner('Tap to resume audio', 'tap', () => player.unlock());
+  $('play').setAttribute('aria-label', status === 'playing' ? t('pause') : t('play'));
+  if (status === 'error') showBanner(t('banner.waitAudio', {error}), 'warn', () => player.retry());
+  else if (status === 'blocked') showBanner(t('banner.resume'), 'tap', () => player.unlock());
   else if (bannerKind() === 'err') hideBanner();
   $('dock').classList.toggle('min', status === 'idle' && scrolledAway);
 }
@@ -574,7 +578,7 @@ function renderTransport({status, error}) {
 function setMediaSession(item) {
   if (!('mediaSession' in navigator)) return;
   const m = item ? model.find(item.msgId) : null, title = m ? (parsed(m).title.replace(/^\[[^\]]*\]\s*/, '') || current) : current;
-  navigator.mediaSession.metadata = new MediaMetadata({title: title ?? 'Voice', artist: current ?? 'Agent', album: 'Zulip voice'});
+  navigator.mediaSession.metadata = new MediaMetadata({title: title ?? t('media.title'), artist: current ?? t('media.artist'), album: t('media.album')});
   const handlers = {play: () => { player.unlock(); if (player.position().status === 'paused') resumeAfterPause(); else togglePlay(); }, pause: () => player.pause(), nexttrack: () => jump(1, false, true), previoustrack: () => jump(-1, false, true), seekforward: () => jump(1), seekbackward: () => jump(-1)};
   for (const [name, fn] of Object.entries(handlers)) { try { navigator.mediaSession.setActionHandler(name, fn); } catch { /* unsupported action */ } }
 }
@@ -584,7 +588,7 @@ let previousTopic = store.get('voice2-prev', null);
 function renderPrevButton() {
   const b = $('prev-agent');
   b.hidden = !previousTopic || previousTopic === current;
-  b.title = b.hidden ? '' : `Back to ${previousTopic}`;
+  b.title = b.hidden ? '' : t('prev-agent.title', {name: previousTopic});
   $('prev-agent-name').textContent = previousTopic ?? '';
 }
 /** Next thread with unread messages, in the picker's order (after the current one, wrapping round). */
@@ -593,8 +597,8 @@ function switchNextUnread() {
   const next = [...order.slice(at + 1), ...order.slice(0, Math.max(0, at))].find(t => t.name !== current && t.unread > 0);
   if (!next) {   // nothing unread anywhere: still move on, to the next agent in the list order, and say so
     const plain = [...order.slice(at + 1), ...order.slice(0, Math.max(0, at))].find(t => t.name !== current);
-    if (!plain) { toast('No other agent'); return false; }
-    toast('No unread messages elsewhere: next agent in the list'); switchTopic(plain.name); return true;
+    if (!plain) { toast(t('toast.noOther')); return false; }
+    toast(t('toast.noUnreadElsewhere')); switchTopic(plain.name); return true;
   }
   switchTopic(next.name);
   return true;
@@ -602,7 +606,7 @@ function switchNextUnread() {
 function renderFirstUnreadButton() { $('first-unread').hidden = !current || !model.unreadAgentMessages(current).length; }
 function renderNextButton() { renderFirstUnreadButton(); const n = model.topics().filter(t => t.name !== current && t.unread > 0).length; $('next-unread').hidden = !n; $('next-unread-count').textContent = n; }
 function switchBack() {
-  if (!previousTopic || previousTopic === current) { toast('No previous agent'); return false; }
+  if (!previousTopic || previousTopic === current) { toast(t('toast.noPrev')); return false; }
   switchTopic(previousTopic);
   return true;
 }
@@ -661,10 +665,10 @@ function runSwitch() {
   if (hasActed(id)) return;
   if (id !== null) { markRead([id]); markActed(id); }   // read first, then act: the message is never unread when the switch happens
   const target = model.hasTopic(to) ? to : null;
-  if (!target) return toast(`Agent “${to}” not found`);
+  if (!target) return toast(t('toast.notFound', {name: to}));
   const from = current;
   switchTopic(target);
-  toast(`Switched to ${target}`, 'Back', () => switchTopic(from));
+  toast(t('toast.switched', {name: target}), t('toast.back'), () => switchTopic(from));
 }
 
 const rank = query => rankTopics(model.topics(), query);
@@ -673,10 +677,10 @@ function openPicker() {
   const query = $('search').value;
   const list = $('topics');
   list.replaceChildren();
-  for (const {t} of rank(query).slice(0, 80)) {
-    const last = model.lastMessage(t.name);
-    const snip = last ? `${ago(last.timestamp)} · ${(model.isAgent(last) ? parsed(last).body || parsed(last).title : 'You: ' + last.content).replace(/\s+/g, ' ').slice(0, 90)}` : '';
-    list.append(topicRow(t, snip, t.name === current, () => switchTopic(t.name)));
+  for (const {t: topic} of rank(query).slice(0, 80)) {
+    const last = model.lastMessage(topic.name);
+    const snip = last ? `${ago(last.timestamp)} · ${(model.isAgent(last) ? parsed(last).body || parsed(last).title : t('you.prefix') + last.content).replace(/\s+/g, ' ').slice(0, 90)}` : '';
+    list.append(topicRow(topic, snip, topic.name === current, () => switchTopic(topic.name)));
   }
   if (!$('picker').open) { $('picker').showModal(); fitPicker(); $('search').focus(); }
 }
@@ -686,18 +690,18 @@ $('attach').onclick = () => $('attach-input').click();
 $('attach-input').onchange = async e => {
   const files = [...e.target.files]; e.target.value = '';
   if (!files.length) return;
-  toast(`Uploading ${files.length} file${files.length > 1 ? 's' : ''}…`);
+  toast(t('toast.uploading', {n: files.length}));
   const links = [];
   for (const file of files) {
     const form = new FormData(); form.append('file', file, file.name || `photo-${Date.now()}`);
     const up = await zulip.call('POST', 'user_uploads', form, {timeoutMs: 120000});
     log('att', `upload ${file.name} ${file.size}B: ${up.ok ? 'ok' : up.error}`);
     if (up.ok) links.push(`[${(file.name || 'file').replace(/[\[\]]/g, '')}](${up.data.uri})`);
-    else { cue('error'); toast(`Upload failed: ${file.name} (${up.error})`); }
+    else { cue('error'); toast(t('toast.uploadFailed', {name: file.name, error: up.error})); }
   }
   if (!links.length) return;
   draftEl.value = [draftEl.value.trimEnd(), ...links].filter(Boolean).join('\n'); autosize(); saveDraft();
-  toast(links.length > 1 ? 'Files attached: tap send' : 'File attached: tap send');
+  toast(links.length > 1 ? t('toast.attachedN') : t('toast.attached1'));
 };
 
 // ---- composer: typing and sending ----
@@ -714,7 +718,7 @@ draftEl.addEventListener('focus', () => setTimeout(() => { if (atBottom()) feed.
 function showFirstUnread() {
   const m = model.unreadAgentMessages(current).find(x => itemsOf(x).length) ?? model.unreadAgentMessages(current)[0];
   const node = m && els.get(m.id);
-  if (!node) { toast('No unread messages here'); return; }
+  if (!node) { toast(t('toast.noUnreadHere')); return; }
   log('read', `show first unread message ${m.id}`);
   pinUntilMs = 0; cancelAnimationFrame(pinTimer);   // the bottom pin must not undo the jump
   setFollow(false);   // like a manual scroll: the playing chunk does not pull the view back; the jump pill offers the way back
@@ -827,7 +831,7 @@ async function deliver(l) {
     }
     if (l.items) {   // a voice reply: the service joins the transcripts and posts it, so nothing here waits for text
       const v = await voice.sendVoice({sendId: l.sendId, topic: topicOf(l.topic), streamId: streamOf(l.topic), items: l.items, cancelWord: vctl.cancelWord(), commandWord: vctl.commandWord()});
-      if (v.ok) { lat.finish('send:' + l.localId, 'server-posted'); l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) { cue('empty'); toast(v.discarded ? 'Reply cancelled' : 'Nothing was recognised in that recording'); } return; }
+      if (v.ok) { lat.finish('send:' + l.localId, 'server-posted'); l.state = 'sent'; removeLocal(l); saveOutbox(); if (v.empty) { cue('empty'); toast(v.discarded ? t('toast.cancelled') : t('toast.nothingRecognised')); } return; }
       l.attempts = (l.attempts ?? 0) + 1;
       if (l.attempts <= 12) { l.state = 'queued'; refreshLocal(l); setTimeout(() => { if (l.state === 'queued') deliver(l); }, Math.min(1500 * 2 ** l.attempts, 15000)); }
       else { l.state = 'failed'; refreshLocal(l); cue('error'); toast(v.error); }
@@ -928,10 +932,19 @@ $('auto').onclick = () => setAutoplay(!autoplay);
 $('set-hide-att').checked = hideAllAttachments.on;
 $('set-hide-att').onchange = e => { hideAllAttachments.on = e.target.checked; if (e.target.checked) try { localStorage.removeItem('voice2-att-expanded'); } catch { /* ignore */ } store.set('voice2-hide-att', e.target.checked ? '1' : '0'); try { localStorage.setItem('voice2-hide-att', e.target.checked ? '1' : '0'); } catch { /* ignore */ } renderFeed(); };
 $('set-auto').onchange = e => setAutoplay(e.target.checked);
+// ---- language: the interface, spoken prompts and speech hints follow it; the voice keywords stay English ----
+$('set-lang').value = getLang();
+$('set-lang').onchange = e => setLang(e.target.value);
+onLangChange(() => {
+  $('set-lang').value = getLang();
+  renderFeed(); renderTransport(lastTransport); renderPrevButton(); renderConn(events.info()); renderUnread();
+  $('account-text').textContent = `${cfg.email} · ${cfg.site} · ${BUILD}`;
+  vctl.relocalize(); dictation.relocalize(); renderRate();
+});
 $('set-rate').oninput = e => setRate(+e.target.value);
 $('settings').onclick = () => { $('account-text').textContent = `${cfg.email} · ${cfg.site} · ${BUILD}`; $('settings-sheet').showModal(); };
 $('reload').onclick = () => location.reload();
-$('sign-out').onclick = () => { if (confirm('Sign out of this account?')) { try { localStorage.removeItem(ACCOUNT_KEY); } catch { /* ignore */ } location.reload(); } };
+$('sign-out').onclick = () => { if (confirm(t('sign-out.confirm'))) { try { localStorage.removeItem(ACCOUNT_KEY); } catch { /* ignore */ } location.reload(); } };
 for (const dialog of document.querySelectorAll('dialog')) {
   dialog.addEventListener('click', e => { if (e.target === dialog || e.target.closest('[data-close]')) dialog.close(); });
 }
@@ -948,10 +961,10 @@ function renderConn(info) {
   const limited = !!zulip.rateLimitedForMs(); if (limited && !wasLimited) cue('limited'); wasLimited = limited;
   const down = info.state === 'retrying' || info.state === 'offline';
   $('net').hidden = !down && !zulip.rateLimitedForMs();
-  $('net').textContent = zulip.rateLimitedForMs() ? `Zulip is rate limiting this account; resuming in ${Math.ceil(zulip.rateLimitedForMs() / 1000)}s.` : 'No connection. Messages and audio will resume by themselves.';
+  $('net').textContent = zulip.rateLimitedForMs() ? t('net.limited', {s: Math.ceil(zulip.rateLimitedForMs() / 1000)}) : t('net.off');
   if (info.state === 'live') for (const list of locals.values()) for (const l of list) if (l.state === 'queued' || l.state === 'failed') { l.attempts = 0; deliver(l); }
   $('conn').dataset.state = info.state;
-  $('conn-text').textContent = info.state === 'live' ? '' : info.state === 'offline' ? 'Offline' : 'Reconnecting…';
+  $('conn-text').textContent = info.state === 'live' ? '' : info.state === 'offline' ? t('conn.offline') : t('conn.reconnecting');
   if (document.querySelector('#debug-sheet[open]')) renderDebug();
 }
 
@@ -984,11 +997,11 @@ $('open-debug').onclick = () => { $('settings-sheet').close(); $('conn').click()
 setInterval(() => { if (document.querySelector('#debug-sheet[open]')) renderDebug(); }, 1000);
 $('dbg-copy').onclick = async () => {
   const text = debugStatus() + '\n\n' + log.text();
-  try { await navigator.clipboard.writeText(text); toast('Copied'); }
-  catch { const range = document.createRange(); range.selectNodeContents($('debug-log')); getSelection().removeAllRanges(); getSelection().addRange(range); toast('Select-all done; use Copy in the menu'); }
+  try { await navigator.clipboard.writeText(text); toast(t('toast.copied')); }
+  catch { const range = document.createRange(); range.selectNodeContents($('debug-log')); getSelection().removeAllRanges(); getSelection().addRange(range); toast(t('toast.selectAll')); }
 };
 async function sendLog(label) { const r = await voice.sendLog(label, debugStatus() + '\n' + log.text()); log('app', `log sent (${label}): ${r.ok ? 'ok' : r.error}`); return r; }
-$('dbg-send').onclick = async () => toast((await sendLog('manual')).ok ? 'Sent to server' : 'Send failed');
+$('dbg-send').onclick = async () => toast((await sendLog('manual')).ok ? t('toast.sent') : t('toast.sendFailed'));
 $('dbg-clear').onclick = () => { log.clear(); renderDebug(); };
 $('dbg-kick').onclick = () => events.kick('manual');
 $('dbg-ping').onclick = async () => { const r = await checkVoice(); toast(r.text); renderDebug(); };
@@ -1073,7 +1086,7 @@ async function checkForUpdate() {
   try {
     const r = await fetch('version.txt?t=' + Date.now(), {cache: 'no-store'});
     const latest = r.ok ? (await r.text()).trim() : '';
-    if (/^[0-9a-f]{10}$/.test(latest) && latest !== mine) { updateShown = true; log('app', `update available: ${mine} -> ${latest}`); showBanner('New version available. Tap to reload.', 'tap', () => location.reload()); }
+    if (/^[0-9a-f]{10}$/.test(latest) && latest !== mine) { updateShown = true; log('app', `update available: ${mine} -> ${latest}`); showBanner(t('banner.update'), 'tap', () => location.reload()); }
   } catch { /* offline: try again later */ }
 }
 setTimeout(checkForUpdate, 8000); setInterval(checkForUpdate, 300000);

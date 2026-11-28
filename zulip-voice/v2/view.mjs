@@ -1,4 +1,5 @@
 /** DOM builders for messages and agent rows. No state. */
+import {t} from './i18n.mjs';
 import {inlineHtml, extractAttachments} from './text.mjs';
 import {parsed} from './model.mjs';
 
@@ -42,18 +43,18 @@ export function agentEl(message, getUrl) {
     }
     body.append(node);
   });
-  if (!p.blocks.length) body.append(textEl('p', 'muted', p.switchTo ? `Switching to ${p.switchTo}` : '(empty)'));
+  if (!p.blocks.length) body.append(textEl('p', 'muted', p.switchTo ? t('msg.switching', {name: p.switchTo}) : t('msg.empty')));
   root.append(body);
   if (p.footers.length) {   // amh item footers: shown on wide screens, folded into a chip on narrow ones
     const items = p.footers.filter(l => /^\s*[-*]\s+/.test(l)).length;
     const box = el('div', 'footer');
-    const chip = textEl('button', 'footer-chip', `· ${items || p.footers.length} item${(items || p.footers.length) === 1 ? '' : 's'}`);
+    const chip = textEl('button', 'footer-chip', t('msg.items', {n: items || p.footers.length}));
     chip.type = 'button'; chip.onclick = () => box.classList.toggle('open');
     const text = textEl('div', 'footer-text', p.footers.join('\n'));
     box.append(chip, text); root.append(box);
   }
   if (p.attachments.length) root.append(attachmentsEl(p.attachments, getUrl));
-  const mark = textEl('button', 'mark-read', 'Mark read'); mark.type = 'button'; mark.dataset.markRead = message.id; root.append(mark);   // shown only while unread (CSS): clears the dot without playing
+  const mark = textEl('button', 'mark-read', t('msg.markRead')); mark.type = 'button'; mark.dataset.markRead = message.id; root.append(mark);   // shown only while unread (CSS): clears the dot without playing
   setUnread(root, !message.flags?.includes('read'));
   return root;
 }
@@ -80,7 +81,7 @@ export function attachmentsEl(attachments, getUrl) {
       box.replaceChildren();
       box.classList.toggle('chip', hidden() || !isImage);
       if (hidden() || !isImage) {
-        const chip = textEl('button', 'chipbtn', (isImage ? '🖼 ' : '📎 ') + a.name + (isImage ? ' · tap to show' : ''));
+        const chip = textEl('button', 'chipbtn', (isImage ? '🖼 ' : '📎 ') + a.name + (isImage ? t('att.tapShow') : ''));
         chip.onclick = () => { if (isImage) { collapsed.delete(a.uri); expanded.add(a.uri); saveSet(expandedKey, expanded); render(); } else open(); };
         box.append(chip);
         return;
@@ -95,7 +96,7 @@ export function attachmentsEl(attachments, getUrl) {
       img.onerror = () => { if (++tries < 4) setTimeout(load, 1500 * tries); else img.alt = a.name + ' (could not load)'; };   // expired or dropped: fetch again instead of leaving a blank
       new IntersectionObserver((entries, o) => { if (entries[0].isIntersecting) { o.disconnect(); load(); } }).observe(img);
       img.onclick = open;
-      const cap = el('div', 'attcap'), name = textEl('span', 'attname', a.name), hide = textEl('button', 'atthide', 'Hide');   // the name is always visible: agents refer to pictures by it
+      const cap = el('div', 'attcap'), name = textEl('span', 'attname', a.name), hide = textEl('button', 'atthide', t('att.hide'));   // the name is always visible: agents refer to pictures by it
       hide.type = 'button'; hide.onclick = () => { collapsed.add(a.uri); expanded.delete(a.uri); saveSet(expandedKey, expanded); render(); };
       cap.append(name, hide);
       box.append(img, cap);
@@ -120,11 +121,11 @@ export function mineEl(text, state, handlers, getUrl) {
   if (plain.trim() || !attachments.length) root.append(textEl('div', 'bubble', plain.trim()));
   if (attachments.length && getUrl) root.append(attachmentsEl(attachments, getUrl));
   const note = el('div', 'state');
-  if (state === 'sending') note.textContent = 'Sending…';
-  if (state === 'queued') note.textContent = 'Waiting for connection…';
+  if (state === 'sending') note.textContent = t('out.sending');
+  if (state === 'queued') note.textContent = t('out.queued');
   if (state === 'failed') {
-    note.append('Not sent');
-    for (const [label, fn] of [['Retry', handlers.retry], ['Delete', handlers.discard]]) { const b = textEl('button', '', label); b.type = 'button'; b.onclick = fn; note.append(b); }
+    note.append(t('out.failed'));
+    for (const [label, fn] of [[t('out.retry'), handlers.retry], [t('out.delete'), handlers.discard]]) { const b = textEl('button', '', label); b.type = 'button'; b.onclick = fn; note.append(b); }
   }
   root.append(note);
   return root;
@@ -132,7 +133,7 @@ export function mineEl(text, state, handlers, getUrl) {
 
 export function ago(timestampS) {
   const s = Math.max(0, Date.now() / 1000 - timestampS);
-  return s < 90 ? 'now' : s < 3600 ? Math.round(s / 60) + 'm' : s < 86400 ? Math.round(s / 3600) + 'h' : Math.round(s / 86400) + 'd';
+  return s < 90 ? t('ago.now') : s < 3600 ? t('ago.m', {n: Math.round(s / 60)}) : s < 86400 ? t('ago.h', {n: Math.round(s / 3600)}) : t('ago.d', {n: Math.round(s / 86400)});
 }
 
 export function topicRow(topic, snippet, current, onPick) {

@@ -220,6 +220,8 @@ export function leadingControlCount(name, words) {
 
 /** Domain words for reply dictation (the speech model's context prompt): the assistant, model and tool names this household says a lot. */
 export const DOMAIN_PROMPT = 'Claude, Codex, Haiku, Sonnet, Opus, quota, Zulip, nvim, Neovim, agent, topic, GPU, GitHub, Anthropic, OpenAI';
+/** The same hint for the Chinese interface language: the product names stay in Latin letters, the common nouns are Chinese. At most 200 characters (the relay's limit). */
+export const DOMAIN_PROMPT_ZH = 'Claude, Codex, Haiku, Sonnet, Opus, Zulip, nvim, Neovim, GPU, GitHub, Anthropic, OpenAI, 智能体, 配额, 主题, 模型';
 
 /** `words` without any word that sounds like the end word, wherever it stands: a stray "Tomato." in the middle of a dictation is never content. */
 export function removeControlWords(words, name = 'tomato') { return words.filter(w => !soundsLike(name, [w])); }

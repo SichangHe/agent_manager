@@ -2265,6 +2265,35 @@ scenarios.resumeKeepsSync = async ({srv}) => {
   } finally { await c.close(); }
 };
 
+scenarios.language = async ({srv}) => {
+  // Chinese from the saved setting; switching to English and back changes the static text, the aria labels, the toasts and the feed buttons without a reload.
+  await L.wipeTasks();
+  await L.agentSays('alpha', '[alpha] Hi\n\nOne message to show the feed buttons.');
+  const c = await L.openClient({url: srv.url, prefs: {'voice2-topic': 'alpha', 'voice2-lang': 'zh'}});
+  try {
+    const text = sel => c.page.evaluate(s => document.querySelector(s).textContent.trim(), sel), aria = sel => c.page.evaluate(s => document.querySelector(s).getAttribute('aria-label'), sel);
+    await L.waitFor(c.page, 'message in feed', () => document.querySelector('#feed').innerText.includes('One message'));
+    assert.equal(await c.page.evaluate(() => document.documentElement.lang), 'zh-CN');
+    assert.equal(await text('#settings-sheet h2'), '设置');
+    assert.equal(await aria('#settings'), '设置');
+    assert.equal(await aria('#play'), '播放');
+    assert.equal(await text('#auto'), '自动');
+    assert.equal(await c.page.evaluate(() => document.querySelector('#draft').placeholder), '消息');
+    assert.equal(await text('.mark-read'), '标为已读');
+    assert.match(await text('#settings-sheet p.muted'), /输入模式：/);
+    await tap(c.page, '#settings'); await c.page.selectOption('#set-lang', 'en');
+    assert.equal(await text('#settings-sheet h2'), 'Settings');
+    assert.equal(await aria('#play'), 'Play');
+    assert.equal(await text('.mark-read'), 'Mark read');
+    assert.equal(await c.page.evaluate(() => JSON.parse(localStorage.getItem('voice2-lang'))), 'en');
+    await c.page.selectOption('#set-lang', 'zh');
+    assert.equal(await aria('#play'), '播放');
+    await c.page.keyboard.press('Escape');
+    await c.page.reload();
+    await L.waitFor(c.page, 'zh after reload', () => document.querySelector('#settings').getAttribute('aria-label') === '设置', 15000);
+  } finally { await c.close(); }
+};
+
 const wanted = Object.keys(scenarios).filter(n => !only || n === only);
 const srv = await L.serve();
 for (const name of wanted) {

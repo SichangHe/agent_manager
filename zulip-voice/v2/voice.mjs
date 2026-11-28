@@ -1,5 +1,6 @@
 /** Client of the voice service (`service/protocol.md`): STT, TTS, ping through the relay channel. Results arrive via `onMessage`. */
 
+import {t} from './i18n.mjs';
 const LOG_PART_CHARS = 9000;
 const URL_TTL_MS = 50000;
 const PREPARED_TTL_MS = 6 * 3600000;
@@ -63,7 +64,7 @@ export function createVoice({zulip, cfg, log, onDelay}) {
     const postedMs = performance.now() - sentMs;
     const result = await waiting;
     const totalMs = Math.round(performance.now() - sentMs);
-    if (!result) { log('relay', `${op} ${id} timeout after ${totalMs}ms`); return {ok: false, error: `${op} timed out`}; }
+    if (!result) { log('relay', `${op} ${id} timeout after ${totalMs}ms`); return {ok: false, error: t('err.timeout', {op})}; }
     log('relay', `${op} ${id} ${result.error ? 'ERROR ' + result.error : 'ok'} total=${totalMs}ms post=${Math.round(postedMs)}ms relay queue=${result.timings?.queueMs}ms work=${result.timings?.workMs}ms`);
     return result.error ? {ok: false, error: result.error} : {ok: true, result, totalMs};
   }
@@ -99,7 +100,7 @@ export function createVoice({zulip, cfg, log, onDelay}) {
       const up = await patiently(() => zulip.call('POST', 'user_uploads', form, {timeoutMs: 30000}));
       if (up.ok) i.uri = up.data.uri;
     }));
-    if (items.some(i => i.blob && !i.uri)) return {ok: false, error: 'upload failed'};
+    if (items.some(i => i.blob && !i.uri)) return {ok: false, error: t('err.upload')};
     const wire = items.map(i => i.blob ? {uri: i.uri} : {text: i.text});
     const r = await request('send', {topic, ...(streamId ? {streamId} : {}), ...(cancelWord ? {cancelWord} : {}), ...(commandWord ? {commandWord} : {}), items: wire, attachment: wire.filter(i => i.uri).map(i => `[audio](${i.uri})`).join(' ')}, 90000, sendId, true);
     return r.ok ? {ok: true, messageId: r.result.messageId, empty: !!r.result.empty, discarded: r.result.discarded} : r;
@@ -135,7 +136,7 @@ export function createVoice({zulip, cfg, log, onDelay}) {
   async function clipUrl(clip, maxAgeMs = URL_TTL_MS) {
     if (Date.now() - clip.arrivedMs < maxAgeMs) return {ok: true, url: clip.audioURL};
     const r = await zulip.call('GET', clip.uri.slice(1));
-    if (!r.ok) { for (const [key, list] of bundles) { const rest = list.filter(p => p !== clip); if (rest.length) bundles.set(key, rest); else bundles.delete(key); } return {ok: false, error: 'clip expired'}; }
+    if (!r.ok) { for (const [key, list] of bundles) { const rest = list.filter(p => p !== clip); if (rest.length) bundles.set(key, rest); else bundles.delete(key); } return {ok: false, error: t('err.clipExpired')}; }
     Object.assign(clip, {audioURL: new URL(r.data.url, cfg.site).href, arrivedMs: Date.now()});
     return {ok: true, url: clip.audioURL};
   }

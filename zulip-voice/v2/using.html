@@ -16,13 +16,25 @@
   a { color: var(--accent); } .open { display: inline-block; margin: 10px 0 0; padding: 10px 18px; border-radius: 12px; background: var(--accent); color: #fff; font-weight: 700; text-decoration: none; }
   .wrap { overflow-x: auto; } table { border-collapse: collapse; width: max-content; min-width: 100%; font-size: 15px; }
   th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top; } th { background: var(--panel); }
+  main[lang] { display: none; } html[lang^="zh"] main[lang="zh"], html:not([lang^="zh"]) main[lang="en"] { display: block; } .langs { margin: 8px 0 0; font-size: 15px; }
 </style>
+<script>
+// The language is the app's saved setting (localStorage "voice2-lang"), else the browser's; the links below switch it for both pages.
+(function () {
+  var saved = null; try { saved = JSON.parse(localStorage.getItem('voice2-lang')); } catch (e) {}
+  var lang = saved === 'zh' || saved === 'en' ? saved : /^zh/i.test(navigator.language || '') ? 'zh' : 'en';
+  function apply() { document.documentElement.lang = lang === 'zh' ? 'zh-CN' : 'en'; document.title = lang === 'zh' ? '语音使用说明' : 'Using Voice'; }
+  apply();
+  document.addEventListener('click', function (e) { var a = e.target.closest && e.target.closest('[data-lang]'); if (!a) return; e.preventDefault(); lang = a.dataset.lang; try { localStorage.setItem('voice2-lang', JSON.stringify(lang)); } catch (x) {} apply(); });
+})();
+</script>
 </head>
 <body>
-<main>
+<main lang="en">
 <h1>Using Voice</h1>
 <p>Read your AI agents' messages aloud and talk back to them, from your phone. This page is for people who already have the app connected to their Zulip account. <a href="https://github.com/SichangHe/agent_manager/tree/main/zulip-voice#readme">Setting up the server is described here.</a></p>
 <a class="open" href="./">Open the app</a>
+<div class="langs"><b>English</b> · <a href="#" data-lang="zh">中文</a></div>
 
 <h2>First minutes</h2>
 <ul>
@@ -45,6 +57,7 @@
   <li><b>Images and files</b> show inline with their file name underneath, so you can tell which one an agent means. Hide folds one; tap its chip to show it again. Markdown tables are shown as tables and read cell by cell.</li>
   <li>The agent list follows the priority order set by the human manager (lowest number first), then newest first.</li>
   <li>Green, amber or red dot at the top right: connection. Tap it for the debug view.</li>
+  <li><b>Language</b>: choose English or 中文 in Settings. Interface text and the app's own spoken prompts follow it. The voice keywords and commands stay English.</li>
 </ul>
 
 <h2>Hands-free voice control</h2>
@@ -56,7 +69,7 @@
 <tr><td><code>tornado</code></td><td>Cancels and discards the reply or command, anywhere.</td></tr>
 <tr><td><code>potato</code></td><td>Command mode (from standby; not while you are dictating).</td></tr>
 </table></div>
-<p class="muted">The four words can be changed in Settings. Anything you say outside a session is ignored.</p>
+<p class="muted">The four words can be changed in Settings. Anything you say outside a session is ignored. You can speak your reply in Chinese, but the keywords and commands must be said in English.</p>
 <p><b>Commands</b> (in command mode; the app says what it did):</p>
 <ul>
   <li><code>next</code>, <code>back</code>, <code>again</code>; <code>next message</code>, <code>previous message</code>; <code>skip forward three</code>; <code>first unread</code> (or <code>unread</code>)</li>
@@ -88,8 +101,83 @@
 
 <h2>Limits</h2>
 <ul>
-  <li>English only. A personal client for one Zulip account.</li>
+  <li>The interface is English or Chinese (Settings, Language); the voice keywords and commands are English only. A personal client for one Zulip account.</li>
   <li>Zulip carries all text and audio, so a rate limit (about 200 calls a minute) can slow things down; playback itself makes no calls.</li>
+</ul>
+</main>
+<main lang="zh">
+<h1>语音使用说明</h1>
+<p>在手机上朗读你的 AI 智能体发来的消息，并对它们说话回复。本页面面向已经把应用连接到自己 Zulip 账号的人。<a href="https://github.com/SichangHe/agent_manager/tree/main/zulip-voice#readme">服务器的搭建方法见这里。</a></p>
+<a class="open" href="./">打开应用</a>
+<div class="langs"><a href="#" data-lang="en">English</a> · <b>中文</b></div>
+
+<h2>最初几分钟</h2>
+<ul>
+  <li>点按<b>连接</b>，粘贴你的 <code>zuliprc</code>（Zulip：设置、账号与隐私、管理你的 API 密钥、下载 zuliprc）。密钥只保存在此浏览器中。</li>
+  <li>打开应用后先点按任意位置一次：iOS 只允许在点按之后出声。</li>
+  <li>用左上角的标签选择智能体。标签上的数字显示其他智能体的未读消息数。</li>
+  <li>点按一条消息或一句话，从那里开始朗读。再点按暂停。<b>自动</b>会自动朗读新消息。</li>
+</ul>
+
+<h2>界面</h2>
+<ul>
+  <li><b>上一条 / 下一条</b>：后退或前进一段；快速连按可跳过多段。</li>
+  <li><b>语速</b>：<code>-</code> 和 <code>+</code>，每次 0.1。</li>
+  <li><b>麦克风按钮</b>：听写。麦克风启动时呈琥珀色闪动，可以说话时变红并响起提示音。对勾保留文字，箭头立即发送，叉号丢弃。</li>
+  <li><b>回形针</b>：添加照片或文件。它会上传到 Zulip，链接放入输入框；点按发送。</li>
+  <li><b>第一条未读按钮</b>（标题栏旁的圆点，位于搜索按钮旁）：滚动到此智能体的第一条未读消息（不播放）。</li>
+  <li><b>下一个未读按钮</b>（其他智能体有未读消息时出现）：按智能体列表的顺序跳到下一个有未读消息的智能体。</li>
+  <li><b>返回箭头</b>：回到你刚离开的智能体。</li>
+  <li><b>标为已读</b>（未读消息上的小按钮）：不播放就清除蓝点，同时把此智能体中更早的消息也标为已读。</li>
+  <li><b>图片和文件</b>内联显示，文件名在下方，这样你能分清智能体指的是哪一个。“隐藏”折叠一个；点按它的标签可再次显示。Markdown 表格以表格显示，并逐个单元格朗读。</li>
+  <li>智能体列表遵循人类管理者设定的优先级顺序（数字小的在前），然后是最新的在前。</li>
+  <li>右上角的绿色、琥珀色或红色圆点：连接状态。点按它进入调试视图。</li>
+  <li><b>语言</b>：在 设置 中选择 English 或 中文。界面文字和应用自己说的提示语都会随之切换。语音关键词和命令始终是英文。</li>
+</ul>
+
+<h2>免提语音控制</h2>
+<p>用麦克风旁边的波形按钮开启（需要麦克风权限）。应用在手机上监听：在你开始回复之前不会上传任何内容。请使用耳机；扬声器可能回授到麦克风。</p>
+<div class="wrap"><table>
+<tr><th>说</th><th>效果</th></tr>
+<tr><td><code>attention</code></td><td>输入模式：朗读暂停，响起一声上升的提示音，你说的一切都会被输入为回复。</td></tr>
+<tr><td><code>tomato</code></td><td>结束并发送回复（长时间安静也会发送）。朗读继续。</td></tr>
+<tr><td><code>tornado</code></td><td>在任何位置取消并丢弃回复或命令。</td></tr>
+<tr><td><code>potato</code></td><td>命令模式（从待机状态；听写期间无效）。</td></tr>
+</table></div>
+<p class="muted">这四个词可以在设置中更改。会话之外你说的话都会被忽略。你可以用中文说回复，但这些关键词和命令必须说英文。</p>
+<p><b>命令</b>（在命令模式中；应用会说出它做了什么）：</p>
+<ul>
+  <li><code>next</code>、<code>back</code>、<code>again</code>；<code>next message</code>、<code>previous message</code>；<code>skip forward three</code>；<code>first unread</code>（或 <code>unread</code>）</li>
+  <li><code>restart</code> / <code>start</code> / <code>from the start</code>：从第一句重新播放当前消息</li>
+  <li><code>stop</code> / <code>pause</code>、<code>play</code> / <code>resume</code></li>
+  <li><code>switch to NAME</code>（模糊匹配；如果有多个匹配，会给出前三个：说 first、second 或 third）</li>
+  <li><code>next agent</code>（下一个有未读消息的智能体）、<code>switch back</code></li>
+  <li><code>send log</code>（把调试日志发送到服务器）</li>
+  <li><code>tomato</code> 退出命令模式；<code>tornado</code> 取消</li>
+</ul>
+<p>如果你说的词都不是命令，应用会说“没有识别到命令”并显示列表。命令模式在安静 8 秒后结束。</p>
+
+<h2>声音的含义</h2>
+<ul>
+  <li>上升的两个音：准备好了，请说。下降的两个音：完成或已发送。</li>
+  <li>两声短促的嘀：命令模式。一声高音滴答：命令已执行。</li>
+  <li>两声平的嘀：没有发送任何内容（没有识别到内容、已取消、重复，或空会话）。</li>
+  <li>四个交替的音：重试后发送仍然失败。三声快速的嘀：Zulip 正在限制请求频率。</li>
+  <li>下降的四个音：播放被中断。等待 5 秒后出现轻柔的钟声音乐：音频正在加载。</li>
+</ul>
+
+<h2>出问题时</h2>
+<ul>
+  <li>点按连接圆点，再点<b>发送到服务器</b>（或说 <code>send log</code>），然后告诉运行服务的人。</li>
+  <li>调试视图中的<b>自检</b>一次点按即可检查连通性、音频、语音、麦克风和重新连接。</li>
+  <li>未发送的消息和语音录音在重新加载和网络不好时都会保留，并会重试。</li>
+  <li>iOS 可能在后台丢弃页面；重新打开会恢复你的位置。</li>
+</ul>
+
+<h2>限制</h2>
+<ul>
+  <li>界面支持 English 和中文；语音关键词和命令只有英文。这是为单个 Zulip 账号设计的个人客户端。</li>
+  <li>Zulip 承载所有文字和音频，所以频率限制（约每分钟 200 次调用）可能让速度变慢；播放本身不产生调用。</li>
 </ul>
 </main>
 </body>

@@ -1,5 +1,6 @@
 /** Zulip REST client and a self-healing event-queue loop. All failures are returned, never thrown. */
 
+import {t} from './i18n.mjs';
 const sleepMs = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 /** `call` resolves to `{ok: true, data}` or `{ok: false, kind: 'network'|'timeout'|'aborted'|'http', status, code, error, uncertain}`. */
@@ -12,7 +13,7 @@ export function createZulip({site, email, key}, log, fetchFn = (...a) => fetch(.
     const started = performance.now();
     if (path !== 'events') { totalCalls++; callTimes.push(Date.now()); while (callTimes[0] < Date.now() - 60000) callTimes.shift(); }
     const label = `${method} ${path.split('?')[0]}`;
-    if (Date.now() < rateLimitedUntilMs) return {ok: false, kind: 'http', status: 429, code: 'RATE_LIMIT', error: `${label}: rate limited`, uncertain: false};
+    if (Date.now() < rateLimitedUntilMs) return {ok: false, kind: 'http', status: 429, code: 'RATE_LIMIT', error: `${label}: ${t('err.rateLimited')}`, uncertain: false};
     const body = fields instanceof FormData ? fields : new URLSearchParams(Object.entries(fields).map(([k, v]) => [k, typeof v === 'string' ? v : JSON.stringify(v)]));
     const timeout = AbortSignal.timeout(timeoutMs);
     const merged = signal ? AbortSignal.any([timeout, signal]) : timeout;

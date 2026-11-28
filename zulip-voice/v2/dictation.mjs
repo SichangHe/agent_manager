@@ -1,5 +1,6 @@
 /** Manual dictation from the composer's microphone button: clips are transcribed into the draft; "send" goes at once (unfinished clips as audio). */
-import {DOMAIN_PROMPT} from './text.mjs';
+import {DOMAIN_PROMPT, DOMAIN_PROMPT_ZH} from './text.mjs';
+import {t, getLang} from './i18n.mjs';
 import {$, toast, showBanner, hideBanner} from './chrome.mjs';
 
 const joinText = (base, parts) => [base.trim(), ...parts].filter(Boolean).join(' ');
@@ -18,25 +19,25 @@ export function createDictation(ctx) {
   }
   function setRecordingUi(on) {
     $('composer').classList.toggle('rec', on); $('cancel-rec').hidden = !on; $('level').hidden = !on;
-    draft.readOnly = on; $('mic').setAttribute('aria-label', on ? 'Stop dictation' : 'Dictate'); $('send').setAttribute('aria-label', on ? 'Finish and send' : 'Send');
+    draft.readOnly = on; $('mic').setAttribute('aria-label', on ? t('dictate.stop') : t('dictate')); $('send').setAttribute('aria-label', on ? t('send.finish') : t('send'));
   }
 
   /** The UI flips to recording on the tap itself; microphone setup finishes in the background and a failure reverts it. */
   async function start() {
     if (dict) return;
     player.unlock();
-    if (ctx.voiceDown()) toast('Voice service is not responding; dictation may fail');
+    if (ctx.voiceDown()) toast(t('dict.voiceDown'));
     const wasPlaying = ['playing', 'loading'].includes(player.position().status);
     const mine = dict = {base: draft.value, parts: [], stopping: false, sendAfter: false, cancelled: false, wasPlaying};
     if (wasPlaying) player.pause();
     setRecordingUi(true); $('send').disabled = false;
-    $('composer').classList.add('warming'); draft.placeholder = 'Starting microphone…';   // not ready yet: the first moments of speech would be cut off
+    $('composer').classList.add('warming'); draft.placeholder = t('dict.starting');   // not ready yet: the first moments of speech would be cut off
     const r = await ctx.recorder().start();
     if (r.ok && dict === mine) {
       const flowing = await ctx.recorder().whenFlowing();
-      if (dict === mine) { $('composer').classList.remove('warming'); draft.placeholder = 'Message'; if (flowing) ctx.recorder().beep('ready'); else toast('Microphone is slow to start; wait a moment before speaking'); log('mic', `dictation mic ${flowing ? 'ready' : 'not delivering audio after 3 s'}`); }
+      if (dict === mine) { $('composer').classList.remove('warming'); draft.placeholder = t('message'); if (flowing) ctx.recorder().beep('ready'); else toast(t('dict.slowMic')); log('mic', `dictation mic ${flowing ? 'ready' : 'not delivering audio after 3 s'}`); }
     }
-    if (dict !== mine || !r.ok) { $('composer').classList.remove('warming'); draft.placeholder = 'Message'; }
+    if (dict !== mine || !r.ok) { $('composer').classList.remove('warming'); draft.placeholder = t('message'); }
     if (r.ok || dict !== mine) return;   // started, or the user already stopped it
     mine.stopping = true; mine.cancelled = true;
     if (r.error) toast(r.error);
@@ -57,7 +58,7 @@ export function createDictation(ctx) {
     (async () => {
       let r;
       for (let attempt = 0; attempt < 12; attempt++) {
-        r = await voice.stt(part.blob, (part.speechMs ?? 9e9) >= 1500 ? DOMAIN_PROMPT : undefined);   // domain words bias reply dictation only
+        r = await voice.stt(part.blob, (part.speechMs ?? 9e9) >= 1500 ? (getLang() === 'zh' ? DOMAIN_PROMPT_ZH : DOMAIN_PROMPT) : undefined);   // domain words bias reply dictation only
         if (r.ok) break;
         log('stt', `clip attempt ${attempt + 1} failed: ${r.error}`);
         for (let waited = 0; waited < 20000 && !ctx.isLive(); waited += 500) await new Promise(res => setTimeout(res, 500));
@@ -76,7 +77,7 @@ export function createDictation(ctx) {
 
   function showFailedClips(owner) {
     const failed = owner.parts.filter(p => p.state === 'failed');
-    if (failed.length) showBanner(`${failed.length} dictation clip${failed.length > 1 ? 's' : ''} not transcribed. Tap to retry`, 'warn', () => { for (const p of failed) transcribe(p, owner); hideBanner(); });
+    if (failed.length) showBanner(t('dict.failedClips', {n: failed.length}), 'warn', () => { for (const p of failed) transcribe(p, owner); hideBanner(); });
   }
 
   function stop({send, cancel}) {
@@ -117,5 +118,5 @@ export function createDictation(ctx) {
 
   $('mic').onclick = () => { if (dict) stop({send: false}); else start(); };
   $('cancel-rec').onclick = () => stop({cancel: true});
-  return {onClip, stop, active: () => !!dict};
+  return {onClip, stop, active: () => !!dict, relocalize: () => { setRecordingUi(!!dict); if (!dict) draft.placeholder = t('message'); }};
 }
