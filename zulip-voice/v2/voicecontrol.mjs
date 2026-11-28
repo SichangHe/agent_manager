@@ -40,7 +40,7 @@ export function createVoiceControl(ctx) {
   const kwsSpotter = createKeywordSpotter({log});
 
   // ---- settings ----
-  if (['over', 'kangaroo'].includes(store.get('voice2-resume-phrase', null))) store.set('voice2-resume-phrase', RESUME_DEFAULT);   // the old default migrates; a customised phrase stays
+  if (['over', 'kangaroo', 'rule'].includes(store.get('voice2-resume-phrase', null))) store.set('voice2-resume-phrase', RESUME_DEFAULT);   // the old default migrates; a customised phrase stays
   if (store.get('voice2-start-word', null) === 'pause') store.set('voice2-start-word', START_DEFAULT);   // so does the old start word
   const kwsEnabled = () => store.get('voice2-kws', null) ?? true;   // on-device recognition is the default; the toggle in Settings turns it off
   const startWord = () => normalize(store.get('voice2-start-word', START_DEFAULT));
