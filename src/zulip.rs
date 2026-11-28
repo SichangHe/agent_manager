@@ -106,8 +106,7 @@ pub fn uploads(settings: &Settings, content: &str) -> Vec<(String, Vec<u8>)> {
     for piece in content.split("](/user_uploads/").skip(1) {
         let Some(path) = piece.split(')').next() else { continue };
         let name = path.rsplit('/').next().unwrap_or_default().to_owned();
-        let agent: ureq::Agent = ureq::Agent::config_builder().timeout_global(Some(Duration::from_secs(60))).build().into();
-        let fetched = agent
+        let fetched = http()
             .get(&format!("{site}/user_uploads/{path}"))
             .header("Authorization", &format!("Basic {auth}"))
             .call()
@@ -118,6 +117,19 @@ pub fn uploads(settings: &Settings, content: &str) -> Vec<(String, Vec<u8>)> {
         }
     }
     found
+}
+
+/// One HTTP client for every Zulip call, so its TLS connections are reused instead of set up anew for each request.
+// 🧑 "Try to make amh take <2% CPU and <20MB RAM at full idle"
+fn http() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_global(Some(Duration::from_secs(60)))
+            .build()
+            .into()
+    })
 }
 
 pub(crate) fn api(
@@ -465,11 +477,7 @@ fn request(
         settings::get(&values, "ZULIP_BOT_EMAIL"),
         settings::get(&values, "ZULIP_BOT_API_KEY")
     ));
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .http_status_as_error(false)
-        .timeout_global(Some(Duration::from_secs(30)))
-        .build()
-        .into();
+    let agent = http();
     let url = format!("{site}/api/v1/{path}");
     let response = match method {
         "UPLOAD" => {
