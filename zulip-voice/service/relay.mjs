@@ -282,7 +282,8 @@ export async function createRelay({api, humanId, botId, streamId, taskStreamId =
   function stripEndWord(text) { return removeControlWords(stripTrailingControl(text.trim().split(/\s+/).filter(Boolean), 'tomato', ['over'])).join(' '); }
 
   /** Leading start word(s) ("attention", matched by sound) removed: a clip recorded around the on-device detection still contains it. */
-  function stripStartWord(text) { const w = text.trim().split(/\s+/).filter(Boolean); return w.slice(leadingControlCount('attention', w)).join(' '); }
+  function stripStartWord(text) { const w = text.trim().split(/\s+/).filter(Boolean); { const m = /^([A-Za-z'.,!?;:\-\u3000-\u303f\uff00-\uffef]*)([\u3400-\u9fff].*)$/su.exec(w[0] ?? ''); if (m && m[1]) w.splice(0, 1, m[1], m[2]); }   // "Attention，这是…" (as v2/grammar.mjs afterStartWord)
+    return w.slice(leadingControlCount('attention', w)).join(' '); }
 
   /** `send`: joins the client's typed/transcribed text with the transcripts of its not-yet-transcribed clips, in order, and posts it to the topic as the human. */
   async function sendMessage(request, result) {
