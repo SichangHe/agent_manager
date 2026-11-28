@@ -56,9 +56,11 @@ pub fn post(settings: &Settings, topic: &str, text: &str) -> Result<u64, String>
     crate::zulip::post(settings, stream, topic, text)
 }
 
-/// Whether the human's thread `tag` belongs to a task on another machine: this machine has no such task,
-/// and agents here already sent to it through the agents' channel (a post under topic `tag`).
+/// Whether the human's thread `tag` belongs to a task on another machine: this machine has no such task, and
+/// either another machine's bot posted in that thread of the human's channel (the task's own updates),
+/// or agents here already sent to it through the agents' channel (a post under topic `tag`).
 // 🧑 (via main_manager.md) the human wrote in the mac_main_manager thread, "but amh found no task for that thread and sent it to me (fix that routing)"
+// (via main_manager.md) "the human keeps replying in the yabai_fast thread (a Mac task) and every message lands at main_manager.md ... Threads of tasks started on other machines should reach their machine even if no exxact agent messaged them first."
 pub fn thread_elsewhere(settings: &Settings, store: &crate::store::Store, tag: &str) -> Result<bool, String> {
     let Some(stream) = stream(settings) else {
         return Ok(false);
@@ -66,17 +68,31 @@ pub fn thread_elsewhere(settings: &Settings, store: &crate::store::Store, tag: &
     if store.contains(&format!("{tag}.md"))? {
         return Ok(false);
     }
-    let narrow = serde_json::json!([{"operator":"stream","operand":stream},{"operator":"topic","operand":tag}]);
-    let found = crate::zulip::api(
-        settings,
-        "GET",
-        "messages",
-        &[
-            ("anchor", "newest".to_owned()),
-            ("num_before", "1".to_owned()),
-            ("num_after", "0".to_owned()),
-            ("narrow", narrow.to_string()),
-        ],
-    )?;
-    Ok(found["messages"].as_array().is_some_and(|messages| !messages.is_empty()))
+    let latest = |channel: serde_json::Value, count: &str| -> Result<Vec<serde_json::Value>, String> {
+        let narrow = serde_json::json!([{"operator":"stream","operand":channel},{"operator":"topic","operand":tag}]);
+        let found = crate::zulip::api(
+            settings,
+            "GET",
+            "messages",
+            &[
+                ("anchor", "newest".to_owned()),
+                ("num_before", count.to_owned()),
+                ("num_after", "0".to_owned()),
+                ("narrow", narrow.to_string()),
+            ],
+        )?;
+        Ok(found["messages"].as_array().cloned().unwrap_or_default())
+    };
+    let own = me(settings)?;
+    let human = crate::settings::get(settings, "zulip.human_id");
+    if let Ok(id) = crate::settings::get(settings, "zulip.stream_id").parse::<u64>() {
+        let other_bot = latest(serde_json::json!(id), "50")?.iter().any(|message| {
+            let sender = message["sender_email"].as_str().unwrap_or_default();
+            sender != own && message["sender_id"].to_string() != human && sender.contains("-bot@")
+        });
+        if other_bot {
+            return Ok(true);
+        }
+    }
+    Ok(!latest(serde_json::json!(stream), "1")?.is_empty())
 }
